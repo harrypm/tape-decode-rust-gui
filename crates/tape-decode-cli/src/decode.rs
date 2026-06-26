@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -217,6 +217,11 @@ impl Tape {
         self.buf.read().unwrap().len
     }
 
+    /// The current drop threshold: samples before this are no longer buffered.
+    fn drop_threshold(&self) -> u64 {
+        self.buf.read().unwrap().drop_threshold
+    }
+
     /// Mark that no decoder needs samples before `offset`, dropping them.
     fn set_drop_threshold(&self, offset: u64) {
         let mut state = self.buf.write().unwrap();
@@ -337,6 +342,7 @@ fn decode_segment(
     start_needed: u64,
     tx: &SyncSender<WorkerMsg>,
     stop: &AtomicBool,
+    consumed_pos: &AtomicU64,
 ) -> Result<Option<DecoderMetadata>> {
     let mut decoder = Decoder::new(Arc::clone(spec), start_offset);
     let chunk = spec.readlen() + 4 * BLOCKSIZE;
@@ -384,6 +390,9 @@ fn decode_segment(
             window.drain(..(consumed - base) as usize);
         }
         base = consumed;
+        // Publish how far this decoder has advanced so the orchestrator can drop
+        // tape input no live decoder needs any more.
+        consumed_pos.store(base, Ordering::Relaxed);
     }
 
     Ok(decoder.metadata())
@@ -402,9 +411,10 @@ struct Worker {
     /// This worker's decoder metadata, once it has reported it (see
     /// [`WorkerMsg::Meta`]); used to keep the JSON sidecar's metadata populated.
     metadata: Option<DecoderMetadata>,
-    /// First input sample this worker reads (see [`first_needed_offset`]); the
-    /// orchestrator uses the lowest live worker's value as the tape drop point.
-    start_needed: u64,
+    /// The decoder's current `consumed` offset (the first sample it still needs),
+    /// published each decode step. The orchestrator drops tape input below the
+    /// minimum across live workers (see [`MtOrchestrator::update_drop_threshold`]).
+    consumed: Arc<AtomicU64>,
 }
 
 impl Worker {
@@ -417,12 +427,21 @@ impl Worker {
     ) -> Self {
         let (tx, rx) = sync_channel(capacity);
         let stop = Arc::new(AtomicBool::new(false));
+        let consumed = Arc::new(AtomicU64::new(start_needed));
         let spec = Arc::clone(spec);
         let tape = Arc::clone(tape);
         let worker_stop = Arc::clone(&stop);
+        let worker_consumed = Arc::clone(&consumed);
         let handle = thread::spawn(move || {
-            let outcome =
-                decode_segment(&spec, &tape, start_offset, start_needed, &tx, &worker_stop);
+            let outcome = decode_segment(
+                &spec,
+                &tape,
+                start_offset,
+                start_needed,
+                &tx,
+                &worker_stop,
+                &worker_consumed,
+            );
             // If we were stopped, the receiver is gone and the result is moot.
             if !worker_stop.load(Ordering::Relaxed) {
                 let _ = tx.send(WorkerMsg::Done(outcome));
@@ -437,7 +456,7 @@ impl Worker {
             produced_any: false,
             outcome: None,
             metadata: None,
-            start_needed,
+            consumed,
         }
     }
 
@@ -547,13 +566,30 @@ impl<'a> MtOrchestrator<'a> {
     /// unassigned segments. The input length is unknown until the source hits
     /// EOF; once known, segments past it are skipped (a worker started past EOF
     /// would simply produce nothing, so this is only an optimization).
-    fn refill(&mut self) -> Result<()> {
+    ///
+    /// Speculative workers beyond `next_seg` are throttled: one is spawned only
+    /// while its start stays within a budget ahead of the tape's drop threshold
+    /// (which tracks the slowest live decoder). This stops the look-ahead cohort
+    /// from lapping a pinned authoritative thread when stitches keep failing,
+    /// which would otherwise let the buffered span grow without bound. The
+    /// current and next segments are always spawnable, so stitching can always
+    /// make progress.
+    fn refill(&mut self, next_seg: u64) -> Result<()> {
+        // One full cohort of segments ahead of the slowest decoder.
+        let budget = (self.mt.threads as u64)
+            .saturating_mul(self.mt.distance_size)
+            .saturating_mul(self.spf);
         while self.pool.len() < self.mt.threads {
             let seg = self.next_unassigned;
             if let Some(len) = self.tape.known_len() {
                 if self.seg_start(seg) >= len {
                     break;
                 }
+            }
+            if seg > next_seg
+                && self.seg_start(seg) > self.tape.drop_threshold().saturating_add(budget)
+            {
+                break;
             }
             let start_offset = self.seg_start(seg);
             let start_needed = first_needed_offset(&self.spec, start_offset)?;
@@ -570,13 +606,21 @@ impl<'a> MtOrchestrator<'a> {
         Ok(())
     }
 
-    /// Tell the tape that no decoder needs input before segment `seg`'s start,
-    /// so the buffered prefix below it can be dropped. Call only after any
-    /// lower-numbered worker has been shut down (joined), since the threshold
-    /// must never pass a worker that is still reading.
-    fn mark_drop_to(&self, seg: u64) {
-        if let Some(worker) = self.pool.get(&seg) {
-            self.tape.set_drop_threshold(worker.start_needed);
+    /// Drop tape input that no live decoder needs any more, using the minimum
+    /// `consumed` offset published across the pool. Each worker only ever reads
+    /// at or beyond its own `consumed`, so this never drops input still in use,
+    /// and a shut-down (joined) worker no longer constrains it. As the
+    /// authoritative decoder advances this follows it forward, keeping the
+    /// buffered span bounded even while it stays authoritative across many
+    /// discarded segments.
+    fn update_drop_threshold(&self) {
+        if let Some(min) = self
+            .pool
+            .values()
+            .map(|w| w.consumed.load(Ordering::Relaxed))
+            .min()
+        {
+            self.tape.set_drop_threshold(min);
         }
     }
 
@@ -663,17 +707,19 @@ impl<'a> MtOrchestrator<'a> {
     /// The stitching loop. Commits fields in order, leaving `final_metadata` set
     /// to the metadata of whichever decoder reached end of input.
     fn decode_loop(&mut self) -> Result<()> {
-        self.refill()?;
         let mut current_seg = 0u64;
+        let mut next_seg = 1u64;
+        self.refill(next_seg)?;
         if !self.pool.contains_key(&current_seg) {
             // Nothing decodable (input shorter than the start offset).
             return Ok(());
         }
-        let mut next_seg = 1u64;
-        // The lowest live segment fixes how far the tape may drop its prefix.
-        self.mark_drop_to(current_seg);
 
         loop {
+            // Follow the slowest live decoder forward, releasing buffered input
+            // it (and therefore every decoder) no longer needs.
+            self.update_drop_threshold();
+
             let region_start = self.seg_start(next_seg);
             let region_end = self.seg_start(next_seg + 1);
 
@@ -743,7 +789,7 @@ impl<'a> MtOrchestrator<'a> {
                 self.shutdown_worker(current_seg);
                 current_seg = next_seg;
                 next_seg += 1;
-                self.mark_drop_to(current_seg);
+                self.update_drop_threshold();
             } else {
                 // The whole overlap disagreed: the earlier decoder stays
                 // authoritative and the later decoder's work is thrown away.
@@ -760,7 +806,7 @@ impl<'a> MtOrchestrator<'a> {
                 }
                 next_seg += 1;
             }
-            self.refill()?;
+            self.refill(next_seg)?;
         }
     }
 
