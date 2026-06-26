@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -159,30 +159,42 @@ fn fields_match(a: &WriteableField, b: &WriteableField, mt: &MtParams) -> bool {
 
 // --- Shared sequential input ------------------------------------------------
 //
-// Every worker shares one view of the input through `Tape`, which streams the
-// source exactly once, in order, behind a mutex. A worker asks for the samples
-// at an absolute offset; if they are already buffered it copies them out,
-// otherwise it reads the next sequential block from the source itself. Reading
-// is therefore cooperative — no dedicated reader thread — and any byte is read
-// at most once. The orchestrator marks how far the lowest-numbered live decoder
-// has advanced via `set_drop_threshold`; everything before that is dropped, so
-// memory stays bounded to the span the live decoders actually cover. Because
-// the source is only ever read forward, this works on non-seekable inputs such
-// as pipes.
+// Every worker shares one view of the input through `Tape`. A dedicated
+// forerunner thread owns the source and is the only thing that reads it: it
+// streams the input forward, once, into a shared buffer, staying ahead of the
+// furthest sample any decoder has asked for. Workers are pure consumers — they
+// take the buffer lock, copy out the samples they need, and, if those samples
+// are not buffered yet, park on a condvar until the forerunner delivers them.
+// The forerunner reads into a private scratch buffer with no lock held, so the
+// read syscall never blocks the decoders, and takes the lock only to append the
+// block it just read. The orchestrator advances `set_drop_threshold` to follow
+// the slowest live decoder; everything before that is dropped, bounding memory.
+// Because the source is only ever read forward, this works on non-seekable
+// inputs such as pipes.
 
-/// Largest block read from the source while holding the lock, so other workers
-/// can interleave cached reads between blocks during the initial fan-out.
+/// Largest block the forerunner reads from the source in one syscall.
 const TAPE_READ_BLOCK: usize = 1 << 20;
 
+/// How far ahead of the furthest requested sample the forerunner keeps the
+/// buffer filled, so decoders find their input already buffered. The buffered
+/// span stays bounded because worker demand is bounded (see `refill`).
+const TAPE_READ_AHEAD: u64 = 8 << 20;
+
 struct Tape {
-    // The buffered samples sit behind an `RwLock` so the lagging decoders, which
-    // only copy out already-buffered data, can do so concurrently; extending the
-    // frontier or dropping the prefix takes the exclusive lock. The source lives
-    // behind its own mutex (it is `Send` but not `Sync`) and is only touched
-    // while extending, always after taking the write lock, so reads stay strictly
-    // ordered and there is a single lock order (buffer then source).
-    buf: RwLock<BufState>,
-    source: Mutex<DecodeReader>,
+    /// Buffered input and its bookkeeping. A plain mutex (rather than an
+    /// `RwLock`) suffices now that the read syscall happens off-lock in the
+    /// forerunner: every critical section here is a short copy or append.
+    state: Mutex<BufState>,
+    /// Signalled when the forerunner extends the frontier or reaches EOF; waited
+    /// on by workers blocked for samples not yet buffered.
+    data_ready: Condvar,
+    /// Signalled when a worker raises `demand` (or on shutdown); waited on by the
+    /// forerunner once it has read far enough ahead of demand.
+    more_demand: Condvar,
+    /// Tells the forerunner to stop reading and exit.
+    stop: AtomicBool,
+    /// The forerunner's join handle, taken and joined by `shutdown`.
+    forerunner: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct BufState {
@@ -196,39 +208,55 @@ struct BufState {
     len: Option<u64>,
     /// Samples before this offset are no longer needed by any decoder.
     drop_threshold: u64,
+    /// Highest absolute offset any worker has requested. The forerunner reads up
+    /// to `demand + TAPE_READ_AHEAD`. Reading ahead of actual demand (rather than
+    /// to a fixed cap) means it can never park while a worker still waits for
+    /// input it chose not to read, so there is no risk of deadlock.
+    demand: u64,
 }
 
 impl Tape {
-    fn new(source: DecodeReader) -> Self {
-        Self {
-            buf: RwLock::new(BufState {
+    /// Build the tape and spawn its forerunner thread, which owns `source` for
+    /// the rest of the decode. The returned handle must be passed to
+    /// [`Tape::shutdown`] once decoding finishes so the thread is joined.
+    fn new(source: DecodeReader) -> Arc<Self> {
+        let tape = Arc::new(Self {
+            state: Mutex::new(BufState {
                 buf: Vec::new(),
                 start: 0,
                 eof: false,
                 len: None,
                 drop_threshold: 0,
+                demand: 0,
             }),
-            source: Mutex::new(source),
-        }
+            data_ready: Condvar::new(),
+            more_demand: Condvar::new(),
+            stop: AtomicBool::new(false),
+            forerunner: Mutex::new(None),
+        });
+        let runner = Arc::clone(&tape);
+        let handle = thread::spawn(move || runner.forerun(source));
+        *tape.forerunner.lock().unwrap() = Some(handle);
+        tape
     }
 
     /// Total input length in samples, or `None` until the source hits EOF.
     fn known_len(&self) -> Option<u64> {
-        self.buf.read().unwrap().len
+        self.state.lock().unwrap().len
     }
 
     /// The current drop threshold: samples before this are no longer buffered.
     fn drop_threshold(&self) -> u64 {
-        self.buf.read().unwrap().drop_threshold
+        self.state.lock().unwrap().drop_threshold
     }
 
     /// Mark that no decoder needs samples before `offset`, dropping them.
     fn set_drop_threshold(&self, offset: u64) {
-        let mut state = self.buf.write().unwrap();
+        let mut state = self.state.lock().unwrap();
         if offset > state.drop_threshold {
             state.drop_threshold = offset;
+            Self::drop_prefix(&mut state);
         }
-        Self::drop_prefix(&mut state);
     }
 
     fn drop_prefix(state: &mut BufState) {
@@ -256,11 +284,11 @@ impl Tape {
         got
     }
 
-    /// Fill `dst` with samples starting at absolute offset `from`, reading the
-    /// source forward as needed. Returns the number of samples written and
-    /// whether end of input was reached (fewer than `dst.len()` were available),
-    /// or `None` if `stop` was raised. `from` must be at or after the current
-    /// drop threshold, which every active worker satisfies.
+    /// Fill `dst` with samples starting at absolute offset `from`, blocking until
+    /// the forerunner has buffered them (or end of input is reached). Returns the
+    /// number of samples written and whether end of input was reached (fewer than
+    /// `dst.len()` were available), or `None` if `stop` was raised. `from` must be
+    /// at or after the current drop threshold, which every active worker satisfies.
     fn read_into(
         &self,
         from: u64,
@@ -269,40 +297,72 @@ impl Tape {
     ) -> Result<Option<(usize, bool)>> {
         let want = dst.len() as u64;
         let target = from + want;
+        let mut state = self.state.lock().unwrap();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            // Fast path: the samples are already buffered (or input has ended), so
-            // copy them out under a shared read lock, concurrently with the other
-            // lagging decoders.
-            {
-                let state = self.buf.read().unwrap();
-                if state.eof || state.start + state.buf.len() as u64 >= target {
-                    let got = Self::copy_out(&state, from, dst);
-                    return Ok(Some((got, (got as u64) < want)));
-                }
+            if state.eof || state.start + state.buf.len() as u64 >= target {
+                let got = Self::copy_out(&state, from, dst);
+                return Ok(Some((got, (got as u64) < want)));
             }
-            // Slow path: extend the frontier by reading the next sequential block
-            // straight into the buffer's tail. Releasing the lock after each block
-            // lets readers copy cached data between blocks instead of waiting for
-            // one big read.
-            let mut state = self.buf.write().unwrap();
+            // Not buffered yet: raise the forerunner's read target to cover us,
+            // then wait for it to deliver. Because it always reads ahead of
+            // `demand`, raising it can never leave us blocked on skipped input.
+            if target > state.demand {
+                state.demand = target;
+                self.more_demand.notify_one();
+            }
+            state = self.data_ready.wait(state).unwrap();
+        }
+    }
+
+    /// The forerunner thread body: own the source and stream it forward into the
+    /// shared buffer, keeping the frontier `TAPE_READ_AHEAD` ahead of the furthest
+    /// requested sample. The read syscall runs with no lock held; the lock is
+    /// taken only to append the block (or mark EOF) and wake waiting workers.
+    fn forerun(&self, mut source: DecodeReader) {
+        let mut scratch = vec![0.0f32; TAPE_READ_BLOCK];
+        loop {
+            // Decide how much to read, or park until demand grows (or we stop).
+            let to_read = {
+                let mut state = self.state.lock().unwrap();
+                loop {
+                    if self.stop.load(Ordering::Relaxed) || state.eof {
+                        return;
+                    }
+                    let frontier = state.start + state.buf.len() as u64;
+                    let target = state.demand.saturating_add(TAPE_READ_AHEAD);
+                    if frontier < target {
+                        break (target - frontier).min(TAPE_READ_BLOCK as u64) as usize;
+                    }
+                    state = self.more_demand.wait(state).unwrap();
+                }
+            };
+            // Read the next block with no lock held. `DecodeReader::read` already
+            // turns I/O errors into a clean EOF, so this never actually errors.
+            let n = source.read(&mut scratch[..to_read]).unwrap_or(0);
+            let mut state = self.state.lock().unwrap();
             Self::drop_prefix(&mut state);
-            let frontier = state.start + state.buf.len() as u64;
-            if !state.eof && frontier < target {
-                let read_len = (target - frontier).min(TAPE_READ_BLOCK as u64) as usize;
-                let old = state.buf.len();
-                state.buf.resize(old + read_len, 0.0);
-                let mut source = self.source.lock().unwrap();
-                let n = source.read(&mut state.buf[old..])?;
-                drop(source);
-                state.buf.truncate(old + n);
-                if n == 0 {
-                    state.eof = true;
-                    state.len = Some(state.start + state.buf.len() as u64);
-                }
+            if n == 0 {
+                state.eof = true;
+                state.len = Some(state.start + state.buf.len() as u64);
+            } else {
+                state.buf.extend_from_slice(&scratch[..n]);
             }
+            self.data_ready.notify_all();
+        }
+    }
+
+    /// Stop the forerunner thread and join it. Must be called once decoding is
+    /// finished (the workers, which hold their own `Arc<Tape>`, are joined first),
+    /// so the thread releases its reference and the tape can be dropped.
+    fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.more_demand.notify_all();
+        let handle = self.forerunner.lock().unwrap().take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
         }
     }
 }
@@ -415,6 +475,9 @@ struct Worker {
     /// published each decode step. The orchestrator drops tape input below the
     /// minimum across live workers (see [`MtOrchestrator::update_drop_threshold`]).
     consumed: Arc<AtomicU64>,
+    /// Shared tape, kept so [`Worker::shutdown`] can wake the worker if it is
+    /// parked waiting for samples that will never come.
+    tape: Arc<Tape>,
 }
 
 impl Worker {
@@ -429,6 +492,7 @@ impl Worker {
         let stop = Arc::new(AtomicBool::new(false));
         let consumed = Arc::new(AtomicU64::new(start_needed));
         let spec = Arc::clone(spec);
+        let worker_tape = Arc::clone(tape);
         let tape = Arc::clone(tape);
         let worker_stop = Arc::clone(&stop);
         let worker_consumed = Arc::clone(&consumed);
@@ -457,6 +521,7 @@ impl Worker {
             outcome: None,
             metadata: None,
             consumed,
+            tape: worker_tape,
         }
     }
 
@@ -515,6 +580,9 @@ impl Worker {
     /// a worker parked on a full channel.
     fn shutdown(mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wake the worker if it is parked in the tape waiting for samples; the
+        // dropped receiver below only unblocks one parked on a full send.
+        self.tape.data_ready.notify_all();
         let handle = self.handle.take();
         // Dropping the receiver closes the channel, unblocking a worker parked on
         // a full send so the join below cannot hang.
@@ -825,10 +893,10 @@ impl<'a> MtOrchestrator<'a> {
 /// `mt.threads == 0` is handled by the serial path. `start_offset` is the
 /// absolute sample where decoding begins (`--start-fileloc`, 0 by default).
 ///
-/// The input is streamed once through a shared [`Tape`]; the workers never
-/// reopen, seek, or stat it, so this runs on non-seekable inputs such as pipes.
-/// The decoders themselves skip past the input before `start_offset`, so
-/// reading still begins at the stream's start.
+/// The input is streamed once, forward, by the [`Tape`]'s forerunner thread;
+/// the workers never read, reopen, seek, or stat it, so this runs on
+/// non-seekable inputs such as pipes. The decoders themselves skip past the
+/// input before `start_offset`, so reading still begins at the stream's start.
 pub fn decode_all_mt(
     reader: DecodeReader,
     writer: &mut DecodeWriter,
@@ -836,7 +904,7 @@ pub fn decode_all_mt(
     mt: MtParams,
     start_offset: u64,
 ) -> Result<()> {
-    let tape = Arc::new(Tape::new(reader));
+    let tape = Tape::new(reader);
     let spf = spec.samples_per_field();
     // A worker only needs to bank its own segment plus the handful of fields it
     // overlaps into the next segment to hand off (a one-field warm-up plus
@@ -856,7 +924,7 @@ pub fn decode_all_mt(
     let mut orchestrator = MtOrchestrator {
         writer,
         spec,
-        tape,
+        tape: Arc::clone(&tape),
         mt,
         global_base: start_offset,
         spf,
@@ -867,5 +935,9 @@ pub fn decode_all_mt(
         metadata: None,
         final_metadata: None,
     };
-    orchestrator.run()
+    // Tear down the forerunner thread whether the decode succeeded or failed
+    // (the orchestrator has already joined every worker by the time it returns).
+    let result = orchestrator.run();
+    tape.shutdown();
+    result
 }
