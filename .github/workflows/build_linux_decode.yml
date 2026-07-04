@@ -29,13 +29,13 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             appimagetool: appimagetool-x86_64.AppImage
             appimage_arch: x86_64
             artifact_suffix: x86_64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             appimagetool: appimagetool-aarch64.AppImage
             appimage_arch: aarch64
