@@ -152,7 +152,7 @@ jobs:
             appimage_arch: x86_64
             artifact_suffix: x86_64
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             appimagetool: appimagetool-aarch64.AppImage
             appimage_arch: aarch64
