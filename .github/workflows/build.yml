@@ -146,13 +146,13 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             appimagetool: appimagetool-x86_64.AppImage
             appimage_arch: x86_64
             artifact_suffix: x86_64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             appimagetool: appimagetool-aarch64.AppImage
             appimage_arch: aarch64
@@ -458,18 +458,12 @@ jobs:
         run: |
           set -euo pipefail
           DMG_NAME="decode-rust-gui-macos_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.dmg"
-          ZIP_NAME="decode-rust-gui-macos_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
           rm -rf build/dmg
           mkdir -p build/dmg
           cp -R dist/decode-rust-gui.app build/dmg/
           ln -s /Applications build/dmg/Applications
           hdiutil create -volname "decode-rust-gui" -srcfolder build/dmg -ov -format UDZO "$DMG_NAME"
           test -f "$DMG_NAME"
-
-          # zip the DMG (consistent with Linux AppImage packaging)
-          zip -j "$ZIP_NAME" "$DMG_NAME"
-          test -f "$ZIP_NAME"
-          test "$(unzip -Z1 "$ZIP_NAME" | wc -l)" -eq 1
 
           # smoke (force v1 on x86-64, none on arm)
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
@@ -483,9 +477,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: decode-rust-gui-macos-${{ matrix.artifact_suffix }}
-          path: |
-            decode-rust-gui-macos_*_${{ matrix.artifact_suffix }}.dmg
-            decode-rust-gui-macos_*_${{ matrix.artifact_suffix }}.zip
+          path: decode-rust-gui-macos_*_${{ matrix.artifact_suffix }}.dmg
           if-no-files-found: warn
 
   release:
@@ -533,7 +525,7 @@ jobs:
               - Windows (x86-64)
               - Linux (x86-64 + arm64 AppImage, packaged in ZIP)
               - macOS (x86-64 + arm64)
-            - 7 GUI artifacts total: 1 Windows exe, 2 Linux ZIPs, 4 macOS artifacts (DMG+zip × 2).
+            - 5 GUI artifacts total: 1 Windows exe, 2 Linux ZIPs, 2 macOS DMGs.
             - The tape-decode core implementation is bundled inside (v1 default + v2/v3/v4 level-optimized variants for x86-64 where applicable).
             - Profiles list and list-profiles verification included.
 
@@ -553,6 +545,4 @@ jobs:
             artifacts/decode-rust-gui-linux-x86_64/*.zip
             artifacts/decode-rust-gui-linux-arm64/*.zip
             artifacts/decode-rust-gui-macos-x86_64/*.dmg
-            artifacts/decode-rust-gui-macos-x86_64/*.zip
             artifacts/decode-rust-gui-macos-arm64/*.dmg
-            artifacts/decode-rust-gui-macos-arm64/*.zip
