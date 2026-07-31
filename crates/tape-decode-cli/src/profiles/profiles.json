@@ -1953,5 +1953,157 @@
       "hz_ire": 8400.0,
       "ire0": 4560000.0
     }
+  },
+  "SECAM_VHS": {
+    "format": {
+      "base": "VHS",
+      "decoder_params": {
+        "boost_ramp": {
+          "start_freq": 626953.0
+        },
+        "chroma_bpf_lower": 350000.0,
+        "chroma_bpf_upper": 1300000.0,
+        "chroma_carrier_mult": 4,
+        "chroma_rotation": null,
+        "color_under_carrier": 1082031.25,
+        "fm_audio_channels": {
+          "channel_0_freq": 1400000.0,
+          "channel_1_freq": 1800000.0
+        },
+        "nonlinear": {
+          "exp_scaling": 0.06,
+          "scaling_1": 0.5,
+          "use_sub_deemphasis": false
+        },
+        "video_bpf": null,
+        "video_hpf_extra": 1320000.0,
+        "video_hpf_extra_order": 12,
+        "video_lpf_extra": 5910000.0,
+        "video_lpf_extra_order": 20,
+        "video_lpf_freq": 3400000.0,
+        "video_lpf_order": 6,
+        "video_lpf_supergauss": false,
+        "video_rf_peak": {
+          "freq": 4300000.0
+        }
+      }
+    },
+    "sys_params": {
+      "base": "SECAM"
+    }
+  },
+  "SECAM_VHS_EP": {
+    "format": {
+      "base": "VHS",
+      "decoder_params": {
+        "boost_ramp": {
+          "start_freq": 626953.0
+        },
+        "chroma_bpf_lower": 350000.0,
+        "chroma_bpf_upper": 1300000.0,
+        "chroma_carrier_mult": 4,
+        "chroma_rotation": null,
+        "color_under_carrier": 1082031.25,
+        "fm_audio_channels": {
+          "channel_0_freq": 1400000.0,
+          "channel_1_freq": 1800000.0
+        },
+        "nonlinear": {
+          "exp_scaling": 0.12,
+          "scaling_1": 0.1,
+          "use_sub_deemphasis": true
+        },
+        "video_bpf": null,
+        "video_hpf_extra": 1320000.0,
+        "video_hpf_extra_order": 12,
+        "video_lpf_extra": 5910000.0,
+        "video_lpf_extra_order": 20,
+        "video_lpf_freq": 3400000.0,
+        "video_lpf_order": 6,
+        "video_lpf_supergauss": false,
+        "video_rf_peak": {
+          "freq": 4300000.0
+        }
+      }
+    },
+    "sys_params": {
+      "base": "SECAM"
+    }
+  },
+  "SECAM_VHS_LP": {
+    "format": {
+      "base": "VHS",
+      "decoder_params": {
+        "boost_ramp": {
+          "start_freq": 626953.0
+        },
+        "chroma_bpf_lower": 350000.0,
+        "chroma_bpf_upper": 1300000.0,
+        "chroma_carrier_mult": 4,
+        "chroma_rotation": null,
+        "color_under_carrier": 1082031.25,
+        "fm_audio_channels": {
+          "channel_0_freq": 1400000.0,
+          "channel_1_freq": 1800000.0
+        },
+        "nonlinear": {
+          "exp_scaling": 0.12,
+          "scaling_1": 0.1,
+          "use_sub_deemphasis": true
+        },
+        "video_bpf": null,
+        "video_hpf_extra": 1320000.0,
+        "video_hpf_extra_order": 12,
+        "video_lpf_extra": 5910000.0,
+        "video_lpf_extra_order": 20,
+        "video_lpf_freq": 3400000.0,
+        "video_lpf_order": 6,
+        "video_lpf_supergauss": false,
+        "video_rf_peak": {
+          "freq": 4300000.0
+        }
+      }
+    },
+    "sys_params": {
+      "base": "SECAM"
+    }
+  },
+  "SECAM_VHS_VP": {
+    "format": {
+      "base": "VHS",
+      "decoder_params": {
+        "boost_ramp": {
+          "start_freq": 626953.0
+        },
+        "chroma_bpf_lower": 350000.0,
+        "chroma_bpf_upper": 1300000.0,
+        "chroma_carrier_mult": 4,
+        "chroma_rotation": null,
+        "color_under_carrier": 1082031.25,
+        "fm_audio_channels": {
+          "channel_0_freq": 1400000.0,
+          "channel_1_freq": 1800000.0
+        },
+        "nonlinear": {
+          "exp_scaling": 0.12,
+          "scaling_1": 0.1,
+          "use_sub_deemphasis": true
+        },
+        "video_bpf": null,
+        "video_hpf_extra": 1320000.0,
+        "video_hpf_extra_order": 12,
+        "video_lpf_extra": 5910000.0,
+        "video_lpf_extra_order": 20,
+        "video_lpf_freq": 3400000.0,
+        "video_lpf_order": 6,
+        "video_lpf_supergauss": false,
+        "video_rf_peak": {
+          "freq": 4300000.0
+        }
+      }
+    },
+    "sys_params": {
+      "base": "SECAM"
+    }
   }
 }

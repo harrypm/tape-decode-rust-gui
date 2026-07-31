@@ -236,5 +236,18 @@
       0.0,
       0.0
     ]
+  },
+  "SECAM": {
+    "base": "Base625",
+    "color_system": "SECAM",
+    "burst_abs_ref": 5000.0,
+    "fsc_mhz": 4.43361875,
+    "hz_ire": 7000.0,
+    "ire0": 4100000.0,
+    "nonlinear_deviation": null,
+    "track_ire0_offset": [
+      0.0,
+      0.0
+    ]
   }
 }

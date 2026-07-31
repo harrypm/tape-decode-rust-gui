@@ -20,6 +20,7 @@ mod chroma;
 mod demodblock;
 mod dropouts;
 mod field;
+mod secam;
 mod sync;
 mod vits;
 
@@ -27,6 +28,7 @@ use chroma::decode_chroma;
 use demodblock::decode_video_block;
 use dropouts::detect_dropouts_rf;
 use field::predecode_field_from_rawdecode;
+use secam::SecamState;
 use sync::ResyncState;
 use vits::compute_vits_metrics;
 
@@ -1219,6 +1221,7 @@ pub struct Decoder {
     inter_field_state: InterFieldState,
     resync_state: ResyncState,
     chroma_afc_state: ChromaAfcState,
+    secam_state: SecamState,
     fields: Vec<FieldInfoEntry>,
     seen_first_field: bool,
     metadata_field: Option<MetadataFieldState>,
@@ -1240,6 +1243,7 @@ impl Decoder {
             inter_field_state,
             resync_state,
             chroma_afc_state,
+            secam_state: SecamState::new(),
             fields: Vec::new(),
             seen_first_field: false,
             metadata_field: None,
@@ -1421,8 +1425,12 @@ impl Decoder {
                             outlinecount: field_obj.outlinecount,
                         });
 
-                        picture_chroma =
-                            decode_chroma(&mut field_obj, &self.spec, &mut self.chroma_afc_state)?;
+                        picture_chroma = decode_chroma(
+                            &mut field_obj,
+                            &self.spec,
+                            &mut self.chroma_afc_state,
+                            &mut self.secam_state,
+                        )?;
 
                         field_obj.prevfield = None;
                         field_done = true;

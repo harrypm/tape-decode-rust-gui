@@ -168,6 +168,13 @@ pub struct DecoderParams {
     pub chroma_bpf_order: usize,
     pub chroma_bpf_lower: f64,
     pub chroma_rotation: Option<[i64; 2]>,
+    /// Carrier restore multiplier. When set (SECAM method 1, recorded through a
+    /// divide-by-4 counter per IEC 60774-1 6.4.1), the up-conversion multiplies
+    /// the under-carrier phase by this factor instead of mixing against a
+    /// heterodyne, and the restored chroma block sits at
+    /// `color_under_carrier * chroma_carrier_mult`.
+    #[serde(default)]
+    pub chroma_carrier_mult: Option<f64>,
     pub chroma_audio_notch_freq: f64,
     pub chroma_offset: f64,
     pub fm_audio_channels: Option<FmAudioChannels>,

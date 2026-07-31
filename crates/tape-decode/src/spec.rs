@@ -65,6 +65,7 @@ pub struct DecoderSpec {
     pub(crate) decoder_chroma_bpf_order: usize,
     pub(crate) decoder_chroma_bpf_lower: f64,
     pub(crate) decoder_chroma_rotation: Option<[i64; 2]>,
+    pub(crate) decoder_chroma_carrier_mult: Option<f64>,
     pub(crate) decoder_chroma_offset: f64,
     pub(crate) decoder_nonlinear_highpass_limit_l: f32,
     pub(crate) decoder_nonlinear_highpass_limit_h: f32,
@@ -112,6 +113,11 @@ pub struct DecoderSpec {
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_final: Vec<Sos<f32>>,
+    /// Post-TBC band-pass around the SECAM method 1 under carriers, applied
+    /// ahead of the analytic-signal phase measurement the x4 multiplication is
+    /// derived from (out-of-band noise there turns straight into phase noise,
+    /// which the multiplication amplifies by 4). Only built for method 1.
+    pub(crate) chroma_filter_secam_under: Option<Vec<Sos<f32>>>,
 
     pub(crate) video_rf_filter: Vec<f32>,
     pub(crate) video_notch_filter: Option<Vec<f32>>,
@@ -426,18 +432,33 @@ impl DecoderSpec {
             .map(|boost_bpf| request.high_boost.unwrap_or(boost_bpf.mult) as f32);
 
         let chroma_bandpass_final = |color_under_format: bool| -> Result<Vec<Sos<f64>>> {
-            let (lower, upper) = if color_under_format {
-                ((color_under / 1e6) * 0.9, (color_under / 1e6) * 0.75)
-            } else {
-                // Using a narrow filter atm as this is just used for picking out
-                // burst signal in this case.
-                (0.1, 0.1)
+            let (band_low, band_high) = match decoder_params.chroma_carrier_mult {
+                // SECAM method 1: anchor the band on the restored chroma block
+                // (color_under * 4 = 4.328125 MHz) rather than on fsc. A tight
+                // top edge matters: it suppresses high-side FM splatter from
+                // saturated transitions, which otherwise reaches downstream
+                // discriminators with wide take-off filters and turns into
+                // clicks/streaks at colour edges.
+                Some(carrier_mult) if color_under_format => {
+                    let center = color_under * carrier_mult / 1e6;
+                    (center - 0.67, center + 0.55)
+                }
+                _ => {
+                    let (lower, upper) = if color_under_format {
+                        ((color_under / 1e6) * 0.9, (color_under / 1e6) * 0.75)
+                    } else {
+                        // Using a narrow filter atm as this is just used for picking out
+                        // burst signal in this case.
+                        (0.1, 0.1)
+                    };
+                    (sys_params.fsc_mhz - lower, sys_params.fsc_mhz + upper)
+                }
             };
             butter_sos(
                 4,
                 &[
-                    (sys_params.fsc_mhz - lower) / chroma_afc_out_frequency_half,
-                    (sys_params.fsc_mhz + upper) / chroma_afc_out_frequency_half,
+                    band_low / chroma_afc_out_frequency_half,
+                    band_high / chroma_afc_out_frequency_half,
                 ],
                 FilterBandType::Bandpass,
             )
@@ -527,6 +548,21 @@ impl DecoderSpec {
 
         // Post-TBC chroma filter at output sample rate (4fsc).
         let chroma_filter_final = chroma_bandpass_final(is_color_under)?;
+        // SECAM method 1 pre-restoration band-pass. The band covers the carrier
+        // pair (1.0625/1.1015625 MHz) plus the +-126.5 kHz max deviation and as
+        // much sideband room as fits below the luma FM area.
+        // Note: order is doubled since this runs through filtfilt.
+        let chroma_filter_secam_under = match decoder_params.chroma_carrier_mult {
+            Some(_) if is_color_under => Some(butter_sos(
+                3,
+                &[
+                    0.55 / chroma_afc_out_frequency_half,
+                    1.30 / chroma_afc_out_frequency_half,
+                ],
+                FilterBandType::Bandpass,
+            )?),
+            _ => None,
+        };
         let (rf_chroma_heterodyne, rf_fsc_wave) = if is_color_under {
             let cc_freq_mhz = color_under / 1e6;
             let het_freq = sys_params.fsc_mhz + cc_freq_mhz;
@@ -625,6 +661,7 @@ impl DecoderSpec {
             decoder_chroma_bpf_order: decoder_params.chroma_bpf_order,
             decoder_chroma_bpf_lower: decoder_params.chroma_bpf_lower,
             decoder_chroma_rotation: decoder_params.chroma_rotation,
+            decoder_chroma_carrier_mult: decoder_params.chroma_carrier_mult,
             decoder_chroma_offset: decoder_params.chroma_offset,
             decoder_nonlinear_highpass_limit_l: decoder_params.nonlinear.highpass_limit_l,
             decoder_nonlinear_highpass_limit_h: decoder_params.nonlinear.highpass_limit_h,
@@ -665,6 +702,7 @@ impl DecoderSpec {
             chroma_filter_deemphasis: chroma_filter_deemphasis.map(store_sos_filter),
             chroma_filter_audio_notch: chroma_filter_audio_notch.map(store_sos_filter),
             chroma_filter_final: store_sos_filter(chroma_filter_final),
+            chroma_filter_secam_under: chroma_filter_secam_under.map(store_sos_filter),
 
             video_rf_filter: store_real_filter(video_rf_filter),
             video_notch_filter: video_notch_filter.map(store_real_filter),
