@@ -145,6 +145,7 @@ fn process_chroma_internal(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
+    secam_state: &mut SecamState,
 ) -> Result<Vec<u16>> {
     let chroma_downscaled = downscale_raw_vec(field, None, None, None, true)?;
     let mut chroma: Vec<f32> = if spec.chroma_afc_enabled() {
@@ -163,6 +164,20 @@ fn process_chroma_internal(
         chroma_downscaled
     };
     let burstarea = padded_burst_area(spec);
+
+    if let Some(carrier_mult) = spec.decoder_chroma_carrier_mult {
+        // SECAM method 1 restores the chroma block by phase multiplication
+        // rather than by mixing, so it skips the shared up-conversion path
+        // below entirely.
+        return secam::process_chroma_secam_method1(
+            field,
+            spec,
+            secam_state,
+            &chroma,
+            burstarea,
+            carrier_mult,
+        );
+    }
 
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
@@ -210,10 +225,11 @@ pub(crate) fn decode_chroma(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
+    secam_state: &mut SecamState,
 ) -> Result<Option<Vec<u16>>> {
     if !spec.rf_write_chroma || spec.color_system == ColorSystem::Monochrome {
         return Ok(None);
     }
-    let upconverted = process_chroma_internal(field, spec, chroma_afc_state)?;
+    let upconverted = process_chroma_internal(field, spec, chroma_afc_state, secam_state)?;
     Ok(Some(upconverted))
 }
