@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::Result;
 use tape_decode::{Decoder, DecoderMetadata, DecoderSpec, LumaOutput, WriteableField, BLOCKSIZE};
@@ -183,6 +184,19 @@ struct Tape {
     // ordered and there is a single lock order (buffer then source).
     buf: RwLock<BufState>,
     source: Mutex<DecodeReader>,
+    // Live workers' read positions, registered before each worker thread starts
+    // reading and removed when it stops. Together with `spawn_floor`, they let
+    // the prefix drop while decoders cross a field-less stretch (no stitches, so
+    // `set_drop_threshold` never fires there): nothing below the slowest live
+    // reader and the next possible spawn can ever be read again. Positions only
+    // move forward. Lock order: `buf` write lock first, then `readers`.
+    readers: Mutex<Vec<(u64, Arc<AtomicU64>)>>,
+    next_reader_id: AtomicU64,
+    /// Lowest offset any *future* worker may need: `first_needed_offset` of the
+    /// next unassigned segment, `u64::MAX` once no further spawn is possible.
+    /// Updated only by the orchestrator, and only after the segment below it has
+    /// been spawned and registered, so it is always a safe lower bound.
+    spawn_floor: AtomicU64,
 }
 
 struct BufState {
@@ -209,7 +223,39 @@ impl Tape {
                 drop_threshold: 0,
             }),
             source: Mutex::new(source),
+            readers: Mutex::new(Vec::new()),
+            next_reader_id: AtomicU64::new(0),
+            spawn_floor: AtomicU64::new(0),
         }
+    }
+
+    /// Register a worker's read position before its thread starts reading.
+    fn register_reader(&self, pos: Arc<AtomicU64>) -> u64 {
+        let id = self.next_reader_id.fetch_add(1, Ordering::Relaxed);
+        self.readers.lock().unwrap().push((id, pos));
+        id
+    }
+
+    fn deregister_reader(&self, id: u64) {
+        self.readers
+            .lock()
+            .unwrap()
+            .retain(|(other, _)| *other != id);
+    }
+
+    fn set_spawn_floor(&self, offset: u64) {
+        self.spawn_floor.store(offset, Ordering::Relaxed);
+    }
+
+    /// Lowest offset any current or future reader may still need.
+    fn retention_floor(&self) -> u64 {
+        let readers = self.readers.lock().unwrap();
+        readers
+            .iter()
+            .map(|(_, pos)| pos.load(Ordering::Relaxed))
+            .chain(std::iter::once(self.spawn_floor.load(Ordering::Relaxed)))
+            .min()
+            .unwrap_or(0)
     }
 
     /// Total input length in samples, or `None` until the source hits EOF.
@@ -283,6 +329,13 @@ impl Tape {
             // lets readers copy cached data between blocks instead of waiting for
             // one big read.
             let mut state = self.buf.write().unwrap();
+            // Advance the drop point to the dynamic retention floor, so memory
+            // stays bounded even when no stitch moves `set_drop_threshold` (long
+            // unrecorded stretches produce no fields, hence no stitches).
+            let floor = self.retention_floor();
+            if floor > state.drop_threshold {
+                state.drop_threshold = floor;
+            }
             Self::drop_prefix(&mut state);
             let frontier = state.start + state.buf.len() as u64;
             if !state.eof && frontier < target {
@@ -335,6 +388,7 @@ fn decode_segment(
     tape: &Tape,
     start_offset: u64,
     start_needed: u64,
+    pos: &AtomicU64,
     tx: &SyncSender<WorkerMsg>,
     stop: &AtomicBool,
 ) -> Result<Option<DecoderMetadata>> {
@@ -384,6 +438,10 @@ fn decode_segment(
             window.drain(..(consumed - base) as usize);
         }
         base = consumed;
+        // Publish how far this decoder has consumed, so the orchestrator can
+        // track its crawl through field-less stretches and the tape can drop
+        // the prefix behind the slowest live decoder.
+        pos.store(base, Ordering::Relaxed);
     }
 
     Ok(decoder.metadata())
@@ -405,6 +463,19 @@ struct Worker {
     /// First input sample this worker reads (see [`first_needed_offset`]); the
     /// orchestrator uses the lowest live worker's value as the tape drop point.
     start_needed: u64,
+    /// The worker's consumed input offset, updated by its thread (see
+    /// [`decode_segment`]); also registered with the tape as a reader position.
+    pos: Arc<AtomicU64>,
+}
+
+/// Outcome of waiting on a worker for a bounded time.
+enum FillWait {
+    /// At least one field is buffered.
+    Ready,
+    /// The worker finished; nothing more will come.
+    Finished,
+    /// Nothing arrived within the timeout; the worker is still running.
+    Timeout,
 }
 
 impl Worker {
@@ -420,9 +491,23 @@ impl Worker {
         let spec = Arc::clone(spec);
         let tape = Arc::clone(tape);
         let worker_stop = Arc::clone(&stop);
+        let pos = Arc::new(AtomicU64::new(start_needed));
+        // Register before the thread starts so the tape can never drop samples
+        // this worker is about to read. The thread deregisters itself on exit,
+        // which `shutdown` observes through its join.
+        let reader_id = tape.register_reader(Arc::clone(&pos));
+        let worker_pos = Arc::clone(&pos);
         let handle = thread::spawn(move || {
-            let outcome =
-                decode_segment(&spec, &tape, start_offset, start_needed, &tx, &worker_stop);
+            let outcome = decode_segment(
+                &spec,
+                &tape,
+                start_offset,
+                start_needed,
+                &worker_pos,
+                &tx,
+                &worker_stop,
+            );
+            tape.deregister_reader(reader_id);
             // If we were stopped, the receiver is gone and the result is moot.
             if !worker_stop.load(Ordering::Relaxed) {
                 let _ = tx.send(WorkerMsg::Done(outcome));
@@ -438,42 +523,66 @@ impl Worker {
             outcome: None,
             metadata: None,
             start_needed,
+            pos,
+        }
+    }
+
+    fn absorb(&mut self, msg: WorkerMsg) {
+        match msg {
+            WorkerMsg::Field(field) => {
+                self.produced_any = true;
+                self.buf.push_back(field);
+            }
+            WorkerMsg::Meta(metadata) => {
+                self.metadata = Some(metadata);
+            }
+            WorkerMsg::Done(result) => {
+                self.outcome = Some(result);
+                self.finished = true;
+            }
+        }
+    }
+
+    /// Wait up to `timeout` for a field to be buffered.
+    fn fill_wait(&mut self, timeout: Duration) -> FillWait {
+        loop {
+            if !self.buf.is_empty() {
+                return FillWait::Ready;
+            }
+            if self.finished {
+                return FillWait::Finished;
+            }
+            match self.rx.recv_timeout(timeout) {
+                Ok(msg) => self.absorb(msg),
+                Err(RecvTimeoutError::Timeout) => return FillWait::Timeout,
+                // Channel closed without a Done (e.g. the thread panicked).
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.finished = true;
+                    return FillWait::Finished;
+                }
+            }
         }
     }
 
     /// Ensure at least one field is buffered, blocking on the worker if needed.
     /// Returns false once the worker has finished with nothing more to give.
     fn fill(&mut self) -> bool {
-        if !self.buf.is_empty() {
-            return true;
-        }
-        if self.finished {
-            return false;
-        }
         loop {
-            match self.rx.recv() {
-                Ok(WorkerMsg::Field(field)) => {
-                    self.produced_any = true;
-                    self.buf.push_back(field);
-                    return true;
-                }
-                // Metadata arrives out of band; record it and keep waiting for the
-                // field this call promised to buffer.
-                Ok(WorkerMsg::Meta(metadata)) => {
-                    self.metadata = Some(metadata);
-                }
-                Ok(WorkerMsg::Done(result)) => {
-                    self.outcome = Some(result);
-                    self.finished = true;
-                    return false;
-                }
-                // Channel closed without a Done (e.g. the thread panicked).
-                Err(_) => {
-                    self.finished = true;
-                    return false;
-                }
+            match self.fill_wait(Duration::from_secs(3600)) {
+                FillWait::Ready => return true,
+                FillWait::Finished => return false,
+                FillWait::Timeout => {}
             }
         }
+    }
+
+    /// Whether the worker has produced nothing at all so far, checked without
+    /// blocking (pending messages are drained first).
+    fn idle_and_empty(&mut self) -> bool {
+        while let Ok(msg) = self.rx.try_recv() {
+            self.absorb(msg);
+        }
+        self.buf.is_empty() && !self.produced_any
     }
 
     fn peek(&mut self) -> Option<&WriteableField> {
@@ -543,6 +652,17 @@ impl<'a> MtOrchestrator<'a> {
                 .saturating_mul(self.spf)
     }
 
+    /// Segment whose region contains the absolute sample offset.
+    fn region_of(&self, sample: u64) -> u64 {
+        let region_len = self.mt.distance_size.saturating_mul(self.spf).max(1);
+        sample.saturating_sub(self.global_base) / region_len
+    }
+
+    /// Lowest live segment strictly after `seg`, if any.
+    fn lowest_live_after(&self, seg: u64) -> Option<u64> {
+        self.pool.keys().copied().filter(|&other| other > seg).min()
+    }
+
     /// Keep up to `threads` workers decoding ahead, spawning the lowest
     /// unassigned segments. The input length is unknown until the source hits
     /// EOF; once known, segments past it are skipped (a worker started past EOF
@@ -567,6 +687,20 @@ impl<'a> MtOrchestrator<'a> {
             self.pool.insert(seg, worker);
             self.next_unassigned += 1;
         }
+        self.update_spawn_floor()
+    }
+
+    /// Publish to the tape the lowest offset the next spawned worker could
+    /// read, so the retention floor never passes a future spawn. Called after
+    /// every change of `next_unassigned`, which itself only happens after the
+    /// segments below it were spawned (and registered as readers).
+    fn update_spawn_floor(&self) -> Result<()> {
+        let start = self.seg_start(self.next_unassigned);
+        let floor = match self.tape.known_len() {
+            Some(len) if start >= len => u64::MAX,
+            _ => first_needed_offset(&self.spec, start)?,
+        };
+        self.tape.set_spawn_floor(floor);
         Ok(())
     }
 
@@ -660,6 +794,74 @@ impl<'a> MtOrchestrator<'a> {
         self.write_output()
     }
 
+    /// Block until the current decoder has a buffered field (true) or finished
+    /// (false). While it crawls a field-less stretch (unrecorded tape), watch
+    /// its published position instead of sleeping: segments it fully passes
+    /// without producing anything were searched or carrier-checked sample by
+    /// sample, so idle workers there are culled, replacements spawn ahead of
+    /// the crawl, and the tape's retention floor follows the pack instead of
+    /// freezing at the last stitch.
+    fn wait_current(&mut self, current_seg: u64, next_seg: &mut u64) -> Result<bool> {
+        loop {
+            let wait = self
+                .pool
+                .get_mut(&current_seg)
+                .unwrap()
+                .fill_wait(Duration::from_millis(250));
+            match wait {
+                FillWait::Ready => return Ok(true),
+                FillWait::Finished => return Ok(false),
+                FillWait::Timeout => self.advance_past_crawl(current_seg, next_seg)?,
+            }
+        }
+    }
+
+    /// React to the current decoder having crawled past later segments without
+    /// producing a field: cull the idle workers it overtook and spawn fresh
+    /// ones ahead of its position. A worker that produced or buffered fields is
+    /// never culled here — the normal stitch path decides its fate.
+    fn advance_past_crawl(&mut self, current_seg: u64, next_seg: &mut u64) -> Result<()> {
+        let pos = self
+            .pool
+            .get(&current_seg)
+            .unwrap()
+            .pos
+            .load(Ordering::Relaxed);
+        let tol = self.spf / 2;
+        let mut culled = false;
+        while self
+            .seg_start(next_seg.saturating_add(1))
+            .saturating_add(tol)
+            < pos
+        {
+            let Some(worker) = self.pool.get_mut(next_seg) else {
+                break;
+            };
+            if !worker.idle_and_empty() {
+                break;
+            }
+            self.shutdown_worker(*next_seg);
+            *next_seg += 1;
+            culled = true;
+        }
+        if culled {
+            self.next_unassigned = self
+                .next_unassigned
+                .max(*next_seg)
+                .max(self.region_of(pos).saturating_add(1));
+            self.refill()?;
+            if let Some(live) = self.lowest_live_after(current_seg) {
+                *next_seg = live;
+            }
+            tracing::debug!(
+                position = pos,
+                next_seg = *next_seg,
+                "Culled segments overtaken by a field-less crawl; spawning ahead of it"
+            );
+        }
+        Ok(())
+    }
+
     /// The stitching loop. Commits fields in order, leaving `final_metadata` set
     /// to the metadata of whichever decoder reached end of input.
     fn decode_loop(&mut self) -> Result<()> {
@@ -674,55 +876,93 @@ impl<'a> MtOrchestrator<'a> {
         self.mark_drop_to(current_seg);
 
         loop {
-            let region_start = self.seg_start(next_seg);
-            let region_end = self.seg_start(next_seg + 1);
-
             // No further segment exists: the current decoder is the final
             // authority; drain it to end of input.
             if !self.pool.contains_key(&next_seg) {
-                while let Some(field) = self.pool.get_mut(&current_seg).unwrap().pop() {
-                    self.commit(field)?;
-                }
-                self.absorb_outcome(current_seg)?;
-                return Ok(());
-            }
-
-            // Phase 1: commit the current decoder's fields up to the next
-            // decoder's region.
-            loop {
-                let reached = match self.pool.get_mut(&current_seg).unwrap().peek() {
-                    Some(field) => field.info.file_loc >= region_start,
-                    // Current reached end of input before the next region; it is
-                    // the final authority.
-                    None => {
+                loop {
+                    if !self.wait_current(current_seg, &mut next_seg)? {
                         self.absorb_outcome(current_seg)?;
                         return Ok(());
                     }
-                };
-                if reached {
+                    // Waiting may have spawned workers and moved `next_seg` onto
+                    // a live segment; resume stitching against it.
+                    if self.pool.contains_key(&next_seg) {
+                        break;
+                    }
+                    let field = self
+                        .pool
+                        .get_mut(&current_seg)
+                        .unwrap()
+                        .buf
+                        .pop_front()
+                        .unwrap();
+                    self.commit(field)?;
+                }
+                continue;
+            }
+
+            // Phase 1: commit the current decoder's fields up to the next
+            // decoder's region. `next_seg` (and with it the region boundary) can
+            // move while waiting, so the boundary is re-read every iteration.
+            loop {
+                if !self.wait_current(current_seg, &mut next_seg)? {
+                    // Current reached end of input before the next region; it is
+                    // the final authority.
+                    self.absorb_outcome(current_seg)?;
+                    return Ok(());
+                }
+                let region_start = self.seg_start(next_seg);
+                let worker = self.pool.get_mut(&current_seg).unwrap();
+                if worker.buf.front().unwrap().info.file_loc >= region_start {
                     break;
                 }
-                let field = self.pool.get_mut(&current_seg).unwrap().pop().unwrap();
+                let field = worker.buf.pop_front().unwrap();
                 self.commit(field)?;
+            }
+            if !self.pool.contains_key(&next_seg) {
+                continue;
             }
 
             // Phase 2: in the overlap window, commit the current decoder's fields
             // while comparing against the next decoder, until `overlap_count`
-            // consecutive fields match (stitch) or the window is exhausted.
+            // consecutive fields match (stitch) or the window is exhausted. If
+            // waiting moves `next_seg`, restart from phase 1 against the new
+            // segment.
             let mut run = 0usize;
             let mut stitched = false;
+            let mut window_had_fields = false;
+            let mut moved = false;
             loop {
-                let in_window = match self.pool.get_mut(&current_seg).unwrap().peek() {
-                    Some(field) => field.info.file_loc < region_end,
-                    None => {
-                        self.absorb_outcome(current_seg)?;
-                        return Ok(());
-                    }
-                };
-                if !in_window {
+                let seg_before = next_seg;
+                if !self.wait_current(current_seg, &mut next_seg)? {
+                    self.absorb_outcome(current_seg)?;
+                    return Ok(());
+                }
+                if next_seg != seg_before {
+                    moved = true;
                     break;
                 }
-                let field = self.pool.get_mut(&current_seg).unwrap().pop().unwrap();
+                let region_end = self.seg_start(next_seg + 1);
+                let front_loc = self
+                    .pool
+                    .get_mut(&current_seg)
+                    .unwrap()
+                    .buf
+                    .front()
+                    .unwrap()
+                    .info
+                    .file_loc;
+                if front_loc >= region_end {
+                    break;
+                }
+                window_had_fields = true;
+                let field = self
+                    .pool
+                    .get_mut(&current_seg)
+                    .unwrap()
+                    .buf
+                    .pop_front()
+                    .unwrap();
                 let matched = self.compare_with_next(next_seg, &field);
                 self.commit(field)?;
                 if matched {
@@ -734,6 +974,45 @@ impl<'a> MtOrchestrator<'a> {
                 } else {
                     run = 0;
                 }
+            }
+            if moved {
+                continue;
+            }
+
+            if !stitched && !window_had_fields {
+                // The current decoder produced no field anywhere inside `next`'s
+                // region: unrecorded tape or a long unsyncable stretch. Stepping
+                // one region at a time would spawn a worker into every field-less
+                // region only to discard it; instead, jump the stitch point
+                // straight to the region holding the current decoder's next real
+                // field and drop the stale workers between.
+                let next_loc = self
+                    .pool
+                    .get_mut(&current_seg)
+                    .unwrap()
+                    .buf
+                    .front()
+                    .map(|field| field.info.file_loc)
+                    .expect("phase 2 exits with a buffered field when not at end of input");
+                let target_seg = self.region_of(next_loc).max(next_seg.saturating_add(1));
+                tracing::info!(
+                    next_field_sample = next_loc,
+                    skipped_regions = target_seg - next_seg,
+                    "No fields decoded inside the next thread's region; jumping the stitch point past the field-less stretch"
+                );
+                let stale: Vec<u64> = self
+                    .pool
+                    .keys()
+                    .copied()
+                    .filter(|&seg| seg > current_seg && seg < target_seg)
+                    .collect();
+                for seg in stale {
+                    self.shutdown_worker(seg);
+                }
+                self.next_unassigned = self.next_unassigned.max(target_seg);
+                self.refill()?;
+                next_seg = self.lowest_live_after(current_seg).unwrap_or(target_seg);
+                continue;
             }
 
             if stitched {

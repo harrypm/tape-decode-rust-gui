@@ -308,6 +308,19 @@ pub(crate) fn decode_video_block(
     let mut raw_env: Vec<f32> = hilbert.iter().map(|c| c.re.abs()).collect();
     roll(&mut raw_env, 4);
 
+    // Unrecorded-tape statistics: accumulate the analytic-signal magnitude
+    // (the true RF envelope, free of the rectification ripple `raw_env`
+    // carries) over the same usable range the output channels keep. This uses
+    // the pre-high-boost analytic signal so the statistic does not depend on
+    // the boost feedback path.
+    for c in &hilbert[BLOCKCUT..BLOCKSIZE - BLOCKCUT_END] {
+        let re = f64::from(c.re);
+        let im = f64::from(c.im);
+        let power = re * re + im * im;
+        out.env_norm_sum += power.sqrt();
+        out.env_norm_sumsq += power;
+    }
+
     // `env` is a block-sized buffer that feeds the envelope output channel, the
     // mean below, and the high-boost gain.
     let env = sosfiltfilt_f32(&spec.video_env_post_filter, &raw_env);

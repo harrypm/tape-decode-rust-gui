@@ -830,6 +830,12 @@ struct VideoChannels {
     demod_05: Vec<f32>,
     demod_burst: Vec<f32>,
     envelope: Vec<f32>,
+    /// Sum and sum-of-squares of the analytic-signal magnitude (the true RF
+    /// envelope) over the usable samples of every decoded block. Predecode
+    /// derives the envelope coefficient of variation from these to recognize
+    /// unrecorded tape without another pass over the data.
+    env_norm_sum: f64,
+    env_norm_sumsq: f64,
 }
 
 #[derive(Clone)]
@@ -854,6 +860,18 @@ struct InterFieldState {
     prev_first_field: i64,
     track_phase: Option<i64>,
     compute_linelocs_issues: bool,
+    /// Unrecorded-tape gate: armed after a sync search fails, disarmed when a
+    /// field start is found again. While armed, windows whose envelope
+    /// statistics are pure noise are skipped whole without a sync search.
+    blank_gate_armed: bool,
+    /// Lowest window envelope mean seen so far; a noise-CV window is only
+    /// skipped while its level also stays near this floor.
+    envelope_floor: f64,
+    /// Start of the current skip run and its progress in input samples; used
+    /// only to throttle skip logging.
+    blank_run_start_sample: Option<u64>,
+    blank_run_skipped_samples: f64,
+    blank_run_logged_samples: f64,
 }
 
 impl InterFieldState {
@@ -865,6 +883,11 @@ impl InterFieldState {
             prev_first_field: -1,
             track_phase,
             compute_linelocs_issues: false,
+            blank_gate_armed: false,
+            envelope_floor: f64::INFINITY,
+            blank_run_start_sample: None,
+            blank_run_skipped_samples: 0.0,
+            blank_run_logged_samples: 0.0,
         }
     }
 }
@@ -1339,6 +1362,8 @@ impl Decoder {
                     demod_05: Vec::with_capacity(field_capacity),
                     demod_burst: Vec::with_capacity(field_capacity),
                     envelope: Vec::with_capacity(field_capacity),
+                    env_norm_sum: 0.0,
+                    env_norm_sumsq: 0.0,
                 };
                 let mut completed_blocks = true;
                 for b in requested_begin..requested_end {

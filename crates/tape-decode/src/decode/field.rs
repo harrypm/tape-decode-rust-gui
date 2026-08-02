@@ -1,6 +1,23 @@
 use super::sync::try_get_pulses;
 use super::*;
 
+/// Envelope coefficient of variation above which a window is treated as
+/// unrecorded tape. The analytic-signal envelope of band-limited Gaussian
+/// noise is Rayleigh-distributed (CV ≈ 0.52), while an FM carrier keeps the
+/// CV below ~0.3 even on weak tapes, and any window carrying enough carrier
+/// to yield a decodable field pulls its CV far below this threshold.
+const BLANK_ENV_CV_MIN: f64 = 0.40;
+/// A noise-CV window is only skipped while its envelope mean also stays
+/// within this factor of the lowest window mean seen, so long RF dropouts on
+/// recorded tape (high CV but carrier-level mean) keep the full sync search.
+const BLANK_ENV_FLOOR_FACTOR: f64 = 2.0;
+/// Lines of overlap kept between consecutive skipped windows, so a vsync
+/// train straddling a window edge is always seen whole by the next window.
+const BLANK_SKIP_MARGIN_LINES: f64 = 50.0;
+/// Interval between progress logs while skipping unrecorded tape, in seconds
+/// of tape.
+const BLANK_LOG_INTERVAL_SECS: f64 = 10.0;
+
 fn demod_burst(
     burst: &[f32],
     burst_start: usize,
@@ -778,6 +795,74 @@ pub(crate) fn predecode_field_from_rawdecode(
         }
     }
 
+    // --- Unrecorded-tape fast path ---------------------------------------
+    // Once a full sync search has failed (gate armed), windows whose RF
+    // envelope is statistically pure noise are skipped whole, without level
+    // detection or another sync search. The stride stops short of the window
+    // end, so every input sample is still demodulated and inspected by some
+    // window, and the first window showing a carrier again goes through the
+    // normal search below: no decodable field can be jumped over.
+    let env_sample_count = pending_field.data.video.demod.len();
+    let mut window_looks_unrecorded = false;
+    if env_sample_count > 0 {
+        let count = env_sample_count as f64;
+        let env_mean = pending_field.data.video.env_norm_sum / count;
+        let env_var =
+            (pending_field.data.video.env_norm_sumsq / count - env_mean * env_mean).max(0.0);
+        let env_cv = if env_mean > 0.0 {
+            env_var.sqrt() / env_mean
+        } else {
+            0.0
+        };
+        let looks_unrecorded = env_cv > BLANK_ENV_CV_MIN
+            && env_mean < BLANK_ENV_FLOOR_FACTOR * inter_field_state.envelope_floor;
+        window_looks_unrecorded = looks_unrecorded;
+        inter_field_state.envelope_floor = inter_field_state.envelope_floor.min(env_mean);
+        if inter_field_state.blank_gate_armed && looks_unrecorded {
+            let window_end =
+                pending_field.data.startloc as f64 + pending_field.data.input_len as f64;
+            let margin = BLANK_SKIP_MARGIN_LINES * spec.linelen() as f64;
+            let stride = (window_end - margin - scheduled_readloc as f64)
+                .max(pending_field.inlinelen * 100.0);
+            if inter_field_state.blank_run_start_sample.is_none() {
+                inter_field_state.blank_run_start_sample = Some(scheduled_readloc);
+                inter_field_state.blank_run_skipped_samples = 0.0;
+                inter_field_state.blank_run_logged_samples = 0.0;
+                tracing::warn!(
+                    env_cv,
+                    env_mean,
+                    "No RF carrier at {:.1}s - fast-skipping unrecorded tape",
+                    scheduled_readloc as f64 / spec.freq_hz(),
+                );
+            }
+            inter_field_state.blank_run_skipped_samples += stride;
+            if inter_field_state.blank_run_skipped_samples
+                - inter_field_state.blank_run_logged_samples
+                >= BLANK_LOG_INTERVAL_SECS * spec.freq_hz()
+            {
+                inter_field_state.blank_run_logged_samples =
+                    inter_field_state.blank_run_skipped_samples;
+                tracing::info!(
+                    "still no RF carrier - skipped {:.1}s of unrecorded tape so far",
+                    inter_field_state.blank_run_skipped_samples / spec.freq_hz(),
+                );
+            }
+            inter_field_state.compute_linelocs_issues = true;
+            pending_field.nextfieldoffset = Some(stride);
+            return Ok(DecodeFieldResult {
+                field: pending_field,
+                offset: stride,
+            });
+        }
+        if inter_field_state.blank_run_start_sample.take().is_some() {
+            tracing::info!(
+                "RF carrier resumed at {:.1}s after skipping {:.1}s of unrecorded tape",
+                scheduled_readloc as f64 / spec.freq_hz(),
+                inter_field_state.blank_run_skipped_samples / spec.freq_hz(),
+            );
+        }
+    }
+
     let has_levels = resync_state.has_levels();
     let do_level_detect =
         !spec.rf_saved_levels || !has_levels || inter_field_state.compute_linelocs_issues;
@@ -813,6 +898,7 @@ pub(crate) fn predecode_field_from_rawdecode(
         let proclines = pending_field.outlinecount + pending_field.lineoffset + 10;
 
         if let Some(first_hsync_loc) = res.first_hsync_loc {
+            inter_field_state.blank_gate_armed = false;
             let line0loc = res.line0loc.context("missing line0loc with first hsync")?;
             let first_hsync_loc_line = res
                 .first_hsync_loc_line
@@ -1086,11 +1172,28 @@ pub(crate) fn predecode_field_from_rawdecode(
             }
         } else {
             tracing::warn!("Unable to determine start of field - dropping field");
+            inter_field_state.blank_gate_armed = true;
             pending_field.nextfieldoffset = Some(pending_field.inlinelen * 100.0);
         }
     } else {
         tracing::warn!("Unable to find any sync pulses, jumping 100 ms");
+        inter_field_state.blank_gate_armed = true;
         pending_field.nextfieldoffset = Some(spec.freq_hz() / 10.0);
+    }
+    if pending_field.valid && window_looks_unrecorded {
+        // The sync search "locked" onto envelope noise: levels trained on
+        // earlier signal let noise cross the pulse thresholds. A real field
+        // cannot come out of a window whose envelope is Rayleigh noise (the
+        // level belt above keeps transition windows, which still hold carrier,
+        // out of this branch), so drop the garbage field and arm the fast skip
+        // instead of writing it to the output.
+        tracing::warn!(
+            "Dropping pseudo-locked field decoded from carrier-less noise at {:.1}s",
+            scheduled_readloc as f64 / spec.freq_hz(),
+        );
+        pending_field.valid = false;
+        inter_field_state.blank_gate_armed = true;
+        inter_field_state.compute_linelocs_issues = true;
     }
     let mut pending_offset = pending_field
         .nextfieldoffset
