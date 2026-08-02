@@ -6,6 +6,8 @@ mod metadata;
 mod os;
 mod profiles;
 mod reader;
+mod scan;
+mod trim;
 mod writer;
 
 fn main() {
