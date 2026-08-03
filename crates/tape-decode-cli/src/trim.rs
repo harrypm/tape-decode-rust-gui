@@ -15,6 +15,7 @@ use flacenc::config::Encoder as EncoderConfig;
 use flacenc::encode_fixed_size_frame;
 use flacenc::error::Verify as _;
 use flacenc::source::{Fill as _, FrameBuf};
+use md5::{Digest as _, Md5};
 use symphonia_bundle_flac::{FlacDecoder, FlacReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -224,6 +225,12 @@ struct FlacStreamWriter {
     staging: Vec<i32>,
     frame_number: usize,
     total_frames: u64,
+    /// STREAMINFO MD5, accumulated over the samples as they are encoded.
+    /// `flacenc`'s own `Context` cannot be used here: it zero-pads every
+    /// `fill_interleaved` call up to a full block, which corrupts the digest
+    /// on the short final block.
+    md5: Md5,
+    bytes_per_sample: usize,
 }
 
 impl FlacStreamWriter {
@@ -262,6 +269,8 @@ impl FlacStreamWriter {
             staging: Vec::new(),
             frame_number: 0,
             total_frames: 0,
+            md5: Md5::new(),
+            bytes_per_sample: bits.div_ceil(8) as usize,
         })
     }
 
@@ -285,6 +294,12 @@ impl FlacStreamWriter {
         let frame = encode_fixed_size_frame(&self.config, &framebuf, self.frame_number, &self.info)
             .map_err(|err| anyhow::anyhow!("flacenc encode failed: {err:?}"))?;
         self.info.update_frame_info(&frame);
+        // The digest covers the samples as little-endian two's-complement
+        // integers of `bits_per_sample`, in interleaved order.
+        for sample in interleaved {
+            self.md5
+                .update(&sample.to_le_bytes()[..self.bytes_per_sample]);
+        }
         let mut sink = ByteSink::new();
         frame
             .write(&mut sink)
@@ -301,8 +316,15 @@ impl FlacStreamWriter {
             self.encode_block(&block)?;
         }
         self.info.set_total_samples(self.total_frames as usize);
-        // The MD5 field stays zeroed ("not computed"), which the FLAC spec
-        // allows; frame CRCs still protect the data.
+        // `update_frame_info` shrinks the minimum block size down to the short
+        // final frame, which marks the stream as variable-block-size: decoders
+        // then cannot map the fixed-block-size frame numbers the frames carry
+        // back to sample positions, and the output stops being seekable. Every
+        // frame but the last is a full block, so pin both sizes to it.
+        self.info
+            .set_block_sizes(BLOCK_SIZE, BLOCK_SIZE)
+            .map_err(|err| anyhow::anyhow!("flacenc block sizes rejected: {err}"))?;
+        self.info.set_md5_digest(&self.md5.clone().finalize().into());
         let mut sink = ByteSink::new();
         self.info
             .write(&mut sink)
