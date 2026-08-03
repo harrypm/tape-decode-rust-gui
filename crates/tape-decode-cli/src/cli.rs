@@ -23,6 +23,9 @@ use tape_decode::{
 
 const DEFAULT_THRESHOLD_P_DDD: f32 = 0.18;
 const DEFAULT_HYSTERESIS: f32 = 1.25;
+/// Below this, a FLAC header rate cannot be the RF rate of a capture (the
+/// lowest capture rates in use are a few Msps).
+const MIN_RF_SAMPLE_RATE_HZ: f64 = 1.0e6;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliFieldOrderAction {
@@ -478,13 +481,21 @@ fn run_trim(cli: TrimArgs) -> Result<()> {
     let sample_rate_hz = match cli.frequency {
         Some(mhz) => mhz * 1.0e6,
         None => {
-            // RF captures carry unreliable rate tags (e.g. 28636 for 28.636
-            // Msps), so --frequency should always be passed for those; the
-            // header rate is only a sane default for ordinary audio files.
+            // RF captures carry rate tags scaled down to fit the 20-bit
+            // STREAMINFO field (28636 for 28.636 Msps), so trimming one at its
+            // header rate would cut a thousandth of the intended range. Only
+            // accept the header rate when it is itself an RF rate.
             let rate = f64::from(crate::trim::RawFlacReader::open(&cli.infile)?.sample_rate);
-            tracing::info!(
-                "no --frequency given; using the FLAC header rate {rate} Hz (RF captures need an explicit --frequency)"
-            );
+            if rate < MIN_RF_SAMPLE_RATE_HZ {
+                bail!(
+                    "the FLAC header of {} reports {rate} Hz, which is not an RF sample rate: \
+                     captures tag the rate in kHz (28636 means 28.636 Msps). \
+                     Re-run with the real rate, e.g. --frequency {:.3}",
+                    cli.infile.display(),
+                    rate / 1.0e3,
+                );
+            }
+            tracing::info!("no --frequency given; using the FLAC header rate {rate} Hz");
             rate
         }
     };
@@ -529,6 +540,16 @@ fn run_trim(cli: TrimArgs) -> Result<()> {
     let stats = crate::trim::cut_flac(&cli.infile, &output, start_frame, end_frame, cli.overwrite)?;
     if stats.truncated_input {
         tracing::warn!("input ended on a truncated FLAC frame (interrupted capture); trimmed up to the last decodable sample");
+    }
+    if let Some(requested) = end_frame.map(|end| end.saturating_sub(start_frame)) {
+        if stats.frames_written < requested {
+            tracing::warn!(
+                "input ended {} short of --end: kept {} of the {} samples requested",
+                crate::scan::format_tape_time(requested - stats.frames_written, sample_rate_hz),
+                stats.frames_written,
+                requested,
+            );
+        }
     }
     let in_bytes = std::fs::metadata(&cli.infile).map(|m| m.len()).unwrap_or(0);
     let out_bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
