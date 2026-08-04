@@ -9,7 +9,7 @@
 //! conversion LO to servo (unlike ME-SECAM).
 //!
 //! Ported from the Python implementation in vhs-decode (`vhsdecode/chroma.py`,
-//! commit b13ef2a2).
+//! commit e5d5db5d).
 
 use super::*;
 
@@ -28,8 +28,17 @@ const SECAM_IDENT_MIN_CONFIDENCE: f64 = 0.7;
 
 /// Legal carrier excursion (BT.470). The bell gain lookup is clamped to this so
 /// noise and carrier switch transients don't get boosted by the bell skirts.
+/// Since the phase increments are held inside the same corridor (see
+/// [`SECAM_MAX_DEVIATION`]) this now only catches the smoothing residue, but it
+/// costs nothing and keeps the gain lookup bounded on its own terms.
 const SECAM_FREQ_MIN: f64 = 3.9e6;
 const SECAM_FREQ_MAX: f64 = 4.756e6;
+
+/// Maximum per-component deviation towards the far side of the carrier pair
+/// (BT.470-6 table 2 item 2.12, BT.1700 part C table 4 item 10e): D'B runs
+/// -350/+506 kHz and D'R -506/+350 kHz, so the two mirror across the pair and
+/// share the corridor foB - 350 kHz .. foR + 350 kHz.
+const SECAM_MAX_DEVIATION: f64 = 350e3;
 
 /// Lines below this carry no usable chroma (vertical interval / head switch).
 const STARTING_LINE: usize = 16;
@@ -115,6 +124,35 @@ fn upconvert_secam_method1(
     }
     if len > 1 {
         increments[0] = increments[1];
+    }
+
+    // Clamp the under-carrier deviation to SECAM's legal corridor before the
+    // multiplication scales it up. The studio or broadcast limiter already
+    // bounded the pre-corrected colour difference to these limits, so anything
+    // outside the corridor here is noise or a channel-truncation transient from
+    // the colour-under recording chain: the tape channel cuts the FM sidebands
+    // of pre-emphasized edges, and the resulting instantaneous-frequency
+    // excursions would be multiplied by `carrier_mult` and then smeared into
+    // streaks by every downstream SECAM decoder's de-emphasis. This is the one
+    // stage where they are still small enough to remove cleanly, and clipping
+    // the frequency (rather than the signal) keeps the carrier smooth: a
+    // clipped span just becomes a constant-frequency stretch.
+    //
+    // The increments are the phase derivative already, so unlike the Python
+    // reference there is nothing to reintegrate afterwards - the phase
+    // accumulator below walks these same values, and a legal signal comes
+    // through bit-identical (Python's gradient/cumsum round trip is a 2-tap
+    // average, so it perturbs the phase even where nothing clips). Clipping the
+    // raw backward difference rather than Python's central difference also
+    // clips harder on brief transients: averaging neighbouring increments
+    // spreads a one-sample spike over two, which lets anything up to ~20% over
+    // the ceiling through untouched and halves the clip's bite beyond that. The
+    // two converge as 1/N over an N-sample excursion.
+    let increment_scale = TAU / (carrier_mult * samp_rate);
+    let increment_min = (SECAM_FOB - SECAM_MAX_DEVIATION) * increment_scale;
+    let increment_max = (SECAM_FOR + SECAM_MAX_DEVIATION) * increment_scale;
+    for increment in &mut increments {
+        *increment = increment.clamp(increment_min, increment_max);
     }
 
     // Restored instantaneous frequency for the bell shaping. Central difference
@@ -859,6 +897,43 @@ mod tests {
         let mut red_middle = red.inst_freq[4096..12288].to_vec();
         let red_measured = median_from_values(&mut red_middle) as f64;
         assert!(((red_measured - measured) - (SECAM_FOR - SECAM_FOB)).abs() < 1e3);
+    }
+
+    #[test]
+    fn deviation_outside_the_legal_corridor_is_clamped() {
+        // Excursions past the BT.470 corridor are truncation transients or
+        // noise, never signal, so the restoration pins them to the edge instead
+        // of letting the x4 multiplication scale them up.
+        for (restored_freq, expected) in [
+            (4.9e6, SECAM_FOR + SECAM_MAX_DEVIATION),
+            (3.7e6, SECAM_FOB - SECAM_MAX_DEVIATION),
+        ] {
+            let pass = restore(&under_tone(16384, restored_freq / CARRIER_MULT), 1.0);
+            let mut middle = pass.inst_freq[4096..12288].to_vec();
+            let measured = median_from_values(&mut middle) as f64;
+            // The bell gain lookup clamps 250 Hz inside the corridor top, so
+            // allow a kHz of slack rather than an exact edge match.
+            assert!(
+                (measured - expected).abs() < 1e3,
+                "{restored_freq} Hz restored to {measured} Hz, expected the \
+                 corridor edge at {expected} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn legal_deviation_passes_through_unclamped() {
+        // The corridor edges have to sit outside the deviation the standard
+        // allows, or the clamp would eat real colour difference.
+        for restored_freq in [SECAM_FOR + 200e3, SECAM_FOB - 200e3] {
+            let pass = restore(&under_tone(16384, restored_freq / CARRIER_MULT), 1.0);
+            let mut middle = pass.inst_freq[4096..12288].to_vec();
+            let measured = median_from_values(&mut middle) as f64;
+            assert!(
+                (measured - restored_freq).abs() < 1e3,
+                "{restored_freq} Hz came back as {measured} Hz"
+            );
+        }
     }
 
     #[test]
