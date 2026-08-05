@@ -7,14 +7,16 @@
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, IsTerminal, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
 use flacenc::bitsink::ByteSink;
-use flacenc::component::{BitRepr, StreamInfo};
+use flacenc::component::{BitRepr, Frame, StreamInfo};
 use flacenc::config::Encoder as EncoderConfig;
 use flacenc::encode_fixed_size_frame;
-use flacenc::error::Verify as _;
+use flacenc::error::{Verified, Verify as _};
 use flacenc::source::{Fill as _, FrameBuf};
 use md5::{Digest as _, Md5};
 use symphonia_bundle_flac::{FlacDecoder, FlacReader};
@@ -216,21 +218,85 @@ impl RawFlacReader {
     }
 }
 
+// --- Parallel frame encoding -----------------------------------------------
+
+/// One 4096-sample block awaiting encoding, tagged with its output position.
+struct EncodeJob {
+    frame_number: usize,
+    samples: Vec<i32>,
+}
+
+type EncodeResult = std::result::Result<Frame, String>;
+
+/// A single encoder worker: owns a bounded job queue (bounding how far the
+/// main thread can read ahead) and an unbounded result queue (so the worker
+/// never blocks handing back a finished frame).
+struct Worker {
+    job_tx: SyncSender<EncodeJob>,
+    result_rx: Receiver<EncodeResult>,
+    handle: JoinHandle<()>,
+}
+
+/// Blocks are handed to workers round-robin, so worker `n`'s results arrive
+/// in the same order its jobs were sent (frame `i` is worker `i % N`'s
+/// `i / N`-th job); collecting index `i` from worker `i % N` therefore
+/// reconstructs the original order without a reorder buffer.
+const WORKER_QUEUE_DEPTH: usize = 4;
+
+impl Worker {
+    fn spawn(config: Verified<EncoderConfig>, stream_info: StreamInfo, channels: usize) -> Self {
+        let (job_tx, job_rx) = mpsc::sync_channel::<EncodeJob>(WORKER_QUEUE_DEPTH);
+        let (result_tx, result_rx) = mpsc::channel::<EncodeResult>();
+        let handle = thread::spawn(move || {
+            while let Ok(job) = job_rx.recv() {
+                let frames = job.samples.len() / channels;
+                let result = (|| -> EncodeResult {
+                    let mut framebuf = FrameBuf::with_size(channels, frames)
+                        .map_err(|err| format!("flacenc frame buffer rejected: {err}"))?;
+                    framebuf
+                        .fill_interleaved(&job.samples)
+                        .map_err(|err| format!("flacenc fill failed: {err}"))?;
+                    encode_fixed_size_frame(&config, &framebuf, job.frame_number, &stream_info)
+                        .map_err(|err| format!("flacenc encode failed: {err:?}"))
+                })();
+                let failed = result.is_err();
+                if result_tx.send(result).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        Self {
+            job_tx,
+            result_rx,
+            handle,
+        }
+    }
+}
+
 // --- Streaming FLAC writer -----------------------------------------------------
 
 struct FlacStreamWriter {
     out: BufWriter<std::fs::File>,
-    config: flacenc::error::Verified<EncoderConfig>,
     info: StreamInfo,
     channels: usize,
     staging: Vec<i32>,
-    frame_number: usize,
+    workers: Vec<Worker>,
+    /// Frame number of the next block to submit for encoding.
+    next_frame_number: usize,
+    /// Frame number of the next result to collect and write out; always
+    /// `<= next_frame_number`.
+    collected: usize,
+    /// Maximum number of submitted-but-uncollected jobs kept in flight, so
+    /// all workers stay fed while memory use stays bounded.
+    lookahead: usize,
     total_frames: u64,
-    /// STREAMINFO MD5, accumulated over the samples as they are encoded.
-    /// `flacenc`'s own `Context` cannot be used here: it zero-pads every
-    /// `fill_interleaved` call up to a full block, which corrupts the digest
-    /// on the short final block.
+    /// STREAMINFO MD5, accumulated over the samples as they are submitted
+    /// (independent of encode order). `flacenc`'s own `Context` cannot be
+    /// used here: it zero-pads every `fill_interleaved` call up to a full
+    /// block, which corrupts the digest on the short final block.
     md5: Md5,
+    /// Scratch buffer reused across `submit_block` calls to batch MD5 input.
+    md5_buf: Vec<u8>,
     bytes_per_sample: usize,
 }
 
@@ -262,15 +328,23 @@ impl FlacStreamWriter {
             .map_err(|(_, err)| anyhow::anyhow!("flacenc config rejected: {err}"))?;
         let info = StreamInfo::new(sample_rate as usize, channels, bits as usize)
             .map_err(|err| anyhow::anyhow!("flacenc stream info rejected: {err}"))?;
+        let num_workers = thread::available_parallelism().map_or(1, |n| n.get());
+        let workers: Vec<Worker> = (0..num_workers)
+            .map(|_| Worker::spawn(config.clone(), info.clone(), channels))
+            .collect();
+        let lookahead = num_workers * WORKER_QUEUE_DEPTH;
         Ok(Self {
             out,
-            config,
             info,
             channels,
             staging: Vec::new(),
-            frame_number: 0,
+            workers,
+            next_frame_number: 0,
+            collected: 0,
+            lookahead,
             total_frames: 0,
             md5: Md5::new(),
+            md5_buf: Vec::new(),
             bytes_per_sample: bits.div_ceil(8) as usize,
         })
     }
@@ -280,41 +354,75 @@ impl FlacStreamWriter {
         while self.staging.len() >= BLOCK_SIZE * self.channels {
             let rest = self.staging.split_off(BLOCK_SIZE * self.channels);
             let block = std::mem::replace(&mut self.staging, rest);
-            self.encode_block(&block)?;
+            self.submit_block(block)?;
         }
         Ok(())
     }
 
-    fn encode_block(&mut self, interleaved: &[i32]) -> Result<()> {
+    /// Hands a block to its round-robin worker, then drains any results that
+    /// have fallen further behind than `lookahead` to bound memory use.
+    fn submit_block(&mut self, interleaved: Vec<i32>) -> Result<()> {
         let frames = interleaved.len() / self.channels;
-        let mut framebuf = FrameBuf::with_size(self.channels, frames)
-            .map_err(|err| anyhow::anyhow!("flacenc frame buffer rejected: {err}"))?;
-        framebuf
-            .fill_interleaved(interleaved)
-            .map_err(|err| anyhow::anyhow!("flacenc fill failed: {err}"))?;
-        let frame = encode_fixed_size_frame(&self.config, &framebuf, self.frame_number, &self.info)
-            .map_err(|err| anyhow::anyhow!("flacenc encode failed: {err:?}"))?;
-        self.info.update_frame_info(&frame);
         // The digest covers the samples as little-endian two's-complement
-        // integers of `bits_per_sample`, in interleaved order.
-        for sample in interleaved {
-            self.md5
-                .update(&sample.to_le_bytes()[..self.bytes_per_sample]);
+        // integers of `bits_per_sample`, in interleaved order; recorded here
+        // (submission order) rather than at collection, since encoding runs
+        // out of order across workers. Hashed as one contiguous buffer rather
+        // than per-sample: `Md5::update` calls carry enough fixed overhead
+        // that a billion 1-byte calls (8-bit captures run at tens of
+        // millions of samples/sec) become the bottleneck in their own right.
+        self.md5_buf.clear();
+        self.md5_buf.reserve(interleaved.len() * self.bytes_per_sample);
+        for sample in &interleaved {
+            self.md5_buf
+                .extend_from_slice(&sample.to_le_bytes()[..self.bytes_per_sample]);
         }
+        self.md5.update(&self.md5_buf);
+        self.total_frames += frames as u64;
+        let frame_number = self.next_frame_number;
+        self.next_frame_number += 1;
+        let worker = &self.workers[frame_number % self.workers.len()];
+        worker
+            .job_tx
+            .send(EncodeJob {
+                frame_number,
+                samples: interleaved,
+            })
+            .map_err(|_| anyhow::anyhow!("flac encoder worker thread exited early"))?;
+        while self.next_frame_number - self.collected > self.lookahead {
+            self.collect_one()?;
+        }
+        Ok(())
+    }
+
+    /// Receives and writes out the next frame in order (`self.collected`).
+    fn collect_one(&mut self) -> Result<()> {
+        let worker = &self.workers[self.collected % self.workers.len()];
+        let frame = worker
+            .result_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("flac encoder worker thread exited early"))?
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        self.info.update_frame_info(&frame);
         let mut sink = ByteSink::new();
         frame
             .write(&mut sink)
             .map_err(|err| anyhow::anyhow!("flacenc serialize failed: {err}"))?;
         self.out.write_all(sink.as_slice())?;
-        self.frame_number += 1;
-        self.total_frames += frames as u64;
+        self.collected += 1;
         Ok(())
     }
 
     fn finish(mut self) -> Result<u64> {
         if !self.staging.is_empty() {
             let block = std::mem::take(&mut self.staging);
-            self.encode_block(&block)?;
+            self.submit_block(block)?;
+        }
+        while self.collected < self.next_frame_number {
+            self.collect_one()?;
+        }
+        for worker in self.workers.drain(..) {
+            drop(worker.job_tx);
+            let _ = worker.handle.join();
         }
         self.info.set_total_samples(self.total_frames as usize);
         // `update_frame_info` shrinks the minimum block size down to the short
