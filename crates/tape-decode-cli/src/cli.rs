@@ -383,11 +383,11 @@ struct TrimArgs {
     /// Scan the capture first and cut around the recorded span.
     #[arg(long, conflicts_with_all = ["start", "end"])]
     auto: bool,
-    /// Keep from this time (seconds of tape), default 0.
-    #[arg(long)]
+    /// Keep from this time (H:MM:SS.s, or plain seconds), default 0.
+    #[arg(long, value_parser = parse_tape_time)]
     start: Option<f64>,
-    /// Keep up to this time (seconds of tape), default end of data.
-    #[arg(long)]
+    /// Keep up to this time (H:MM:SS.s, or plain seconds), default end of data.
+    #[arg(long, value_parser = parse_tape_time)]
     end: Option<f64>,
     /// Profile name (required with --auto).
     #[arg(long)]
@@ -405,6 +405,9 @@ struct TrimArgs {
     /// sample rate), written next to it as `<stem>_trimmed.flac`.
     #[arg(long)]
     linear: Option<PathBuf>,
+    /// Output path for --linear; defaults to `<stem>_trimmed.flac` next to it.
+    #[arg(long, requires = "linear")]
+    linear_output: Option<PathBuf>,
     /// Output path; defaults to `<stem>_trimmed.flac` next to the input.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -413,6 +416,39 @@ struct TrimArgs {
     overwrite: bool,
     /// Input RF capture FLAC file.
     infile: PathBuf,
+}
+
+/// Parses a tape timestamp as `H:MM:SS.s`, `MM:SS.s`, or plain seconds
+/// (matching the format `scan::format_tape_time` prints for suggested trim
+/// bounds, so its output can be pasted straight into `--start`/`--end`).
+fn parse_tape_time(value: &str) -> Result<f64> {
+    let value = value.trim();
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() > 3 {
+        bail!("invalid timestamp {value:?}: expected H:MM:SS.s");
+    }
+    if parts.len() == 1 {
+        return value
+            .parse::<f64>()
+            .with_context(|| format!("invalid timestamp {value:?}: expected H:MM:SS.s or seconds"));
+    }
+    let seconds: f64 = parts[parts.len() - 1]
+        .parse()
+        .with_context(|| format!("invalid seconds component in timestamp {value:?}"))?;
+    let minutes: f64 = parts[parts.len() - 2]
+        .parse()
+        .with_context(|| format!("invalid minutes component in timestamp {value:?}"))?;
+    if !(0.0..60.0).contains(&minutes) || !(0.0..60.0).contains(&seconds) {
+        bail!("invalid timestamp {value:?}: minutes and seconds must be in [0, 60)");
+    }
+    let hours: f64 = if parts.len() == 3 {
+        parts[0]
+            .parse()
+            .with_context(|| format!("invalid hours component in timestamp {value:?}"))?
+    } else {
+        0.0
+    };
+    Ok(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
 fn parse_frequency(value: &str) -> Result<f64> {
@@ -532,10 +568,13 @@ fn run_trim(cli: TrimArgs) -> Result<()> {
     let start_frame = (start_secs * sample_rate_hz) as u64;
     let end_frame = end_secs.map(|secs| (secs * sample_rate_hz) as u64);
     tracing::info!(
-        "trimming {} to [{:.2}s, {}]",
+        "trimming {} to [{}, {}]",
         cli.infile.display(),
-        start_secs,
-        end_secs.map_or("end".to_string(), |secs| format!("{secs:.2}s")),
+        crate::scan::format_tape_time(start_frame, sample_rate_hz),
+        end_frame.map_or("end".to_string(), |f| crate::scan::format_tape_time(
+            f,
+            sample_rate_hz
+        )),
     );
     let stats = crate::trim::cut_flac(&cli.infile, &output, start_frame, end_frame, cli.overwrite)?;
     if stats.truncated_input {
@@ -564,7 +603,10 @@ fn run_trim(cli: TrimArgs) -> Result<()> {
 
     if let Some(linear) = &cli.linear {
         let linear_rate = f64::from(crate::trim::RawFlacReader::open(linear)?.sample_rate);
-        let linear_out = crate::trim::default_output_path(linear);
+        let linear_out = cli
+            .linear_output
+            .clone()
+            .unwrap_or_else(|| crate::trim::default_output_path(linear));
         let linear_start = (start_secs * linear_rate) as u64;
         let linear_end = end_secs.map(|secs| (secs * linear_rate) as u64);
         let linear_stats =

@@ -5,8 +5,9 @@
 //! cut the companion linear-audio capture over the same time range.
 
 use std::fs::OpenOptions;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, IsTerminal, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
 use flacenc::bitsink::ByteSink;
@@ -339,6 +340,82 @@ impl FlacStreamWriter {
     }
 }
 
+// --- Progress reporting ----------------------------------------------------
+
+/// Prints a single self-overwriting progress line to stderr while a cut runs.
+/// Cuts run at tens of MiB/s over multi-GiB RF captures, so a silent CLI can
+/// look hung; this is skipped when stderr isn't a terminal (piped/logged
+/// runs), so it never litters non-interactive output with `\r` chatter.
+struct Progress {
+    enabled: bool,
+    start: Instant,
+    last: Instant,
+    bytes_per_frame: u64,
+    total_frames: Option<u64>,
+}
+
+impl Progress {
+    fn new(bytes_per_frame: u64, total_frames: Option<u64>) -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: io::stderr().is_terminal(),
+            start: now,
+            last: now,
+            bytes_per_frame,
+            total_frames,
+        }
+    }
+
+    fn tick(&mut self, frames_done: u64) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last) < Duration::from_millis(200) {
+            return;
+        }
+        self.last = now;
+        let elapsed = self.start.elapsed().as_secs_f64().max(0.001);
+        let done_bytes = frames_done * self.bytes_per_frame;
+        let rate_mib_s = done_bytes as f64 / elapsed / (1024.0 * 1024.0);
+        match self.total_frames.filter(|&total| total > 0) {
+            Some(total) => {
+                let pct = (frames_done as f64 / total as f64 * 100.0).min(100.0);
+                let remaining_bytes = total.saturating_sub(frames_done) * self.bytes_per_frame;
+                let eta_secs = remaining_bytes as f64 / (rate_mib_s * 1024.0 * 1024.0).max(1.0);
+                eprint!(
+                    "\rtrimming: {pct:5.1}%  {rate_mib_s:6.1} MiB/s  eta {}    ",
+                    format_duration(eta_secs as u64),
+                );
+            }
+            None => {
+                eprint!(
+                    "\rtrimming: {:.2} GiB written  {rate_mib_s:6.1} MiB/s    ",
+                    done_bytes as f64 / (1u64 << 30) as f64,
+                );
+            }
+        }
+        let _ = io::stderr().flush();
+    }
+
+    fn finish(&self) {
+        if self.enabled {
+            eprintln!();
+        }
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 // --- Cutting -------------------------------------------------------------------
 
 pub struct CutStats {
@@ -364,7 +441,12 @@ pub fn cut_flac(
         overwrite,
     )?;
     reader.seek_to(start_frame)?;
-    let mut remaining = end_frame.map(|end| end.saturating_sub(start_frame));
+    let total_frames = end_frame.map(|end| end.saturating_sub(start_frame));
+    let mut remaining = total_frames;
+    let bytes_per_frame =
+        reader.channels as u64 * u64::from(reader.bits_per_sample.div_ceil(8));
+    let mut progress = Progress::new(bytes_per_frame, total_frames);
+    let mut frames_done = 0u64;
     let mut chunk: Vec<i32> = Vec::with_capacity(BLOCK_SIZE * 16 * reader.channels);
     loop {
         let want = match remaining {
@@ -381,7 +463,10 @@ pub fn cut_flac(
         if let Some(left) = remaining.as_mut() {
             *left -= got as u64;
         }
+        frames_done += got as u64;
+        progress.tick(frames_done);
     }
+    progress.finish();
     let frames_written = writer.finish()?;
     Ok(CutStats {
         frames_written,

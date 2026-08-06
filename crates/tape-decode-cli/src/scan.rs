@@ -490,9 +490,9 @@ pub fn print_report(report: &ScanReport) {
     println!("effective video {}", format_tape_time(effective, fs));
     if let Some((start, end)) = report.suggested {
         println!(
-            "suggested trim  --start {:.2} --end {:.2}  (keeps {})",
-            start as f64 / fs,
-            end as f64 / fs,
+            "suggested trim  --start {} --end {}  (keeps {})",
+            format_tape_time(start, fs),
+            format_tape_time(end, fs),
             format_tape_time(end - start, fs),
         );
     } else {
