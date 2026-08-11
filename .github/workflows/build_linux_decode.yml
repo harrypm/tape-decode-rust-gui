@@ -182,7 +182,7 @@ jobs:
           test "$(unzip -Z1 "${ZIP_NAME}" | wc -l)" -eq 1
 
       - name: Upload Linux ZIP
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-zip-${{ matrix.arch }}
           path: decode-rust-gui-linux_*_${{ matrix.artifact_suffix }}.zip
@@ -203,7 +203,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 
