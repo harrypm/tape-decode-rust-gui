@@ -447,6 +447,8 @@ class DecodeLauncherWindow(QWidget):
         self.include_metadata_check.setChecked(True)
         self.ire0_adjust_check = QCheckBox("Adjust RF IRE0 (--ire0-adjust)")
         self.ire0_adjust_check.setChecked(True)
+        self.subdeemp_check = QCheckBox("Enable sub-deemphasis (--subdeemp)")
+        self.subdeemp_check.setChecked(True)
 
         self.overwrite_check = QCheckBox("Allow overwrite (--overwrite)")
         self.debug_check = QCheckBox("Enable debug logging (--debug)")
@@ -515,6 +517,7 @@ class DecodeLauncherWindow(QWidget):
         launch_layout.addWidget(self.overwrite_check, 11, 0, 1, 2)
         launch_layout.addWidget(self.ire0_adjust_check, 11, 2, 1, 2)
         launch_layout.addWidget(self.debug_check, 12, 0, 1, 2)
+        launch_layout.addWidget(self.subdeemp_check, 12, 2, 1, 2)
 
         launch_layout.addWidget(QLabel("Extra arguments"), 13, 0)
         launch_layout.addWidget(self.extra_args_edit, 13, 1, 1, 3)
@@ -550,6 +553,7 @@ class DecodeLauncherWindow(QWidget):
         self.ire0_adjust_check.toggled.connect(self._refresh_tool_state)
         self.overwrite_check.toggled.connect(self._refresh_tool_state)
         self.debug_check.toggled.connect(self._refresh_tool_state)
+        self.subdeemp_check.toggled.connect(self._refresh_tool_state)
         self.extra_args_edit.textChanged.connect(self._refresh_tool_state)
 
         self.refresh_profiles_button.clicked.connect(self._refresh_profiles)
@@ -610,6 +614,7 @@ class DecodeLauncherWindow(QWidget):
             self.ire0_adjust_check,
             self.overwrite_check,
             self.debug_check,
+            self.subdeemp_check,
             self.use_profile_file_check,
             self.refresh_profiles_button,
         ):
@@ -690,6 +695,8 @@ class DecodeLauncherWindow(QWidget):
             args.append("--ire0-adjust")
         if self.debug_check.isChecked():
             args.append("--debug")
+        if self.subdeemp_check.isChecked():
+            args.append("--subdeemp")
 
         if self.use_profile_file_check.isChecked():
             profile_file = self.profile_file_edit.text().strip()
