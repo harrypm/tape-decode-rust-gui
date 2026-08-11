@@ -31,6 +31,22 @@ use symphonia_core::units::Timestamp;
 /// within the FLAC subset for low header rates.
 const BLOCK_SIZE: usize = 4096;
 
+/// Largest sample count the 36-bit STREAMINFO `total_samples` field can hold.
+/// Beyond it the length is declared unknown (0), as raw captures already do:
+/// `flacenc` serializes the field with `write_lsbs(_, 36)`, which silently
+/// keeps the low 36 bits. ~40 min at 28.636 MS/s, so RF captures reach it.
+const MAX_DECLARABLE_SAMPLES: u64 = (1 << 36) - 1;
+
+/// The value to write into STREAMINFO for a stream of `total_frames` samples:
+/// the exact count when it fits, otherwise 0 ("unknown").
+fn declared_total_samples(total_frames: u64) -> u64 {
+    if total_frames > MAX_DECLARABLE_SAMPLES {
+        0
+    } else {
+        total_frames
+    }
+}
+
 // --- Bit-exact multi-channel FLAC reader --------------------------------------
 //
 // `crate::flac` normalizes to mono f32 for the decoder; trimming instead needs
@@ -424,7 +440,17 @@ impl FlacStreamWriter {
             drop(worker.job_tx);
             let _ = worker.handle.join();
         }
-        self.info.set_total_samples(self.total_frames as usize);
+        let declared = declared_total_samples(self.total_frames);
+        if declared == 0 && self.total_frames > 0 {
+            tracing::warn!(
+                "output is {} samples, over the 36-bit STREAMINFO counter ({} max); \
+                 declaring the length unknown, as raw captures do. Readers that trust \
+                 the header (libsndfile, and so hifi-decode) must stream it to EOF.",
+                self.total_frames,
+                MAX_DECLARABLE_SAMPLES,
+            );
+        }
+        self.info.set_total_samples(declared as usize);
         // `update_frame_info` shrinks the minimum block size down to the short
         // final frame, which marks the stream as variable-block-size: decoders
         // then cannot map the fixed-block-size frame numbers the frames carry
@@ -589,4 +615,84 @@ pub fn default_output_path(input: &Path) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
     input.with_file_name(format!("{stem}_trimmed.flac"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declares_the_exact_length_when_it_fits() {
+        assert_eq!(declared_total_samples(0), 0);
+        assert_eq!(declared_total_samples(1), 1);
+        assert_eq!(
+            declared_total_samples(MAX_DECLARABLE_SAMPLES),
+            MAX_DECLARABLE_SAMPLES
+        );
+    }
+
+    #[test]
+    fn declares_unknown_past_the_36_bit_counter() {
+        assert_eq!(declared_total_samples(MAX_DECLARABLE_SAMPLES + 1), 0);
+        assert_eq!(declared_total_samples(1 << 36), 0);
+        // The capture that exposed this: 63.47 min at 28.636 MS/s, which the
+        // bare `as usize` cast used to wrap to 40_340_523_264 (23.48 min),
+        // stopping hifi-decode two thirds of the way into the tape.
+        assert_eq!(declared_total_samples(109_060_000_000), 0);
+    }
+
+    /// Reads `total_samples` out of a serialized 34-byte STREAMINFO block:
+    /// bytes 10..18 pack sample rate (20 bits), channels (3), bits per sample
+    /// (5) and the 36-bit counter.
+    fn total_samples_of(info: &[u8]) -> u64 {
+        u64::from_be_bytes(info[10..18].try_into().unwrap()) & MAX_DECLARABLE_SAMPLES
+    }
+
+    /// Same, for a whole file: 4 bytes of "fLaC" marker, 4 of block header,
+    /// then the block itself.
+    fn declared_length_of(path: &Path) -> u64 {
+        let bytes = std::fs::read(path).expect("read flac");
+        assert_eq!(&bytes[..4], b"fLaC");
+        total_samples_of(&bytes[8..42])
+    }
+
+    /// The over-long case can't be reached through `cut_flac` in a test (it
+    /// takes 68 billion samples), so drive the tail of `finish` directly: the
+    /// declared value goes through `set_total_samples` and out via `write`.
+    #[test]
+    fn over_long_stream_serializes_a_zero_length() {
+        let mut info = StreamInfo::new(28_636, 1, 8).expect("stream info");
+        info.set_total_samples(declared_total_samples(109_060_000_000) as usize);
+        let mut sink = ByteSink::new();
+        info.write(&mut sink).expect("serialize");
+        assert_eq!(total_samples_of(sink.as_slice()), 0);
+
+        // ...where the unguarded cast this replaces wrapped to 23.48 min.
+        info.set_total_samples(109_060_000_000_usize);
+        let mut sink = ByteSink::new();
+        info.write(&mut sink).expect("serialize");
+        assert_eq!(total_samples_of(sink.as_slice()), 40_340_523_264);
+    }
+
+    #[test]
+    fn short_cut_still_declares_its_exact_length() {
+        // A short final block exercises the same `finish` path as a real cut.
+        // It has to stay at or above flacenc's 64-sample `FrameBuf` minimum.
+        const FRAMES: u64 = BLOCK_SIZE as u64 * 3 + 1000;
+        let dir = std::env::temp_dir().join(format!("tape-decode-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let input = dir.join("in.flac");
+        let output = dir.join("out.flac");
+
+        let mut writer = FlacStreamWriter::create(&input, 28_636, 1, 8, true).expect("create");
+        let samples: Vec<i32> = (0..FRAMES).map(|i| (i % 61) as i32 - 30).collect();
+        writer.push(&samples).expect("push");
+        assert_eq!(writer.finish().expect("finish"), FRAMES);
+
+        let stats = cut_flac(&input, &output, 0, None, true).expect("cut");
+        assert_eq!(stats.frames_written, FRAMES);
+        assert_eq!(declared_length_of(&output), FRAMES);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
