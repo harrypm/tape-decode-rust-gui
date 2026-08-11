@@ -73,7 +73,8 @@ jobs:
           else
             VERSION="$(bash scripts/ci/git-version.sh)"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build tape-decode binary (single)
         if: matrix.arch != 'x86_64'
