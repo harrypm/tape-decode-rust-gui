@@ -15,6 +15,7 @@ use anyhow::{bail, Context as _, Result};
 use flacenc::bitsink::ByteSink;
 use flacenc::component::{BitRepr, Frame, StreamInfo};
 use flacenc::config::Encoder as EncoderConfig;
+use flacenc::constant::MIN_BLOCK_SIZE;
 use flacenc::encode_fixed_size_frame;
 use flacenc::error::{Verified, Verify as _};
 use flacenc::source::{Fill as _, FrameBuf};
@@ -430,8 +431,31 @@ impl FlacStreamWriter {
 
     fn finish(mut self) -> Result<u64> {
         if !self.staging.is_empty() {
-            let block = std::mem::take(&mut self.staging);
-            self.submit_block(block)?;
+            let frames = self.staging.len() / self.channels;
+            if frames >= MIN_BLOCK_SIZE {
+                let block = std::mem::take(&mut self.staging);
+                self.submit_block(block)?;
+            } else if self.next_frame_number == 0 {
+                bail!(
+                    "trim range is {frames} samples, under the {MIN_BLOCK_SIZE}-sample \
+                     minimum FLAC block"
+                );
+            } else {
+                // A fixed-block-size stream can only vary the length of its
+                // last frame, so a tail this short can neither be merged into
+                // the frame before it (that frame would exceed the block size
+                // every decoder maps frame numbers through) nor encoded on its
+                // own, `FrameBuf` refusing anything under MIN_BLOCK_SIZE. At
+                // most 63 samples go, 2.2 us at 28.636 MS/s, against the 3 s
+                // margin `--auto` already leaves at each end.
+                tracing::warn!(
+                    "dropping the last {} samples: under flacenc's {}-sample minimum block, \
+                     and a fixed-block-size stream cannot merge them into the frame before",
+                    frames,
+                    MIN_BLOCK_SIZE,
+                );
+                self.staging.clear();
+            }
         }
         while self.collected < self.next_frame_number {
             self.collect_one()?;
@@ -674,24 +698,88 @@ mod tests {
         assert_eq!(total_samples_of(sink.as_slice()), 40_340_523_264);
     }
 
+    /// A scratch directory of its own per test: they share a process, so the
+    /// pid alone would collide under the default parallel test runner.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tape-decode-trim-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Writes a mono 8-bit FLAC of `frames` samples: the shape `cut_flac` sees
+    /// for an RF capture, at a size a test can afford.
+    fn write_input(path: &Path, frames: u64) {
+        let mut writer = FlacStreamWriter::create(path, 28_636, 1, 8, true).expect("create");
+        let samples: Vec<i32> = (0..frames).map(|i| (i % 61) as i32 - 30).collect();
+        writer.push(&samples).expect("push");
+        assert_eq!(writer.finish().expect("finish"), frames);
+    }
+
     #[test]
     fn short_cut_still_declares_its_exact_length() {
         // A short final block exercises the same `finish` path as a real cut.
-        // It has to stay at or above flacenc's 64-sample `FrameBuf` minimum.
         const FRAMES: u64 = BLOCK_SIZE as u64 * 3 + 1000;
-        let dir = std::env::temp_dir().join(format!("tape-decode-trim-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let input = dir.join("in.flac");
-        let output = dir.join("out.flac");
-
-        let mut writer = FlacStreamWriter::create(&input, 28_636, 1, 8, true).expect("create");
-        let samples: Vec<i32> = (0..FRAMES).map(|i| (i % 61) as i32 - 30).collect();
-        writer.push(&samples).expect("push");
-        assert_eq!(writer.finish().expect("finish"), FRAMES);
+        let dir = scratch_dir("exact-length");
+        let (input, output) = (dir.join("in.flac"), dir.join("out.flac"));
+        write_input(&input, FRAMES);
 
         let stats = cut_flac(&input, &output, 0, None, true).expect("cut");
         assert_eq!(stats.frames_written, FRAMES);
         assert_eq!(declared_length_of(&output), FRAMES);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A range leaving 1..63 samples past the last full block used to abort the
+    /// whole cut, after the entire input had been read and re-encoded.
+    #[test]
+    fn sub_minimum_final_block_is_dropped_instead_of_failing() {
+        const KEPT: u64 = BLOCK_SIZE as u64 * 2;
+        let dir = scratch_dir("short-tail");
+        let (input, output) = (dir.join("in.flac"), dir.join("out.flac"));
+        write_input(&input, BLOCK_SIZE as u64 * 3);
+
+        let stats = cut_flac(&input, &output, 0, Some(KEPT + 17), true).expect("cut");
+        assert_eq!(stats.frames_written, KEPT);
+        assert_eq!(declared_length_of(&output), KEPT);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ...while a tail of exactly the minimum is kept whole.
+    #[test]
+    fn final_block_at_the_minimum_is_kept() {
+        const FRAMES: u64 = BLOCK_SIZE as u64 + MIN_BLOCK_SIZE as u64;
+        let dir = scratch_dir("min-tail");
+        let (input, output) = (dir.join("in.flac"), dir.join("out.flac"));
+        write_input(&input, BLOCK_SIZE as u64 * 2);
+
+        let stats = cut_flac(&input, &output, 0, Some(FRAMES), true).expect("cut");
+        assert_eq!(stats.frames_written, FRAMES);
+        assert_eq!(declared_length_of(&output), FRAMES);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A whole cut under the minimum has no preceding frame to fall back on,
+    /// so it has to fail rather than silently write a FLAC with no samples.
+    #[test]
+    fn cut_shorter_than_the_minimum_block_fails() {
+        let dir = scratch_dir("degenerate");
+        let (input, output) = (dir.join("in.flac"), dir.join("out.flac"));
+        write_input(&input, BLOCK_SIZE as u64);
+
+        // `.err().expect(..)` rather than `expect_err`: the latter would want
+        // `CutStats: Debug` just to print a success that must not happen.
+        let err = cut_flac(&input, &output, 0, Some(30), true)
+            .err()
+            .expect("cut must fail");
+        assert!(
+            err.to_string().contains("30 samples"),
+            "unexpected error: {err}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
