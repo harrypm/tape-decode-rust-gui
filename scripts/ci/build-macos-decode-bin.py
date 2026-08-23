@@ -84,6 +84,8 @@ def main() -> None:
         "decode_launcher",
         "--hidden-import",
         "decode_runtime",
+        "--hidden-import",
+        "decode_selftest",
         "--add-binary",
         f"{tape_decode_bin}{_platform_sep()}.",
         "--add-data",

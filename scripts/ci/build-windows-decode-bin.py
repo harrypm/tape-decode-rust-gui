@@ -78,10 +78,16 @@ def main() -> None:
         "decode.py",
         "--collect-all",
         "PyQt6",
+        "--collect-all",
+        "PyQt6-Qt6",
+        "--collect-all",
+        "PyQt6-sip",
         "--hidden-import",
         "decode_launcher",
         "--hidden-import",
         "decode_runtime",
+        "--hidden-import",
+        "decode_selftest",
         "--add-binary",
         f"{tape_decode_bin};.",
         "--add-data",
@@ -96,9 +102,25 @@ def main() -> None:
         "--icon",
         "resources\\icon\\tape-decode-rust.ico",
         "--onefile",
+        "-y",
+        "--clean",
         "--name",
         "decode-rust-gui",
     ]
+
+    # Explicitly ensure Qt platform plugins (qwindows.dll etc.) and the Qt6
+    # runtime DLLs are inside the bundle so Qt can initialize on a clean
+    # Windows host with no Python/Qt installed. Mirrors the macOS/Linux
+    # packaging scripts (build-macos/linux-decode-bin.py).
+    try:
+        import PyQt6  # type: ignore
+        qt_root = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6")
+        plugins_dir = os.path.join(qt_root, "plugins")
+        if os.path.isdir(plugins_dir):
+            pyi_args += ["--add-data", f"{plugins_dir}{_platform_sep()}PyQt6/Qt6/plugins"]
+            print(f"Adding Qt plugins from {plugins_dir}")
+    except Exception as exc:
+        print(f"Could not locate PyQt6 Qt plugins for collection: {exc}")
 
     for src, dest in _discover_level_binaries():
         print(f"Bundling level binary {src} -> {dest}")
