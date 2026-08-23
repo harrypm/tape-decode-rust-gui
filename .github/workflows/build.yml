@@ -146,7 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pyinstaller pyinstaller-versionfile -r requirements-launcher.txt
+          pip install pyinstaller -r requirements-launcher.txt
 
       - name: Build decode launcher (single)
         if: matrix.arch != 'x86_64'
@@ -158,6 +158,17 @@ jobs:
         if: matrix.arch == 'x86_64'
         shell: bash
         run: python scripts/ci/build-windows-decode-bin.py
+
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+          $out | Write-Output
+          if ($LASTEXITCODE -ne 0) { throw "selftest exited $LASTEXITCODE" }
+          if (-not ($out -match 'SELFTEST OK')) { throw "SELFTEST OK missing from output" }
 
       - name: Package versioned Windows ZIP
         shell: pwsh
@@ -300,10 +311,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system libraries needed for complete PyQt6 xcb plugin collection
+      - name: Install system libraries needed for complete PyQt6 xcb + GL plugin collection
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
+            libegl1 libgl1 libglvnd0 \
             libxcb-cursor0 \
             libxkbcommon-x11-0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
@@ -325,6 +337,22 @@ jobs:
       - name: Build launcher binary (with microarch levels)
         if: matrix.arch == 'x86_64'
         run: python3 scripts/ci/build-linux-decode-bin.py
+
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -uo pipefail
+          set +e
+          ./dist/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          _st=$?
+          set -e
+          echo "--- selftest output (exit $_st) ---"
+          cat /tmp/decode-rust-gui_selftest.txt
+          echo "--- end output ---"
+          if [ "$_st" -ne 0 ]; then echo "::error::selftest exited $_st"; exit "$_st"; fi
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
       - name: Build AppDir and AppImage
         env:
@@ -365,13 +393,20 @@ jobs:
           env -u SOURCE_DATE_EPOCH ARCH=${{ matrix.appimage_arch }} ./squashfs-root/AppRun AppDir "${APPIMAGE_NAME}"
           chmod +x "${APPIMAGE_NAME}"
 
-          # Only force a microarch level on x86-64 builds. On arm64 the bundled binary is aarch64.
+          # Self-test the final AppImage: proves PyQt6 + Qt platform plugin +
+          # the bundled tape-decode binary all work inside the shipped artifact.
+          # Strict (no || true) so a broken bundle fails CI.
+          set +e
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            TAPE_DECODE_MICROARCH=x86-64-v1 APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           else
-            APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           fi
-          grep -q "PAL_VHS" /tmp/decode-rust-gui_profiles.txt || true
+          _st=$?
+          set -e
+          cat /tmp/decode-rust-gui_selftest.txt
+          if [ "$_st" -ne 0 ]; then echo "::error::AppImage selftest exited $_st"; exit "$_st"; fi
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
           ZIP_NAME="decode-rust-gui-linux_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
           zip -j "${ZIP_NAME}" "${APPIMAGE_NAME}"
@@ -506,6 +541,22 @@ jobs:
       - name: Ad-hoc sign app bundle
         run: codesign -s - --deep --force dist/decode-rust-gui.app
 
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -uo pipefail
+          set +e
+          dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          _st=$?
+          set -e
+          echo "--- selftest output (exit $_st) ---"
+          cat /tmp/decode-rust-gui_selftest.txt
+          echo "--- end output ---"
+          if [ "$_st" -ne 0 ]; then echo "::error::selftest exited $_st"; exit "$_st"; fi
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
+
       - name: Package decode-rust-gui macOS DMG
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
@@ -520,13 +571,20 @@ jobs:
           hdiutil create -volname "decode-rust-gui" -srcfolder build/dmg -ov -format UDZO "$DMG_NAME"
           test -f "$DMG_NAME"
 
-          # smoke (force v1 on x86-64, none on arm)
+          # Strict smoke (force v1 on x86-64, none on arm). The selftest step
+          # above already exercised PyQt6 from the .app; this re-verifies the
+          # binary still runs after DMG assembly.
+          set +e
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            TAPE_DECODE_MICROARCH=x86-64-v1 dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            TAPE_DECODE_MICROARCH=x86-64-v1 dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui list-profiles > /tmp/decode-rust-gui_profiles.txt 2>&1
           else
-            dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui list-profiles > /tmp/decode-rust-gui_profiles.txt 2>&1
           fi
-          grep -q "PAL_VHS" /tmp/decode-rust-gui_profiles.txt || true
+          _sm=$?
+          set -e
+          cat /tmp/decode-rust-gui_profiles.txt
+          if [ "$_sm" -ne 0 ]; then echo "::error::DMG list-profiles exited $_sm"; exit "$_sm"; fi
+          grep -q "PAL_VHS" /tmp/decode-rust-gui_profiles.txt
 
       - name: Upload decode-rust-gui macOS artifact
         uses: actions/upload-artifact@v7
@@ -538,67 +596,131 @@ jobs:
   release:
     name: Create GitHub release
     needs: [windows-decode, linux-decode, macos-decode]
-    if: github.event_name == 'workflow_dispatch' && inputs.create_release == true
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - name: Resolve build version
-        id: version
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
-            VERSION="${{ github.event.inputs.release_tag }}"
+            TAG="${GITHUB_REF#refs/tags/}"
           else
-            VERSION="$(git describe --tags --always --dirty)"
+            RAW="${{ github.event.inputs.release_tag }}"
+            if [[ -z "$RAW" ]]; then
+              echo "release_tag is required when create_release=true" >&2
+              exit 1
+            fi
+            TAG="v${RAW#v}"
+            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "$TAG" "$GITHUB_SHA"
+              git push origin "$TAG"
+            fi
           fi
-          VERSION="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Determine previous release tag
+        id: previous
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match "v*" "${RELEASE_TAG}^" 2>/dev/null || true)"
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "Using release notes range: ${PREVIOUS_TAG}..${RELEASE_TAG}"
+          else
+            echo "No previous release tag found before ${RELEASE_TAG}; generating notes from full history."
+          fi
+          echo "previous_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: "decode-rust-gui v${{ steps.version.outputs.version }}"
-          draft: false
-          body: |
-            ## Decode Launcher (decode-rust-gui)
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          API_NOTES_FILE="$(mktemp)"
+          if [ -n "$PREVIOUS_TAG" ]; then
+            gh api --method POST -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$RELEASE_TAG" \
+              -f previous_tag_name="$PREVIOUS_TAG" \
+              --jq '.body' > "$API_NOTES_FILE"
+          else
+            gh api --method POST -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$RELEASE_TAG" \
+              --jq '.body' > "$API_NOTES_FILE"
+          fi
+          # Granular, commit-based changelog grouped by component (tbc-tools
+          # style); preserves New Contributors from the API output.
+          python3 scripts/release/generate_release_notes.py \
+            --repo "${{ github.repository }}" \
+            --tag "$RELEASE_TAG" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --api-notes-file "$API_NOTES_FILE" \
+            --output release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+          echo "--- end release notes ---"
 
-            This release ships the Decode Launcher ("decode-rust-gui") with built-in support for x86-64 microarchitecture level selection (Auto / v1 / v2 / v3 / v4).
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refreshing release notes."
+            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md
+          fi
 
-            The decode-rust-gui binary is the primary artifact. It provides the GUI when launched normally, and full CLI functionality when invoked from a terminal (e.g. `decode-rust-gui list-profiles`, `decode-rust-gui decode ...`). No separate raw tape-decode binary is released.
+      - name: Upload release assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSETS="$(find artifacts -type f \( -name '*.zip' -o -name '*.dmg' \))"
+          if [ -z "$ASSETS" ]; then
+            echo "No release assets found under artifacts/" >&2
+            exit 1
+          fi
+          echo "Uploading release assets:"
+          printf '%s\n' $ASSETS
+          gh release upload "$RELEASE_TAG" $ASSETS --repo "${{ github.repository }}" --clobber
 
-            ### Included
-            - decode-rust-gui launcher for:
-              - Windows (x86-64 + arm64, packaged in ZIP)
-              - Linux (x86-64 + arm64 AppImage, packaged in ZIP)
-              - macOS (x86-64 + arm64)
-            - 6 GUI artifacts total: 2 Windows ZIPs, 2 Linux ZIPs, 2 macOS DMGs.
-            - The tape-decode core implementation is bundled inside (v1 default + v2/v3/v4 level-optimized variants for x86-64 where applicable).
-            - Profiles list and list-profiles verification included.
-
-            ### x86-64 Microarchitecture Levels
-            - Auto detects best available.
-            - Explicit levels use targeted RUSTFLAGS:
-              - v1: `-C target-feature=+sse2`
-              - v2: `-C target-feature=+sse3,+ssse3,+sse4.1,+sse4.2`
-              - v3: `-C target-feature=+avx,+avx2`
-              - v4: `-C target-feature=+avx512f,+avx512bw,+avx512cd,+avx512dq,+avx512vl`
-
-            ## Auto-generated notes
-          generate_release_notes: true
-          append_body: true
-          files: |
-            artifacts/decode-rust-gui-windows-x86_64/*.zip
-            artifacts/decode-rust-gui-windows-arm64/*.zip
-            artifacts/decode-rust-gui-linux-x86_64/*.zip
-            artifacts/decode-rust-gui-linux-arm64/*.zip
-            artifacts/decode-rust-gui-macos-x86_64/*.dmg
-            artifacts/decode-rust-gui-macos-arm64/*.dmg
+      - name: Mark release as latest
+        continue-on-error: true
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --latest
+          echo "Marked $RELEASE_TAG as the latest release."
