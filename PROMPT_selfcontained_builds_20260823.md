@@ -1,3 +1,36 @@
+- [ ] 3 workflows pass the new --selftest steps on x86_64 + arm64 (requires
+      push + GitHub Actions run — not yet done).
+
+## CI results (workflow_dispatch on master)
+- Run 1 (commit 70cc7fa):
+  - Windows x86_64 + arm64: SUCCESS, selftest step = success.
+  - macOS x86_64 + arm64: SUCCESS, selftest step = success.
+  - Linux x86_64 + arm64: FAILURE at selftest step. Root cause hidden by my
+    own CI step bug: `set -euo pipefail` + GHA-injected `-e` aborted the shell
+    before `cat`, so the SELFTEST FAIL message was never printed.
+- Run 2 (commit 0568fe1, added Qt plugin-path to decode_selftest.py + tried to
+  fix visibility with `set -uo pipefail`):
+  - Windows + macOS: still SUCCESS (no regression).
+  - Linux: still FAILURE; visibility fix was incomplete (GHA invokes bash with
+    `-e` regardless of the script's `set` line, so `cat` still never ran).
+- Run 3 (commit 8f63e16, explicit `set +e` around the binary):
+  - Linux: still FAILURE, but the FAIL reason is now visible:
+    `SELFTEST FAIL: PyQt6/Qt platform plugin: libEGL.so.1: cannot open shared
+    object file: No such file or directory`
+
+## Linux root cause (hard data from CI log)
+- The Qt6 GUI shared lib links to `libEGL.so.1`; PyInstaller does NOT bundle
+  system GL libs, and the headless GitHub runner has no `libegl1` installed.
+- So the Linux bundle (bare onefile AND AppImage) is NOT fully self-contained:
+  it depends on the host providing `libEGL.so.1` / `libGL.so.1` (mesa/libglvnd).
+- On a real Linux desktop (with mesa) it runs; on a minimal/server install it
+  would fail — the exact 'not self-contained' failure mode the user worried
+  about. The new selftest correctly caught this.
+- RESOLVED (user-approved): bundle libglvnd GL libs into the Linux onefile via
+  PyInstaller --add-binary (libEGL.so.1, libGL.so.1, libGLdispatch.so,
+  libGLX.so.0); install libegl1/libgl1/libglvnd0 on the runner to source them.
+  Verified green on Linux x86_64 + arm64 in CI (run 4, commit af881ee).
+
 # PROMPT — self-contained builds (20260823)
 
 Log of inputs, commands, and findings for the request to make
@@ -83,8 +116,10 @@ Log of inputs, commands, and findings for the request to make
 - [ ] user launches dist\decode-rust-gui.exe and confirms the GUI window
       appears with no Python/PyQt6 errors (pending user — do NOT assume from
       the offscreen selftest alone).
-- [ ] 3 workflows pass the new --selftest steps on x86_64 + arm64 (requires
-      push + GitHub Actions run — not yet done).
+- [x] 3 workflows pass the new --selftest steps on x86_64 + arm64 — final run
+      on master af881ee: Windows/macOS/Linux × x86_64+arm64 all SUCCESS, every
+      selftest step = success. (Linux needed an extra fix: bundle libglvnd GL
+      libs — see "Linux root cause" above.)
 
 ## Toolchain findings (hard data)
 - `cargo`/`rustc`: present at `C:\Users\Harry\.cargo\bin\cargo.exe` (+ ~/.rustup)
@@ -99,3 +134,18 @@ Log of inputs, commands, and findings for the request to make
 - `.gitignore` covers `__pycache__/`, `*.pyc`, `/build`, `/dist`, `/*.spec`
   (all build artifacts ignored; no stray tracked files added except the
   intended `decode_selftest.py` and this log).
+
+## Cleanup (pre-release)
+- Removed unused `pyinstaller-versionfile` from the Windows workflow pip
+  install (build script never imports it; local Windows build already proved
+  the build works without it).
+- Deleted stale local + remote branch `fix/self-contained-windows-bundle`
+  (fully merged into master via fast-forward).
+- Release: user will manually push a tag (`v*`) to trigger the release
+  workflows; the new --selftest step gates every build job.
+
+## Commits on master (this session)
+- 70cc7fa fix: make Windows launcher bundle self-contained (Qt6 + platform plugin)
+- 0568fe1 fix(linux): set Qt plugin path in selftest + always print captured output on failure
+- 8f63e16 ci: force set +e around selftest binary so FAIL output is always printed
+- af881ee fix(linux): bundle libglvnd GL libs (libEGL/libGL/libGLdispatch/libGLX) for self-contained bundle
