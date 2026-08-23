@@ -21,8 +21,36 @@ import os
 import sys
 
 
+def _ensure_qt_plugin_path() -> None:
+    """Point Qt at the bundled platform plugins before any PyQt6 import.
+
+    Mirrors the frozen-bundle block in decode_launcher.py so the selftest
+    (which does not import decode_launcher) exercises the same plugin
+    discovery the real GUI relies on -- critical on Linux, where the
+    offscreen/xcb plugins are only found via QT_QPA_PLATFORM_PLUGIN_PATH.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    if not base:
+        return
+    for _rel in (
+        os.path.join("PyQt6", "Qt6", "plugins"),
+        os.path.join("PyQt6", "Qt", "plugins"),
+        "plugins",
+    ):
+        _plug = os.path.join(base, _rel)
+        if os.path.isdir(os.path.join(_plug, "platforms")):
+            os.environ.setdefault(
+                "QT_QPA_PLATFORM_PLUGIN_PATH", os.path.join(_plug, "platforms")
+            )
+            os.environ.setdefault("QT_PLUGIN_PATH", _plug)
+            break
+
+
 def run_selftest() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _ensure_qt_plugin_path()
     failures: list[str] = []
 
     # 1) PyQt6 bindings + Qt platform plugin load.
