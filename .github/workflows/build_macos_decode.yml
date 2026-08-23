@@ -122,9 +122,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          set -euo pipefail
+          set -uo pipefail
           dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          _st=$?
           cat /tmp/decode-rust-gui_selftest.txt
+          if [ "$_st" -ne 0 ]; then echo "::error::selftest exited $_st"; exit "$_st"; fi
           grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
       - name: Build and verify DMG

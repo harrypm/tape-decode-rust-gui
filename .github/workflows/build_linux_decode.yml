@@ -134,9 +134,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./dist/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          _st=$?
           cat /tmp/decode-rust-gui_selftest.txt
+          if [ "$_st" -ne 0 ]; then echo "::error::selftest exited $_st"; exit "$_st"; fi
           grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
       - name: Build AppDir and AppImage
@@ -181,12 +183,16 @@ jobs:
           # Self-test the final AppImage: proves PyQt6 + Qt platform plugin +
           # the bundled tape-decode binary all work inside the shipped artifact.
           # Strict (no || true) so a broken bundle fails CI.
+          set +e
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt
+            TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           else
-            QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt
+            QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           fi
+          _st=$?
+          set -e
           cat /tmp/decode-rust-gui_selftest.txt
+          if [ "$_st" -ne 0 ]; then echo "::error::AppImage selftest exited $_st"; exit "$_st"; fi
           grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
           ZIP_NAME="decode-rust-gui-linux_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
