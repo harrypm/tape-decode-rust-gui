@@ -11,7 +11,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::decode::{calibrate_secam_lo_trim, decode_all, decode_all_mt, MtParams};
 use crate::fields_match::{f32_msre, wrapped_u16_msre};
-use crate::metadata::{PcmAudioParameters, TbcMetadataFull, VideoParameters};
+use crate::metadata::{MetadataContext, PcmAudioParameters, TbcMetadataFull, VideoParameters};
 use crate::os;
 use crate::profiles::{flatten_profile, load_profile, load_profile_file, profile_names};
 use crate::reader::{open_source, DecodeReader, SampleFormat};
@@ -512,7 +512,8 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
 
     let mut spec = Arc::new(DecoderSpec::new(&request)?);
     let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
-    let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out)?;
+    let metadata_context = MetadataContext::from_profile_name(cli.profile.as_deref());
+    let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out, metadata_context)?;
     let start_offset = cli.offset.unwrap_or(0);
 
     if cli.secam_servo_passes == 2
