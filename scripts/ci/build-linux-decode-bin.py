@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import PyInstaller.__main__
@@ -70,6 +72,42 @@ def _discover_level_binaries() -> list[tuple[Path, str]]:
     return results
 
 
+def _discover_glvnd_libs() -> list[tuple[str, str]]:
+    """Find libglvnd GL shared libs on the host for bundling.
+
+    Qt6Gui links to libEGL.so.1 / libGL.so.1 (provided by libglvnd via the
+    libegl1 / libgl1 packages). PyInstaller does not bundle system GL libs,
+    so we add them explicitly. libGL.so.1 also needs libGLdispatch.so and
+    libGLX.so.0 (also from libglvnd), so include those too. Returns
+    (real_file_path, soname) pairs; symlinks are resolved so the staged copy
+    carries the SONAME the dynamic loader looks for.
+    """
+    sonames = ("libEGL.so.1", "libGL.so.1", "libGLdispatch.so", "libGLX.so.0")
+    search_dirs: list[str] = []
+    for root in ("/usr/lib", "/lib"):
+        search_dirs.append(root)
+        try:
+            for entry in os.listdir(root):
+                full = os.path.join(root, entry)
+                if os.path.isdir(full) and not os.path.islink(full):
+                    search_dirs.append(full)
+        except OSError:
+            pass
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for soname in sonames:
+        for d in search_dirs:
+            cand = os.path.join(d, soname)
+            if os.path.exists(cand):
+                real = os.path.realpath(cand)
+                if real in seen:
+                    continue
+                seen.add(real)
+                results.append((real, soname))
+                break
+    return results
+
+
 def main() -> None:
     tape_decode_bin = _resolve_tape_decode_bin()
     print(f"Bundling default {tape_decode_bin}")
@@ -115,6 +153,22 @@ def main() -> None:
             print(f"Adding Qt plugins from {plugins_dir}")
     except Exception as exc:
         print(f"Could not locate PyQt6 Qt plugins for collection: {exc}")
+
+    # Bundle libglvnd GL shared libs (libEGL.so.1, libGL.so.1 + their internal
+    # deps libGLdispatch.so, libGLX.so.0) so the Qt6 GUI lib can load on hosts
+    # without mesa installed. PyInstaller does not bundle system GL libs by
+    # default, so without this the Qt platform plugin fails to initialize.
+    # Stage each as its SONAME so the dynamic loader finds it in _MEIPASS.
+    glvnd_libs = _discover_glvnd_libs()
+    if glvnd_libs:
+        staging = Path(tempfile.mkdtemp(prefix="tape-decode-glvnd-"))
+        for real_path, soname in glvnd_libs:
+            staged = staging / soname
+            shutil.copy2(real_path, staged)
+            print(f"Bundling GL lib {real_path} -> {soname}")
+            pyi_args += ["--add-binary", f"{staged}{_platform_sep()}."]
+    else:
+        print("WARNING: no libglvnd GL libs found; bundle may not be self-contained on hosts without mesa")
 
     for src, dest in _discover_level_binaries():
         print(f"Bundling level binary {src} -> {dest}")
