@@ -117,6 +117,16 @@ jobs:
       - name: Ad-hoc sign app bundle
         run: codesign -s - --deep --force dist/decode-rust-gui.app
 
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          cat /tmp/decode-rust-gui_selftest.txt
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
+
       - name: Build and verify DMG
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
