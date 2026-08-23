@@ -2,19 +2,6 @@ name: "Build macOS decode launcher"
 
 on:
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: "Create a GitHub release and upload built assets"
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: "Tag to release when manually dispatched (example: v0.6.0)"
-        required: false
-        type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -155,54 +142,3 @@ jobs:
           name: macos-dmg-${{ matrix.arch }}
           path: decode-rust-gui-macos_*_${{ matrix.artifact_suffix }}.dmg
           if-no-files-found: error
-
-  release:
-    name: Publish macOS release assets
-    runs-on: ubuntu-24.04
-    needs:
-      - build-decode
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-assets
-
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            TAG="${{ github.event.inputs.release_tag }}"
-            if [[ -z "$TAG" ]]; then
-              echo "release_tag is required when create_release=true" >&2
-              exit 1
-            fi
-            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git tag "$TAG" "$GITHUB_SHA"
-              git push origin "$TAG"
-            fi
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            release-assets/**/decode-rust-gui-macos_*_x86_64.dmg
-            release-assets/**/decode-rust-gui-macos_*_arm64.dmg
