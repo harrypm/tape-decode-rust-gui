@@ -102,10 +102,11 @@ jobs:
             build_level "$level"
           done
 
-      - name: Install system libraries needed for complete PyQt6 xcb plugin collection
+      - name: Install system libraries needed for complete PyQt6 xcb + GL plugin collection
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
+            libegl1 libgl1 libglvnd0 \
             libxcb-cursor0 \
             libxkbcommon-x11-0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
