@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context as _, Result};
 use tape_decode::{DecoderMetadata, LumaOutput, WriteableField};
 
-use crate::metadata::metadata_to_tbc;
+use crate::metadata::{metadata_to_tbc, MetadataContext};
 
 pub struct DecodeWriter {
     outfile_video: File,
@@ -20,6 +20,9 @@ pub struct DecodeWriter {
     field_count: usize,
     first_field_write: Option<Instant>,
     last_field_write: Option<Instant>,
+    /// Medium / Format / System / git provenance derived from the selected
+    /// profile name; written into `videoParameters` on every tail rewrite.
+    metadata_context: MetadataContext,
 }
 
 fn fps(field_count: usize, elapsed: f64) -> f64 {
@@ -31,11 +34,16 @@ fn fps(field_count: usize, elapsed: f64) -> f64 {
 }
 
 impl DecodeWriter {
-    pub fn new(luma: File, chroma: Option<File>, mut metadata: Option<File>) -> Result<Self> {
+    pub fn new(
+        luma: File,
+        chroma: Option<File>,
+        mut metadata: Option<File>,
+        metadata_context: MetadataContext,
+    ) -> Result<Self> {
         const FIELDS_OPEN: &[u8] = b"{\"fields\":[";
         if let Some(metadata) = metadata.as_mut() {
             let mut chunk = FIELDS_OPEN.to_vec();
-            append_tail(&mut chunk, None, 0)?;
+            append_tail(&mut chunk, None, 0, &metadata_context)?;
             metadata.write_all(&chunk)?;
         }
         Ok(Self {
@@ -46,6 +54,7 @@ impl DecodeWriter {
             field_count: 0,
             first_field_write: None,
             last_field_write: None,
+            metadata_context,
         })
     }
 
@@ -86,7 +95,7 @@ impl DecodeWriter {
             let field_end = self.json_field_end + chunk.len() as u64;
 
             json_file.seek(SeekFrom::Start(self.json_field_end))?;
-            append_tail(&mut chunk, metadata, self.field_count)?;
+            append_tail(&mut chunk, metadata, self.field_count, &self.metadata_context)?;
             json_file.write_all(&chunk)?;
 
             self.json_field_end = field_end;
@@ -129,7 +138,7 @@ impl DecodeWriter {
             // metadata and truncate, so the file matches a one-shot serialization
             // exactly (the array was opened up front by `open`).
             let mut chunk = Vec::new();
-            append_tail(&mut chunk, metadata.as_ref(), field_count)?;
+            append_tail(&mut chunk, metadata.as_ref(), field_count, &self.metadata_context)?;
             json_file.seek(SeekFrom::Start(self.json_field_end))?;
             json_file.write_all(&chunk)?;
             json_file.set_len(self.json_field_end + chunk.len() as u64)?;
@@ -146,12 +155,13 @@ fn append_tail(
     chunk: &mut Vec<u8>,
     metadata: Option<&DecoderMetadata>,
     field_count: usize,
+    ctx: &MetadataContext,
 ) -> Result<()> {
     chunk.push(b']');
     if let Some(metadata) = metadata {
         // Serialize the metadata object on its own, then splice its body into the
         // root by replacing its leading `{` with `,` and dropping its trailing `}`.
-        let bytes = serde_json::to_vec(&metadata_to_tbc(metadata, field_count))?;
+        let bytes = serde_json::to_vec(&metadata_to_tbc(metadata, field_count, ctx))?;
         chunk.push(b',');
         chunk.extend_from_slice(&bytes[1..bytes.len() - 1]);
     }
