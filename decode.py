@@ -8,6 +8,7 @@ from decode_runtime import run_tape_decode
 
 
 LAUNCHER_ALIASES = {"decode-launcher", "decode_launcher", "launcher", "gui"}
+SELFTEST_FLAGS = {"--selftest", "--check-gui-deps"}
 
 
 def main(argv: list[str]) -> int:
@@ -22,6 +23,11 @@ def main(argv: list[str]) -> int:
         from decode_launcher import main as launcher_main
 
         return launcher_main(args[1:])
+
+    if first in SELFTEST_FLAGS:
+        from decode_selftest import run_selftest
+
+        return run_selftest()
 
     try:
         return run_tape_decode(args)

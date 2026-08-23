@@ -129,6 +129,16 @@ jobs:
         # TAPE_DECODE_BIN omitted; packaging script discovers target-x86-64-vN/...
         run: python3 scripts/ci/build-linux-decode-bin.py
 
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          ./dist/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
+          cat /tmp/decode-rust-gui_selftest.txt
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
+
       - name: Build AppDir and AppImage
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
@@ -168,13 +178,16 @@ jobs:
           env -u SOURCE_DATE_EPOCH ARCH=${{ matrix.appimage_arch }} ./squashfs-root/AppRun AppDir "${APPIMAGE_NAME}"
           chmod +x "${APPIMAGE_NAME}"
 
-          # Only force a microarch level on x86-64 builds. On arm64 the bundled binary is aarch64.
+          # Self-test the final AppImage: proves PyQt6 + Qt platform plugin +
+          # the bundled tape-decode binary all work inside the shipped artifact.
+          # Strict (no || true) so a broken bundle fails CI.
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            TAPE_DECODE_MICROARCH=x86-64-v1 APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt
           else
-            APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" list-profiles > /tmp/decode-rust-gui_profiles.txt || true
+            QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt
           fi
-          grep -q "PAL_VHS" /tmp/decode-rust-gui_profiles.txt || true
+          cat /tmp/decode-rust-gui_selftest.txt
+          grep -q "SELFTEST OK" /tmp/decode-rust-gui_selftest.txt
 
           ZIP_NAME="decode-rust-gui-linux_${BUILD_VERSION}_${{ matrix.artifact_suffix }}.zip"
           zip -j "${ZIP_NAME}" "${APPIMAGE_NAME}"
