@@ -120,6 +120,17 @@ jobs:
         shell: pwsh
         run: python .\scripts\ci\build-windows-decode-bin.py
 
+      - name: Self-test bundled launcher (PyQt6 + tape-decode binary)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+          $out | Write-Output
+          if ($LASTEXITCODE -ne 0) { throw "selftest exited $LASTEXITCODE" }
+          if (-not ($out -match 'SELFTEST OK')) { throw "SELFTEST OK missing from output" }
+
       - name: Package versioned EXE ZIP
         shell: pwsh
         run: |
