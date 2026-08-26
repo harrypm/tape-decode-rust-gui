@@ -99,6 +99,13 @@ def main() -> None:
         f"resources\\icon\\tape-decode-rust-256.png;tape-decode-rust-256.png",
         "--add-data",
         f"resources\\icon\\tape-decode-rust-256.png;decode-rust-gui.png",
+        # Bundle ICO too so Windows can use native multi-size icon fallback at runtime.
+        "--add-data",
+        f"resources\\icon\\tape-decode-rust.ico;resources\\icon\\tape-decode-rust.ico",
+        "--add-data",
+        f"resources\\icon\\tape-decode-rust.ico;tape-decode-rust.ico",
+        "--add-data",
+        f"resources\\icon\\tape-decode-rust.ico;decode-rust-gui.ico",
         "--icon",
         "resources\\icon\\tape-decode-rust.ico",
         "--onefile",
