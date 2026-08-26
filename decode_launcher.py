@@ -45,13 +45,14 @@ from decode_runtime import (
 )
 
 try:
-    from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+    from PyQt6.QtCore import QFileInfo, Qt, QTimer, QUrl, pyqtSignal
     from PyQt6.QtGui import QColor, QIcon, QPalette
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
         QComboBox,
         QFileDialog,
+        QFileIconProvider,
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
@@ -1125,12 +1126,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     # This is especially important for Linux AppImage/taskbar integration.
     icon: Optional[QIcon] = None
     if os.name == "nt" and getattr(sys, "frozen", False):
-        # Prefer the icon resource embedded in the .exe on Windows bundles.
-        # This carries all icon sizes and is the most reliable for titlebar/taskbar.
+        # Use the icon embedded in the .exe's PE resource section. QIcon(exe)
+        # does NOT read PE-embedded icons (Qt's QIcon(path) loads image files,
+        # not PE resources), so use QFileIconProvider, which resolves the shell
+        # icon for the executable = the embedded PE icon. Verified to return a
+        # non-null, multi-size icon for executables with embedded icons
+        # (e.g. cmd.exe); falls back to the bundled .ico below otherwise.
         try:
-            bundled_icon = QIcon(sys.executable)
-            if not bundled_icon.isNull():
-                icon = bundled_icon
+            embedded_icon = QFileIconProvider().icon(QFileInfo(sys.executable))
+            if not embedded_icon.isNull() and embedded_icon.availableSizes():
+                icon = embedded_icon
         except Exception:
             pass
     if icon is None:
