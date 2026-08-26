@@ -109,6 +109,12 @@ MICROARCH_UI_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Auto (use host default)", MICROARCH_AUTO),
 ) + tuple((label, label) for label in MICROARCH_LEVELS)
 
+def _default_mt_threads() -> int:
+    """Return a high-side rounded default at ~80% of system logical threads."""
+    system_threads = max(1, os.cpu_count() or 1)
+    # Round up so we bias toward the higher nearby integer ("nearest high number").
+    return max(1, (system_threads * 8 + 9) // 10)
+
 
 def _split_user_args(extra_args: str, *, strict: bool = True) -> list[str]:
     if not extra_args.strip():
@@ -435,11 +441,11 @@ class DecodeLauncherWindow(QWidget):
             )
 
         self.threads_spin = QSpinBox()
-        self.threads_spin.setRange(0, 64)
-        self.threads_spin.setValue(4)
+        self.threads_spin.setRange(0, max(64, os.cpu_count() or 1))
+        self.threads_spin.setValue(_default_mt_threads())
         self.mt_distance_size_spin = QSpinBox()
         self.mt_distance_size_spin.setRange(1, 1000000)
-        self.mt_distance_size_spin.setValue(60)
+        self.mt_distance_size_spin.setValue(80)
 
         self.include_chroma_check = QCheckBox("Write chroma output (_chroma.tbc)")
         self.include_chroma_check.setChecked(True)
