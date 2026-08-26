@@ -93,7 +93,7 @@ jobs:
       - name: Install launcher packaging dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller -r requirements-launcher.txt
+          pip install pyinstaller pefile -r requirements-launcher.txt
 
       - name: Build launcher EXE
         if: matrix.arch != 'x86_64'
@@ -127,8 +127,10 @@ jobs:
           import pathlib
           import subprocess
           import sys
+          import pefile
+          from PyQt6.QtCore import QFileInfo
           from PyQt6.QtGui import QIcon
-          from PyQt6.QtWidgets import QApplication
+          from PyQt6.QtWidgets import QApplication, QFileIconProvider
 
           exe = pathlib.Path("dist/decode-rust-gui.exe")
           if not exe.is_file():
@@ -152,11 +154,33 @@ jobs:
 
           os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
           app = QApplication([])
-          icon = QIcon(str(exe))
-          sizes = [(s.width(), s.height()) for s in icon.availableSizes()]
-          if icon.isNull() or not sizes:
-              raise SystemExit("QIcon(exe) failed to load embedded Windows icon resource")
-          print("WINDOWS_ICON_OK", sizes[:8])
+
+          # QIcon(exe) does NOT read PE-embedded icons (Qt loads image files,
+          # not PE resources). Use QFileIconProvider, which resolves the shell
+          # icon for the executable = the embedded PE icon.
+          embedded = QFileIconProvider().icon(QFileInfo(str(exe)))
+          emb_sizes = [(s.width(), s.height()) for s in embedded.availableSizes()]
+          if embedded.isNull() or not emb_sizes:
+              raise SystemExit(f"QFileIconProvider failed to load embedded EXE icon (isNull={embedded.isNull()}, sizes={emb_sizes})")
+
+          # Hard PE-resource check: the exe actually contains an icon group
+          # resource (proves PyInstaller embedded our --icon, not a missing icon).
+          RT_ICON = 3
+          RT_GROUP_ICON = 14
+          pe = pefile.PE(str(exe), fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+          res_ids = [e.id for e in getattr(pe, "DIRECTORY_ENTRY_RESOURCE", []).entries if e.id is not None]
+          if RT_GROUP_ICON not in res_ids or RT_ICON not in res_ids:
+              raise SystemExit(f"exe missing embedded icon resources: ids={res_ids}")
+
+          # The bundled .ico fallback (used by the launcher runtime) is a valid, Qt-loadable icon.
+          src_ico = pathlib.Path("resources/icon/tape-decode-rust.ico")
+          fallback = QIcon(str(src_ico))
+          fb_sizes = [(s.width(), s.height()) for s in fallback.availableSizes()]
+          if fallback.isNull() or not fb_sizes:
+              raise SystemExit(f"bundled .ico fallback failed to load (isNull={fallback.isNull()}, sizes={fb_sizes})")
+
+          print("WINDOWS_ICON_OK embedded=", emb_sizes[:8], "pe_resources=", res_ids, "fallback=", fb_sizes[:8])
           app.quit()
           '@
           python -c $code
