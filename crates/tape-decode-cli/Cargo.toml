@@ -18,6 +18,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tape-decode = { path = "../tape-decode" }
 libc = "0.2"
+flacenc = { version = "0.4", default-features = false }
+md-5 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -23,6 +23,9 @@ use tape_decode::{
 
 const DEFAULT_THRESHOLD_P_DDD: f32 = 0.18;
 const DEFAULT_HYSTERESIS: f32 = 1.25;
+/// Below this, a FLAC header rate cannot be the RF rate of a capture (the
+/// lowest capture rates in use are a few Msps).
+const MIN_RF_SAMPLE_RATE_HZ: f64 = 1.0e6;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliFieldOrderAction {
@@ -109,6 +112,10 @@ enum Command {
     ListProfiles(ListProfilesArgs),
     /// Compare two decode outputs.
     Compare(CompareArgs),
+    /// Map recorded content vs unrecorded tape in an RF capture.
+    Scan(ScanArgs),
+    /// Cut an RF capture FLAC down to its recorded span.
+    Trim(TrimArgs),
 }
 
 #[derive(Args, Debug)]
@@ -330,6 +337,120 @@ struct CompareArgs {
     float_rel_tol: f64,
 }
 
+#[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("scan_profile_source")
+        .required(true)
+        .args(["profile", "profile_file"]),
+))]
+struct ScanArgs {
+    /// Profile name (selects the luma FM carrier band).
+    #[arg(long)]
+    profile: Option<String>,
+    /// Path to a profile to load instead of an embedded profile.
+    #[arg(long, alias = "profile_file")]
+    profile_file: Option<PathBuf>,
+    /// Input RF sample rate in MHz; Hz, kHz, MHz, M, and k suffixes are accepted.
+    #[arg(long, value_parser = parse_frequency)]
+    frequency: Option<f64>,
+    /// Input format.
+    #[arg(long, value_enum, ignore_case = true, default_value = "flac")]
+    input_format: CliSampleFormat,
+    /// Distance between probes, in seconds of tape.
+    #[arg(long, default_value_t = 2.0)]
+    stride: f64,
+    /// Signal or blank events shorter than this are merged away, in seconds.
+    #[arg(long, default_value_t = 2.0)]
+    min_event: f64,
+    /// Margin around the recorded span for the suggested trim bounds, seconds.
+    #[arg(long, default_value_t = 3.0)]
+    margin: f64,
+    /// Print the report as JSON on standard output.
+    #[arg(long)]
+    json: bool,
+    /// Input RF capture file.
+    infile: PathBuf,
+}
+
+#[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("trim_bounds")
+        .required(true)
+        .multiple(true)
+        .args(["auto", "start", "end"]),
+))]
+struct TrimArgs {
+    /// Scan the capture first and cut around the recorded span.
+    #[arg(long, conflicts_with_all = ["start", "end"])]
+    auto: bool,
+    /// Keep from this time (H:MM:SS.s, or plain seconds), default 0.
+    #[arg(long, value_parser = parse_tape_time)]
+    start: Option<f64>,
+    /// Keep up to this time (H:MM:SS.s, or plain seconds), default end of data.
+    #[arg(long, value_parser = parse_tape_time)]
+    end: Option<f64>,
+    /// Profile name (required with --auto).
+    #[arg(long)]
+    profile: Option<String>,
+    /// Path to a profile to load instead of an embedded profile.
+    #[arg(long, alias = "profile_file")]
+    profile_file: Option<PathBuf>,
+    /// Input RF sample rate in MHz; Hz, kHz, MHz, M, and k suffixes are accepted.
+    #[arg(long, value_parser = parse_frequency)]
+    frequency: Option<f64>,
+    /// Margin kept around the recorded span with --auto, seconds.
+    #[arg(long, default_value_t = 3.0)]
+    margin: f64,
+    /// Companion linear-audio FLAC cut over the same time range (at its own
+    /// sample rate), written next to it as `<stem>_trimmed.flac`.
+    #[arg(long)]
+    linear: Option<PathBuf>,
+    /// Output path for --linear; defaults to `<stem>_trimmed.flac` next to it.
+    #[arg(long, requires = "linear")]
+    linear_output: Option<PathBuf>,
+    /// Output path; defaults to `<stem>_trimmed.flac` next to the input.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Allow overwriting outputs.
+    #[arg(long)]
+    overwrite: bool,
+    /// Input RF capture FLAC file.
+    infile: PathBuf,
+}
+
+/// Parses a tape timestamp as `H:MM:SS.s`, `MM:SS.s`, or plain seconds
+/// (matching the format `scan::format_tape_time` prints for suggested trim
+/// bounds, so its output can be pasted straight into `--start`/`--end`).
+fn parse_tape_time(value: &str) -> Result<f64> {
+    let value = value.trim();
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() > 3 {
+        bail!("invalid timestamp {value:?}: expected H:MM:SS.s");
+    }
+    if parts.len() == 1 {
+        return value
+            .parse::<f64>()
+            .with_context(|| format!("invalid timestamp {value:?}: expected H:MM:SS.s or seconds"));
+    }
+    let seconds: f64 = parts[parts.len() - 1]
+        .parse()
+        .with_context(|| format!("invalid seconds component in timestamp {value:?}"))?;
+    let minutes: f64 = parts[parts.len() - 2]
+        .parse()
+        .with_context(|| format!("invalid minutes component in timestamp {value:?}"))?;
+    if !(0.0..60.0).contains(&minutes) || !(0.0..60.0).contains(&seconds) {
+        bail!("invalid timestamp {value:?}: minutes and seconds must be in [0, 60)");
+    }
+    let hours: f64 = if parts.len() == 3 {
+        parts[0]
+            .parse()
+            .with_context(|| format!("invalid hours component in timestamp {value:?}"))?
+    } else {
+        0.0
+    };
+    Ok(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
 fn parse_frequency(value: &str) -> Result<f64> {
     let value = value.trim();
     let suffix_start = value
@@ -352,7 +473,152 @@ pub fn run_cli() -> Result<()> {
         Command::WriteProfile(args) => run_write_profile(args),
         Command::ListProfiles(args) => run_list_profiles(args),
         Command::Compare(args) => run_compare(args),
+        Command::Scan(args) => run_scan(args),
+        Command::Trim(args) => run_trim(args),
     }
+}
+
+fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .try_init();
+}
+
+fn run_scan(cli: ScanArgs) -> Result<()> {
+    init_logging();
+    let profile = match (cli.profile.as_deref(), cli.profile_file.as_deref()) {
+        (Some(name), None) => load_profile(name)?,
+        (None, Some(path)) => load_profile_file(path)?,
+        _ => bail!("exactly one of --profile or --profile-file is required"),
+    };
+    let params = crate::scan::ScanParams {
+        sample_rate_hz: cli.frequency.unwrap_or(40.0) * 1.0e6,
+        stride_secs: cli.stride,
+        min_event_secs: cli.min_event,
+        margin_secs: cli.margin,
+    };
+    let report = crate::scan::scan_file(&cli.infile, cli.input_format.into(), &profile, &params)?;
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::scan::report_to_json(&report))?
+        );
+    } else {
+        crate::scan::print_report(&report);
+    }
+    Ok(())
+}
+
+fn run_trim(cli: TrimArgs) -> Result<()> {
+    init_logging();
+    let sample_rate_hz = match cli.frequency {
+        Some(mhz) => mhz * 1.0e6,
+        None => {
+            // RF captures carry rate tags scaled down to fit the 20-bit
+            // STREAMINFO field (28636 for 28.636 Msps), so trimming one at its
+            // header rate would cut a thousandth of the intended range. Only
+            // accept the header rate when it is itself an RF rate.
+            let rate = f64::from(crate::trim::RawFlacReader::open(&cli.infile)?.sample_rate);
+            if rate < MIN_RF_SAMPLE_RATE_HZ {
+                bail!(
+                    "the FLAC header of {} reports {rate} Hz, which is not an RF sample rate: \
+                     captures tag the rate in kHz (28636 means 28.636 Msps). \
+                     Re-run with the real rate, e.g. --frequency {:.3}",
+                    cli.infile.display(),
+                    rate / 1.0e3,
+                );
+            }
+            tracing::info!("no --frequency given; using the FLAC header rate {rate} Hz");
+            rate
+        }
+    };
+
+    let (start_secs, end_secs): (f64, Option<f64>) = if cli.auto {
+        let profile = match (cli.profile.as_deref(), cli.profile_file.as_deref()) {
+            (Some(name), None) => load_profile(name)?,
+            (None, Some(path)) => load_profile_file(path)?,
+            _ => bail!("--auto requires --profile or --profile-file"),
+        };
+        let params = crate::scan::ScanParams {
+            sample_rate_hz,
+            stride_secs: 2.0,
+            min_event_secs: 2.0,
+            margin_secs: cli.margin,
+        };
+        let report = crate::scan::scan_file(&cli.infile, SampleFormat::Flac, &profile, &params)?;
+        crate::scan::print_report(&report);
+        let Some((start, end)) = report.suggested else {
+            bail!("no recorded content found; refusing to trim");
+        };
+        (
+            start as f64 / sample_rate_hz,
+            Some(end as f64 / sample_rate_hz),
+        )
+    } else {
+        (cli.start.unwrap_or(0.0), cli.end)
+    };
+
+    let output = cli
+        .output
+        .clone()
+        .unwrap_or_else(|| crate::trim::default_output_path(&cli.infile));
+    let start_frame = (start_secs * sample_rate_hz) as u64;
+    let end_frame = end_secs.map(|secs| (secs * sample_rate_hz) as u64);
+    tracing::info!(
+        "trimming {} to [{}, {}]",
+        cli.infile.display(),
+        crate::scan::format_tape_time(start_frame, sample_rate_hz),
+        end_frame.map_or("end".to_string(), |f| crate::scan::format_tape_time(
+            f,
+            sample_rate_hz
+        )),
+    );
+    let stats = crate::trim::cut_flac(&cli.infile, &output, start_frame, end_frame, cli.overwrite)?;
+    if stats.truncated_input {
+        tracing::warn!("input ended on a truncated FLAC frame (interrupted capture); trimmed up to the last decodable sample");
+    }
+    if let Some(requested) = end_frame.map(|end| end.saturating_sub(start_frame)) {
+        if stats.frames_written < requested {
+            tracing::warn!(
+                "input ended {} short of --end: kept {} of the {} samples requested",
+                crate::scan::format_tape_time(requested - stats.frames_written, sample_rate_hz),
+                stats.frames_written,
+                requested,
+            );
+        }
+    }
+    let in_bytes = std::fs::metadata(&cli.infile).map(|m| m.len()).unwrap_or(0);
+    let out_bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "RF: kept {} ({} samples) -> {} ({:.1} GiB -> {:.1} GiB)",
+        crate::scan::format_tape_time(stats.frames_written, sample_rate_hz),
+        stats.frames_written,
+        output.display(),
+        in_bytes as f64 / (1u64 << 30) as f64,
+        out_bytes as f64 / (1u64 << 30) as f64,
+    );
+
+    if let Some(linear) = &cli.linear {
+        let linear_rate = f64::from(crate::trim::RawFlacReader::open(linear)?.sample_rate);
+        let linear_out = cli
+            .linear_output
+            .clone()
+            .unwrap_or_else(|| crate::trim::default_output_path(linear));
+        let linear_start = (start_secs * linear_rate) as u64;
+        let linear_end = end_secs.map(|secs| (secs * linear_rate) as u64);
+        let linear_stats =
+            crate::trim::cut_flac(linear, &linear_out, linear_start, linear_end, cli.overwrite)?;
+        println!(
+            "linear: kept {} ({} samples) -> {}",
+            crate::scan::format_tape_time(linear_stats.frames_written, linear_rate),
+            linear_stats.frames_written,
+            linear_out.display(),
+        );
+    }
+    Ok(())
 }
 
 fn run_decode(cli: DecodeArgs) -> Result<()> {
