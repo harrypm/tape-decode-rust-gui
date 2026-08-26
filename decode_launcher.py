@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import shlex
 import shutil
@@ -109,6 +110,8 @@ MICROARCH_UI_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Auto (use host default)", MICROARCH_AUTO),
 ) + tuple((label, label) for label in MICROARCH_LEVELS)
 
+WINDOWS_APP_USER_MODEL_ID = "harrypm.tape_decode_rust_gui.decode_launcher"
+
 def _default_mt_threads() -> int:
     """Return a high-side rounded default at ~80% of system logical threads."""
     system_threads = max(1, os.cpu_count() or 1)
@@ -193,8 +196,19 @@ def _shell_join_windows(parts: list[str]) -> str:
 def _shell_join_platform(parts: list[str]) -> str:
     return _shell_join_windows(parts) if os.name == "nt" else _shell_join(parts)
 
+def _set_windows_app_user_model_id() -> None:
+    """Set a stable Windows AppUserModelID so taskbar/titlebar icon binding is reliable."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            WINDOWS_APP_USER_MODEL_ID
+        )
+    except Exception:
+        pass
+
 def _resolve_icon_path() -> Optional[Path]:
-    """Find a suitable icon PNG for the window/taskbar icon.
+    """Find a suitable icon file for the window/taskbar icon.
 
     Works in source tree, onefile PyInstaller bundles (_MEIPASS), next to the
     executable, and inside AppImages (checks typical hicolor locations).
@@ -205,6 +219,12 @@ def _resolve_icon_path() -> Optional[Path]:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         mp = Path(meipass)
+        if os.name == "nt":
+            candidates.extend([
+                mp / "resources" / "icon" / "tape-decode-rust.ico",
+                mp / "tape-decode-rust.ico",
+                mp / "decode-rust-gui.ico",
+            ])
         candidates.extend([
             mp / "resources" / "icon" / "tape-decode-rust-256.png",
             mp / "tape-decode-rust-256.png",
@@ -215,6 +235,12 @@ def _resolve_icon_path() -> Optional[Path]:
     if getattr(sys, "frozen", False) or meipass:
         try:
             exe_dir = Path(sys.executable).resolve().parent
+            if os.name == "nt":
+                candidates.extend([
+                    exe_dir / "resources" / "icon" / "tape-decode-rust.ico",
+                    exe_dir / "tape-decode-rust.ico",
+                    exe_dir / "decode-rust-gui.ico",
+                ])
             candidates.extend([
                 exe_dir / "resources" / "icon" / "tape-decode-rust-256.png",
                 exe_dir / "tape-decode-rust-256.png",
@@ -240,6 +266,12 @@ def _resolve_icon_path() -> Optional[Path]:
     # Source tree (development)
     try:
         here = Path(__file__).resolve().parent
+        if os.name == "nt":
+            candidates.extend([
+                here / "resources" / "icon" / "tape-decode-rust.ico",
+                here.parent / "resources" / "icon" / "tape-decode-rust.ico",
+                Path.cwd() / "resources" / "icon" / "tape-decode-rust.ico",
+            ])
         candidates.extend([
             here / "resources" / "icon" / "tape-decode-rust-256.png",
             here.parent / "resources" / "icon" / "tape-decode-rust-256.png",
@@ -1083,6 +1115,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Decode Launcher (Qt) for running tape-decode commands"
     )
     parser.parse_args(argv)
+    _set_windows_app_user_model_id()
 
     app = QApplication(sys.argv)
     _apply_fusion_dark_mode(app)
@@ -1090,12 +1123,29 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Set window + app icon for taskbar/dock/titlebar on all platforms.
     # This is especially important for Linux AppImage/taskbar integration.
-    icon_path = _resolve_icon_path()
-    if icon_path:
+    icon: Optional[QIcon] = None
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        # Prefer the icon resource embedded in the .exe on Windows bundles.
+        # This carries all icon sizes and is the most reliable for titlebar/taskbar.
         try:
-            ico = QIcon(str(icon_path))
-            app.setWindowIcon(ico)
-            window.setWindowIcon(ico)
+            bundled_icon = QIcon(sys.executable)
+            if not bundled_icon.isNull():
+                icon = bundled_icon
+        except Exception:
+            pass
+    if icon is None:
+        icon_path = _resolve_icon_path()
+        if icon_path:
+            try:
+                candidate_icon = QIcon(str(icon_path))
+                if not candidate_icon.isNull():
+                    icon = candidate_icon
+            except Exception:
+                pass
+    if icon is not None:
+        try:
+            app.setWindowIcon(icon)
+            window.setWindowIcon(icon)
         except Exception:
             pass
 
