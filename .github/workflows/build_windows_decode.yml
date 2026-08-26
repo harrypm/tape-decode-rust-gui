@@ -118,6 +118,49 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "selftest exited $LASTEXITCODE" }
           if (-not ($out -match 'SELFTEST OK')) { throw "SELFTEST OK missing from output" }
 
+      - name: Verify bundled Windows icon payload + embedded EXE icon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $code = @'
+          import os
+          import pathlib
+          import subprocess
+          import sys
+          from PyQt6.QtGui import QIcon
+          from PyQt6.QtWidgets import QApplication
+
+          exe = pathlib.Path("dist/decode-rust-gui.exe")
+          if not exe.is_file():
+              raise SystemExit(f"missing launcher executable: {exe}")
+
+          toc = subprocess.check_output(
+              [sys.executable, "-m", "PyInstaller.utils.cliutils.archive_viewer", "-l", "-b", str(exe)],
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          toc_norm = toc.replace("/", "\\").lower()
+          required_entries = [
+              "pyqt6\\qt6\\plugins\\platforms\\qwindows.dll",
+              "tape-decode-rust.ico",
+              "decode-rust-gui.ico",
+          ]
+          missing = [entry for entry in required_entries if entry not in toc_norm]
+          if missing:
+              raise SystemExit(f"missing bundled icon/plugin entries: {missing}")
+
+          os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+          app = QApplication([])
+          icon = QIcon(str(exe))
+          sizes = [(s.width(), s.height()) for s in icon.availableSizes()]
+          if icon.isNull() or not sizes:
+              raise SystemExit("QIcon(exe) failed to load embedded Windows icon resource")
+          print("WINDOWS_ICON_OK", sizes[:8])
+          app.quit()
+          '@
+          python -c $code
+
       - name: Package versioned EXE ZIP
         shell: pwsh
         run: |
