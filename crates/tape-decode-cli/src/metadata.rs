@@ -44,6 +44,11 @@ pub(crate) struct VideoParameters {
     pub(crate) medium: String,
     pub(crate) field_width: usize,
     pub(crate) sample_rate: f64,
+    /// Input RF capture sample rate in Hz; written as `rfSourceSampleRate`.
+    /// `#[serde(default)]` so sidecars produced before this field existed still
+    /// deserialize (compare treats it as provenance and does not diff it).
+    #[serde(default)]
+    pub(crate) rf_source_sample_rate: f64,
     pub(crate) black_16b_ire: f64,
     pub(crate) white_16b_ire: f64,
     pub(crate) field_height: usize,
@@ -54,9 +59,10 @@ pub(crate) struct VideoParameters {
     pub(crate) tape_format: String,
 }
 
-/// Provenance metadata derived from the selected decode profile name and the
-/// build's git state. Threaded through to [`metadata_to_tbc`] so the JSON
-/// sidecar carries a clear Medium / Format / System / git chain.
+/// Provenance metadata derived from the selected decode profile name, the
+/// build's git state, and the RF source sample rate. Threaded through to
+/// [`metadata_to_tbc`] so the JSON sidecar carries a clear Medium / Format /
+/// System / git chain plus `rfSourceSampleRate` for post audio alignment.
 #[derive(Clone)]
 pub(crate) struct MetadataContext {
     pub(crate) medium: String,
@@ -65,6 +71,9 @@ pub(crate) struct MetadataContext {
     pub(crate) git_branch: String,
     pub(crate) git_commit: String,
     pub(crate) git_release: String,
+    /// Input RF capture sample rate in Hz (from `--frequency`), written to the
+    /// sidecar as `videoParameters.rfSourceSampleRate`.
+    pub(crate) rf_source_sample_rate_hz: f64,
 }
 
 /// Recording-speed suffixes that may trail a profile name and are not part of
@@ -89,9 +98,11 @@ pub(crate) fn parse_profile_flags(name: &str) -> (&str, &str) {
 }
 
 impl MetadataContext {
-    /// Build the metadata context from the selected profile name. A custom
-    /// `--profile-file` (no name) yields an "UNKNOWN" system / "custom" format.
-    pub(crate) fn from_profile_name(name: Option<&str>) -> Self {
+    /// Build the metadata context from the selected profile name and the RF
+    /// source sample rate. A custom `--profile-file` (no name) yields an
+    /// "UNKNOWN" system / "custom" format. `rf_source_sample_rate_hz` is the
+    /// input RF capture rate in Hz (e.g. 40 MHz -> 40_000_000.0).
+    pub(crate) fn from_profile_name(name: Option<&str>, rf_source_sample_rate_hz: f64) -> Self {
         let (system, format) = match name {
             Some(n) if !n.trim().is_empty() => parse_profile_flags(n),
             _ => ("UNKNOWN", "custom"),
@@ -104,6 +115,7 @@ impl MetadataContext {
             git_branch: option_env!("GIT_BRANCH").unwrap_or("UNKNOWN").to_string(),
             git_commit: option_env!("GIT_COMMIT").unwrap_or("UNKNOWN").to_string(),
             git_release: option_env!("GIT_RELEASE").unwrap_or("UNKNOWN").to_string(),
+            rf_source_sample_rate_hz,
         }
     }
 }
@@ -133,6 +145,7 @@ pub(crate) fn metadata_to_tbc(
             medium: ctx.medium.clone(),
             field_width: metadata.field_width,
             sample_rate: metadata.sample_rate,
+            rf_source_sample_rate: ctx.rf_source_sample_rate_hz,
             black_16b_ire: metadata.black_16b_ire,
             white_16b_ire: metadata.white_16b_ire,
             field_height: metadata.field_height,
@@ -183,7 +196,7 @@ mod tests {
     #[test]
     fn metadata_to_tbc_writes_context_flags() {
         let dm = dummy_decoder_metadata();
-        let ctx = MetadataContext::from_profile_name(Some("SECAM_VHS_LP"));
+        let ctx = MetadataContext::from_profile_name(Some("SECAM_VHS_LP"), 40.0 * 1000_000.0);
         let tbc = metadata_to_tbc(&dm, 42, &ctx);
         assert_eq!(tbc.video_parameters.system, "SECAM");
         assert_eq!(tbc.video_parameters.tape_format, "VHS");
@@ -193,7 +206,7 @@ mod tests {
 
     #[test]
     fn metadata_context_custom_profile_file() {
-        let ctx = MetadataContext::from_profile_name(None);
+        let ctx = MetadataContext::from_profile_name(None, 40.0 * 1000_000.0);
         assert_eq!(ctx.system, "UNKNOWN");
         assert_eq!(ctx.format, "custom");
         assert_eq!(ctx.medium, "TAPE");
@@ -202,7 +215,7 @@ mod tests {
     #[test]
     fn metadata_to_tbc_serializes_camel_case_with_git() {
         let dm = dummy_decoder_metadata();
-        let ctx = MetadataContext::from_profile_name(Some("405_BETAMAX"));
+        let ctx = MetadataContext::from_profile_name(Some("405_BETAMAX"), 40.0 * 1000_000.0);
         let tbc = metadata_to_tbc(&dm, 1, &ctx);
         let json = serde_json::to_string(&tbc).expect("serialize");
         // camelCase JSON keys carry the profile-derived flags.
@@ -217,5 +230,23 @@ mod tests {
         assert_ne!(ctx.git_commit, "UNKNOWN", "git commit not injected by build.rs");
         assert_ne!(ctx.git_release, "UNKNOWN", "git release not injected by build.rs");
         assert_ne!(ctx.git_release, "", "git release is empty");
+    }
+
+    #[test]
+    fn metadata_to_tbc_writes_rf_source_sample_rate_in_hz() {
+        let dm = dummy_decoder_metadata();
+        // A 40 MHz RF capture is recorded in Hz, matching videoParameters.sampleRate's unit.
+        let ctx = MetadataContext::from_profile_name(Some("PAL_VHS"), 40.0 * 1000_000.0);
+        let tbc = metadata_to_tbc(&dm, 1, &ctx);
+        assert_eq!(tbc.video_parameters.rf_source_sample_rate, 40_000_000.0);
+        let json = serde_json::to_string(&tbc).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let rf = value["videoParameters"]["rfSourceSampleRate"]
+            .as_f64()
+            .expect("rfSourceSampleRate number");
+        assert!(
+            (rf - 40_000_000.0).abs() < 1e-6,
+            "rfSourceSampleRate was {rf}, expected 40000000.0; json: {json}"
+        );
     }
 }

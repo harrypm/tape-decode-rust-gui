@@ -484,7 +484,11 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
 
     let spec = Arc::new(DecoderSpec::new(&request)?);
     let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
-    let metadata_context = MetadataContext::from_profile_name(cli.profile.as_deref());
+    // Record the RF source sample rate (input --frequency, MHz) into the JSON
+    // sidecar as videoParameters.rfSourceSampleRate (Hz) for post audio alignment.
+    let rf_source_sample_rate_hz = cli.frequency.unwrap_or(40.0) * 1_000_000.0;
+    let metadata_context =
+        MetadataContext::from_profile_name(cli.profile.as_deref(), rf_source_sample_rate_hz);
     let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out, metadata_context)?;
     let start_offset = cli.offset.unwrap_or(0);
     // Both paths stream the input once from the start (so they work on non-seekable
@@ -885,6 +889,7 @@ fn compare_video_parameters(expected: &VideoParameters, actual: &VideoParameters
     // not checked: system
     diff.int(&format!("{p}.fieldWidth"), expected.field_width, actual.field_width);
     diff.float(&format!("{p}.sampleRate"), expected.sample_rate, actual.sample_rate);
+    // not checked: rfSourceSampleRate (RF source provenance, like system/git fields)
     diff.float(&format!("{p}.black16bIRE"), expected.black_16b_ire, actual.black_16b_ire);
     diff.float(&format!("{p}.white16bIRE"), expected.white_16b_ire, actual.white_16b_ire);
     diff.int(&format!("{p}.fieldHeight"), expected.field_height, actual.field_height);
