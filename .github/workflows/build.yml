@@ -21,6 +21,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TBC_TOOLS_REPO: "harrypm/tbc-tools"
 
 jobs:
   windows-decode:
@@ -719,6 +720,27 @@ jobs:
         with:
           path: artifacts
 
+      - name: Download latest tbc-tools release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/tbc-tools
+          TBC_TOOLS_TAG="$(gh api "repos/${TBC_TOOLS_REPO}/releases/latest" --jq '.tag_name')"
+          if [ -z "${TBC_TOOLS_TAG}" ]; then
+            echo "Unable to resolve latest tbc-tools release tag."
+            exit 1
+          fi
+          echo "Using tbc-tools release: ${TBC_TOOLS_TAG}"
+          gh release download "${TBC_TOOLS_TAG}" \
+            --repo "${TBC_TOOLS_REPO}" \
+            --dir "artifacts/tbc-tools"
+          if ! compgen -G "artifacts/tbc-tools/*" > /dev/null; then
+            echo "No assets downloaded from latest tbc-tools release."
+            exit 1
+          fi
+          echo "Downloaded tbc-tools assets:"
+          ls -1 artifacts/tbc-tools
+
       - name: Generate release notes
         id: notes
         shell: bash
@@ -774,7 +796,7 @@ jobs:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          ASSETS="$(find artifacts -type f \( -name '*.zip' -o -name '*.dmg' \))"
+          ASSETS="$(find artifacts -type f \( -name '*.zip' -o -name '*.dmg' -o -name '*.tar.xz' \))"
           if [ -z "$ASSETS" ]; then
             echo "No release assets found under artifacts/" >&2
             exit 1
