@@ -1,26 +1,27 @@
 # tape-decode
 
-A decoder for analog tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, commit [6cfd37b5](https://github.com/oyvindln/vhs-decode/commit/6cfd37b5b910a17b4cc89f88cbb117a0560a4d70).
+A decoder for analog videotape tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, with a cut off at commit [6cfd37b5](https://github.com/oyvindln/vhs-decode/commit/6cfd37b5b910a17b4cc89f88cbb117a0560a4d70).
+
+
+## GUI 
+
+
+<img width="862" height="559" alt="image" src="https://github.com/user-attachments/assets/3c0cc10b-f141-4248-a457-5b0fc1833030" />
 
 ## Installation
 
+You can install for Windows / MacOS / Linux for x86 and ARM64 via self-contained binary [releases here](https://github.com/harrypm/tape-decode-rust-gui/releases)
+
+For x86-64, ensure you use the correct one for your [CPU feature level](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels).
+
+Use nightly Rust for new feature testing builds.
+
 ### From source
 
-Use nightly Rust for best performance builds.
 
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
-
-
-### Pre-built binaries
-
-Pre-built binaries for x86-64 and aarch64 Windows and Linux (glibc) are available in Releases. For x86-64, ensure you use the correct one for your [CPU feature level](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels).
-
-Cross-platform GUI package workflows are also available for:
-- Windows launcher EXE (x86_64 + arm64): `.github/workflows/build_windows_decode.yml`
-- macOS app bundle + DMG (x86_64 + arm64): `.github/workflows/build_macos_decode.yml`
-- Linux AppImage (x86_64 + aarch64): `.github/workflows/build_linux_decode.yml`
 
 ## Usage
 
