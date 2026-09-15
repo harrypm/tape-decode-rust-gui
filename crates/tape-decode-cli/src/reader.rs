@@ -3,8 +3,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 
 use anyhow::{bail, Context as _, Result};
-use tracing::error;
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
+use tracing::error;
 
 /// Input encoding. The raw formats widen straight to `f32` with no rescaling
 /// (so `S16LE` is little-endian `i16`, `F32LE` is passed through verbatim);
