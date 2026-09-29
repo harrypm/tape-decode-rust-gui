@@ -1,5 +1,22 @@
 #!/bin/sh
+# AppRun - launches decode-rust-gui and registers it with the desktop.
+#
+# AppImages are not registered with the desktop automatically. Without a
+# matching user-level .desktop file, Cinnamon/Mint (and GNOME/KDE) cannot tie
+# the running window to a launcher: the taskbar shows a placeholder icon,
+# pinning does not stick and the shell generates a stray
+# "Decode-Rust-Gui.cinnamon-generated.desktop".
+#
+# On GUI launches this installs ~/.local/share/applications/decode-rust-gui.desktop
+# (Exec = the AppImage file itself) and the hicolor icon. The window identity set
+# in decode_launcher.py (WM_CLASS class "decode-rust-gui", desktop file name
+# "decode-rust-gui") matches that file.
+#
+# Set DECODE_RUST_GUI_NO_INTEGRATION=1 to skip the desktop integration.
 HERE="$(dirname "$(readlink -f "$0")")"
+
+# X11 WM_CLASS instance name (the class comes from decode_launcher.py).
+export RESOURCE_NAME="decode-rust-gui"
 
 # Help PyQt6 locate its platform plugins inside the AppImage / onefile extraction.
 # PyInstaller collects them under PyQt6/Qt6/plugins when using --collect-all.
@@ -22,5 +39,80 @@ if [ -z "${QT_QPA_PLATFORM:-}" ]; then
     : # let Qt auto-detect, but ensure xcb is available via plugin path above
   fi
 fi
+
+decode_rust_gui_integrate() {
+  # Only when running from a real AppImage file (APPIMAGE is the file path;
+  # HERE is a temporary mount that must never end up in a .desktop file).
+  [ -n "${APPIMAGE:-}" ] && [ -f "${APPIMAGE}" ] || return 0
+  [ -z "${DECODE_RUST_GUI_NO_INTEGRATION:-}" ] || return 0
+
+  # Mirror decode.py: the GUI opens only with no arguments or a launcher alias.
+  # Anything else is a tape-decode CLI passthrough / --selftest (CI) and must
+  # not touch the user's desktop files.
+  if [ "$#" -gt 0 ]; then
+    first="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+    case "${first}" in
+      decode-launcher | decode_launcher | launcher | gui) ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  # Characters that would need multi-level .desktop escaping: skip rather
+  # than write a broken launcher.
+  case "${APPIMAGE}" in
+    *[\"\`\$\\]*) return 0 ;;
+  esac
+
+  di_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+  di_apps_dir="${di_data_home}/applications"
+  di_icon_dir="${di_data_home}/icons/hicolor/256x256/apps"
+  di_desktop="${di_apps_dir}/decode-rust-gui.desktop"
+  di_icon_src="${HERE}/usr/share/icons/hicolor/256x256/apps/decode-rust-gui.png"
+  di_icon_dst="${di_icon_dir}/decode-rust-gui.png"
+  di_tmp="${di_desktop}.tmp.$$"
+  di_changed=0
+
+  mkdir -p "${di_apps_dir}" "${di_icon_dir}" 2>/dev/null || return 0
+
+  # '%' is the field-code escape character in Exec.
+  di_exec_path="$(printf '%s' "${APPIMAGE}" | sed 's/%/%%/g')"
+
+  cat > "${di_tmp}" 2>/dev/null <<EOF || return 0
+[Desktop Entry]
+Name=decode-rust-gui
+Comment=decode-rust-gui Decode Launcher
+Exec="${di_exec_path}"
+TryExec=${APPIMAGE}
+Terminal=false
+Icon=decode-rust-gui
+Type=Application
+Categories=AudioVideo;Video;
+StartupWMClass=decode-rust-gui
+EOF
+
+  # Rewrite when missing or when it points at a different AppImage/version,
+  # so the launcher always follows the AppImage that was run last.
+  if [ -f "${di_desktop}" ] && cmp -s "${di_tmp}" "${di_desktop}"; then
+    rm -f "${di_tmp}"
+  elif mv -f "${di_tmp}" "${di_desktop}" 2>/dev/null; then
+    di_changed=1
+  else
+    rm -f "${di_tmp}"
+  fi
+
+  if [ -f "${di_icon_src}" ]; then
+    if [ ! -f "${di_icon_dst}" ] || ! cmp -s "${di_icon_src}" "${di_icon_dst}"; then
+      cp -f "${di_icon_src}" "${di_icon_dst}" 2>/dev/null && di_changed=1
+    fi
+  fi
+
+  if [ "${di_changed}" -eq 1 ]; then
+    update-desktop-database "${di_apps_dir}" >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t "${di_data_home}/icons/hicolor" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+decode_rust_gui_integrate "$@" || true
 
 exec "${HERE}/usr/bin/decode-rust-gui" "$@"
