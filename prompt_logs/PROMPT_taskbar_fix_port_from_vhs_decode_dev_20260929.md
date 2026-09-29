@@ -42,3 +42,12 @@ tape-decode-rust
 ## Follow-up prompt: "commit push and run test builds of both also make an overall dev note about this for future apps"
 - Dev note written: ~/DEV_NOTE_linux_appimage_taskbar_integration.md (copies in FLAC-Chop/docs and tape-decode-rust/docs).
 - Committed only the taskbar-fix files + dev note (unrelated untracked files left alone).
+
+## Push + CI results
+- Local env mishap: an earlier test `export HOME=...` leaked into the persistent shell (hid git identity/credentials). Restored HOME; commits re-verified as harrypm <harry@opcomedia.com>.
+- FLAC-Chop: push rejected (remote had 2 readme-only commits) -> `git pull --rebase` -> pushed 7f080c1. build.yml dispatched (create_release=false): run 36610699222, all jobs green. Tests workflow on push: green.
+- tape-decode-rust: pushed e16d1d8 to fork/master (harrypm/tape-decode-rust-gui). build_linux_decode.yml run 36610703924: x86_64 + arm64 green (selftest passes).
+- Real CI AppImages (x86_64) run with sandboxed HOME on the user's X11 session: mapped window WM_CLASS flac-chop/FLAC-Chop and decode-rust-gui/decode-rust-gui; launcher .desktop + icon installed with correct Exec/StartupWMClass.
+- First probe read a hidden Qt helper window (class "Decode-rust-gui", no WM_STATE); re-probe of visible windows shows the correct class. Recorded in the dev note.
+- Follow-up docs-only commit: dev note updated with these pitfalls/results.
+- STILL NEEDS USER: real Linux Mint taskbar check with the CI AppImages; no restore point made until user confirms fixed.
