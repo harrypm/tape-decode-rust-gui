@@ -6,3 +6,4 @@ Icon=decode-rust-gui
 Type=Application
 Categories=AudioVideo;Video;
 Comment=decode-rust-gui Decode Launcher
+StartupWMClass=decode-rust-gui

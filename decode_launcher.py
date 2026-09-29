@@ -113,6 +113,10 @@ MICROARCH_UI_OPTIONS: tuple[tuple[str, str], ...] = (
 
 WINDOWS_APP_USER_MODEL_ID = "harrypm.tape_decode_rust_gui.decode_launcher"
 
+# Linux taskbar identity: must equal the AppImage's decode-rust-gui.desktop
+# basename / Icon and its StartupWMClass (resources/appimage/).
+LINUX_APP_IDENTITY = "decode-rust-gui"
+
 def _default_mt_threads() -> int:
     """Return a high-side rounded default at ~80% of system logical threads."""
     system_threads = max(1, os.cpu_count() or 1)
@@ -207,6 +211,34 @@ def _set_windows_app_user_model_id() -> None:
         )
     except Exception:
         pass
+
+def _apply_linux_app_identity() -> None:
+    """Pin the Qt window identity to ``decode-rust-gui`` on Linux.
+
+    Desktop environments (Cinnamon/Mint, GNOME, KDE) tie a running window to
+    its launcher/pinned icon through the X11 ``WM_CLASS`` or the Wayland
+    ``app_id`` (desktop file name). Qt derives both from argv[0], which inside
+    the AppImage is ``/tmp/.mount_XXXX/usr/bin/decode-rust-gui``, so the window
+    matched no .desktop file: placeholder taskbar icon plus a stray
+    ``Decode-Rust-Gui.cinnamon-generated.desktop``.
+
+    Must run after the QApplication exists and before any window is shown
+    (Qt reads the name when the native window is created). Never raises.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        from PyQt6.QtCore import QCoreApplication
+        from PyQt6.QtGui import QGuiApplication
+
+        # X11 WM_CLASS instance name; the class comes from applicationName.
+        os.environ.setdefault("RESOURCE_NAME", LINUX_APP_IDENTITY)
+        QCoreApplication.setApplicationName(LINUX_APP_IDENTITY)
+        # Wayland app_id and the freedesktop desktop-file association.
+        QGuiApplication.setDesktopFileName(LINUX_APP_IDENTITY)
+    except Exception as exc:  # cosmetic only - never stop the GUI starting
+        print(f"WARN: could not set application identity: {exc}", file=sys.stderr)
+
 
 def _resolve_icon_path() -> Optional[Path]:
     """Find a suitable icon file for the window/taskbar icon.
@@ -1119,6 +1151,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     _set_windows_app_user_model_id()
 
     app = QApplication(sys.argv)
+    _apply_linux_app_identity()
     _apply_fusion_dark_mode(app)
     window = DecodeLauncherWindow()
 
