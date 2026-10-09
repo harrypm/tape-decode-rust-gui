@@ -2,8 +2,12 @@
 
 A FM RF --> 4fsc .tbc (CVBS/S-Video) decoder for analog videotape tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, with a cut off at commit [fe3f6099](https://github.com/oyvindln/vhs-decode/commit/fe3f6099e9e6a77295f26585598f658f2d926bb4).
 
+Workflow Example
 
-## GUI 
+VCR --> ADC --> MISRC GUI --> FLAC FM RF Files --> Tape Decode --> TBC-Tools --> FFV1 Video Files
+
+
+## GUI
 
 
 <img width="500" height="" alt="launcher" src="https://github.com/user-attachments/assets/3c0cc10b-f141-4248-a457-5b0fc1833030" />
@@ -14,13 +18,16 @@ A FM RF --> 4fsc .tbc (CVBS/S-Video) decoder for analog videotape tape formats, 
 
 > Decoded Result in [tbc-tools](https://github.com/harrypm/tbc-tools) tbc-analyse. 
 
+
 ## Installation
+
 
 You can install for Windows / MacOS / Linux for x86 and ARM64 via self-contained binary [releases here](https://github.com/harrypm/tape-decode-rust-gui/releases)
 
 For x86-64, ensure you use the correct one for your [CPU feature level](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels).
 
 Use nightly Rust for new feature testing builds.
+
 
 ### From source
 
