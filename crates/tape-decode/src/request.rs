@@ -25,6 +25,11 @@ pub struct DecodeOptions {
     pub fallback_vsync: bool,
     pub field_order_action: FieldOrderAction,
     pub fm_audio_notch: f64,
+    /// Measure the 0-IRE level from each field's back porch and use it as
+    /// ire0 for the output mapping. Needed where a format's nominal FM levels
+    /// do not match the machine that recorded the tape (e.g. Quadruplex
+    /// highband against the inherited Type C geometry).
+    pub ire0_adjust: bool,
     pub use_fsc_notch_filter: bool,
 }
 
@@ -36,6 +41,7 @@ impl Default for DecodeOptions {
             fallback_vsync: false,
             field_order_action: FieldOrderAction::Detect,
             fm_audio_notch: 0.0,
+            ire0_adjust: false,
             use_fsc_notch_filter: false,
         }
     }

@@ -179,6 +179,14 @@ fn process_chroma_internal(
         );
     }
 
+    if spec.is_secam_direct() {
+        // Direct-composite SECAM (Type C / Quadruplex): the chroma block is
+        // already at the studio rest carriers in the demodulated composite,
+        // so it skips the shared burst-locked heterodyne path below entirely
+        // as well - there is no burst to lock and nothing to up-convert.
+        return secam::process_chroma_secam_direct(field, spec, &chroma, burstarea);
+    }
+
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
         burst_deemphasis(&mut chroma, field, burstarea.1 as usize)

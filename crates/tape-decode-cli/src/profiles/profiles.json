@@ -1954,6 +1954,64 @@
       "ire0": 4560000.0
     }
   },
+  "SECAM_QUADRUPLEX": {
+    "format": {
+      "base": "QUADRUPLEX",
+      "decoder_params": {
+        "is_composite_color": false,
+        "chroma_offset": 0.0,
+        "color_under_carrier": 4328125.0,
+        "video_bpf": {
+          "high": 12000000.0,
+          "low": 1500000.0,
+          "order": 1
+        },
+        "video_hpf_extra_order": 1,
+        "video_lpf_extra": 14000000.0,
+        "video_lpf_extra_order": 3,
+        "video_lpf_freq": 3200000.0,
+        "video_lpf_order": 12
+      }
+    },
+    "decode_options": {
+      "fallback_vsync": true,
+      "ire0_adjust": true
+    },
+    "sys_params": {
+      "base": "SECAM",
+      "hz_ire": 15200.0,
+      "ire0": 7803000.0
+    }
+  },
+  "SECAM_TYPEC": {
+    "decode_options": {
+      "ire0_adjust": true
+    },
+    "format": {
+      "base": "TYPEC",
+      "decoder_params": {
+        "is_composite_color": false,
+        "chroma_bpf_upper": 4880000.0,
+        "chroma_offset": 0.0,
+        "color_under_carrier": 4328125.0,
+        "deemph": {
+          "gain": 9.53,
+          "mid": 478500.0
+        },
+        "video_bpf": {
+          "low": 1500000.0
+        },
+        "video_hpf_extra": 500000.0,
+        "video_lpf_freq": 3200000.0,
+        "video_lpf_order": 12
+      }
+    },
+    "sys_params": {
+      "base": "SECAM",
+      "hz_ire": 12167.832167832168,
+      "ire0": 7680000.0
+    }
+  },
   "SECAM_VHS": {
     "format": {
       "base": "VHS",

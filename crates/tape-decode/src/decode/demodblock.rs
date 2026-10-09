@@ -436,12 +436,22 @@ pub(crate) fn decode_video_block(
         // The burst chain (bandpass plus optional notches) is zero-phase, so it
         // runs as the precomputed |H|^2 spectrum gain in one r2c/c2r round trip
         // instead of cascaded time-domain forward/backward filters.
-        let source = if spec.color_system != ColorSystem::Monochrome {
-            &rawdata[..BLOCKSIZE]
+        //
+        // SECAM direct-composite formats (Type C / Quadruplex) carry the chroma
+        // block at the studio rest carriers inside the DEMODULATED composite,
+        // not in the RF baseband like colour-under formats, so the band-pass
+        // runs on the demod spectrum already in hand - the SECAM block band
+        // gain below is what filters the luma out of the chroma.
+        let mut spectrum = if spec.is_secam_direct() {
+            demod_fft.clone()
         } else {
-            out_video.as_slice()
+            let source = if spec.color_system != ColorSystem::Monochrome {
+                &rawdata[..BLOCKSIZE]
+            } else {
+                out_video.as_slice()
+            };
+            rfft_f32(source, spec.fft_block_r2c_f32.as_ref())
         };
-        let mut spectrum = rfft_f32(source, spec.fft_block_r2c_f32.as_ref());
         multiply_spectrum_real(&mut spectrum, &spec.chroma_burst_block_fft_gain);
         let filtered = irfft_owned_f32(spectrum, None, spec.fft_block_c2r_f32.as_ref());
         let out_chroma = shift_chroma_and_remove_dc(filtered, spec.chroma_offset());

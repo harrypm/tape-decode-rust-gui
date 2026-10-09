@@ -404,7 +404,7 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_saved_levels: cli.use_saved_levels,
         rf_skip_hsync_refine: cli.skip_hsync_refine,
         rf_export_raw_tbc: cli.export_raw_tbc,
-        rf_ire0_adjust: cli.ire0_adjust,
+        rf_ire0_adjust: cli.ire0_adjust || profile.decode_options.ire0_adjust,
         rf_detect_chroma_track_phase: cli.detect_chroma_track_phase,
         rf_disable_burst_hsync: cli.disable_burst_hsync,
         rf_disable_phase_correction: cli.disable_phase_correction,

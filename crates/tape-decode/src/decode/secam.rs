@@ -18,9 +18,22 @@ use std::f64::consts::{PI, TAU};
 /// Subcarrier rest frequencies and HF ("cloche"/bell) pre-emphasis constants
 /// from ITU-R BT.470-6 table 2 / BT.1700: the subcarrier amplitude follows
 /// `G = M0 * |1 + j16F| / |1 + j1.26F|` with `F = f/f0 - f0/f`.
-const SECAM_FOR: f64 = 4_406_250.0;
-const SECAM_FOB: f64 = 4_250_000.0;
+pub(crate) const SECAM_FOR: f64 = 4_406_250.0;
+pub(crate) const SECAM_FOB: f64 = 4_250_000.0;
 const SECAM_BELL_F0: f64 = 4_286_000.0;
+
+/// Centre of the SECAM chroma block: the average of the two rest carriers
+/// (4.328125 MHz). The legal block excursion is 3.9-4.756 MHz (BT.470-6
+/// table 2), so a band centred here is what separates the chroma from the
+/// luma either side of it.
+pub(crate) const SECAM_BLOCK_CENTRE: f64 = (SECAM_FOR + SECAM_FOB) / 2.0;
+
+/// Chroma block band edges (Hz) for direct-composite formats: the block plus
+/// margin for the bell skirts and pre-emphasised edges, matching the band the
+/// method-1 restoration anchors on its restored block. A tight top edge
+/// suppresses high-side FM splatter from saturated transitions.
+pub(crate) const SECAM_BLOCK_BAND: (f64, f64) =
+    (SECAM_BLOCK_CENTRE - 670e3, SECAM_BLOCK_CENTRE + 550e3);
 
 /// Minimum fraction of lines that must match the fitted alternation before the
 /// fit is allowed to teach the parity flywheel.
@@ -812,6 +825,92 @@ pub(crate) fn process_chroma_secam_method1(
     }
 
     Ok(encode_chroma_u16(&uphet))
+}
+
+/// SECAM direct-composite chroma extraction, for formats that record the
+/// composite signal directly (SMPTE Type C, Quadruplex): the chroma block is
+/// already at the studio rest carriers in the demodulated composite, so there
+/// is nothing to restore - no carrier multiplication, no heterodyne, and no
+/// PAL/NTSC-style burst. The demod chain band-passes the block out of the
+/// composite (that is what filters the luma out of the chroma), and this pass
+/// keeps the resampler's contribution honest with the same band at the TBC
+/// output rate, normalises the level, and writes the block as-is - bell
+/// shaping, blanking-interval rest carrier and all, exactly what downstream
+/// SECAM decoders expect to demodulate.
+///
+/// SECAM carries an undeviated reference carrier through the horizontal
+/// blanking interval instead of a burst, so per-line burst AGC is impossible;
+/// and normalising every line to its porch level would flatten the intended
+/// foR/foB rest-amplitude difference (the BT.470 bell), so the level is
+/// normalised per field against the median carrier envelope instead. Dropouts
+/// and per-line level variation pass through untouched, and a field with no
+/// carrier at all (monochrome recording) collapses to silence - the same
+/// squelch behaviour the method-1 path has.
+pub(crate) fn process_chroma_secam_direct(
+    field: &DecodedField,
+    spec: &DecoderSpec,
+    chroma: &[f32],
+    burstarea: (isize, isize),
+) -> Result<Vec<u16>> {
+    let outwidth = field.outlinelen;
+    let linesout = field.outlinecount;
+    if linesout <= STARTING_LINE || chroma.len() < linesout * outwidth {
+        bail!(
+            "SECAM field too small to decode: {linesout} lines of {outwidth} against {} samples",
+            chroma.len()
+        );
+    }
+
+    // Final zero-phase pass of the block band at the TBC output rate, matching
+    // the method-1 path's final filter.
+    let mut block = sosfiltfilt_f32(&spec.chroma_filter_final, chroma);
+    block.truncate(linesout * outwidth);
+
+    // Per-field level normalisation from the median carrier envelope over the
+    // picture lines (the vertical interval may carry little or no carrier).
+    // The target matches the method-1 restoration's porch RMS level
+    // (burst_abs_ref), so both SECAM paths write the same level convention.
+    let burst_abs_ref = spec.sys_burst_abs_ref.context("missing burst_abs_ref")? as f64;
+    let target_envelope = burst_abs_ref * std::f64::consts::SQRT_2;
+    let analytic = hilbert_f32(
+        &block,
+        spec.fft_field_forward_f32.as_ref(),
+        spec.fft_field_inverse_f32.as_ref(),
+    );
+    let envelope: Vec<f32> = analytic.iter().map(|z| z.norm()).collect();
+    let picture_envelope = &envelope[STARTING_LINE * outwidth..];
+    let env_median = median_of(picture_envelope) as f64;
+    let scale = if env_median > 0.0 {
+        (target_envelope / env_median) as f32
+    } else {
+        0.0
+    };
+
+    // Blank the vertical interval like the method-1 path (no usable chroma
+    // there) and scale the picture region to the target level.
+    let blanked = (STARTING_LINE * outwidth).min(block.len());
+    block[..blanked].fill(0.0);
+    for sample in &mut block[blanked..] {
+        *sample *= scale;
+    }
+
+    // Porch level log, matching the method-1 path: the blanking interval
+    // carries the rest carrier, so its RMS reports the written level.
+    let (burst_start, burst_end) = burstarea;
+    if burst_start >= 0 && burst_end > burst_start && (burst_end as usize) <= outwidth {
+        let mut porch_rms_total = 0.0f64;
+        for linenumber in STARTING_LINE..linesout {
+            let linestart = linenumber * outwidth;
+            porch_rms_total +=
+                rms(&block[linestart + burst_start as usize..linestart + burst_end as usize]);
+        }
+        tracing::debug!(
+            "SECAM direct chroma porch level: {:.01}",
+            porch_rms_total / (linesout - STARTING_LINE) as f64
+        );
+    }
+
+    Ok(encode_chroma_u16(&block))
 }
 
 /// Encode restored chroma to the 16-bit output level convention, matching the

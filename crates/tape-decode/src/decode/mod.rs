@@ -32,6 +32,9 @@ use secam::SecamState;
 use sync::ResyncState;
 use vits::compute_vits_metrics;
 
+// SECAM chroma-block geometry shared with the filter designs in spec.rs.
+pub(crate) use secam::SECAM_BLOCK_BAND;
+
 pub(crate) fn iretohz(ire0: f32, hz_ire: f32, ire: f32) -> f32 {
     ire0 + (hz_ire * ire)
 }
@@ -1618,6 +1621,7 @@ impl Decoder {
         let system = match (spec.sys_frame_lines, spec.color_system) {
             (LineSystem::Line525, ColorSystem::Pal) => "PAL-M",
             (LineSystem::Line525, _) => "NTSC",
+            (_, ColorSystem::Secam) => "SECAM",
             _ => "PAL",
         };
         Some(DecoderMetadata {

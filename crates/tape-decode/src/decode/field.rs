@@ -742,10 +742,21 @@ pub(crate) fn predecode_field_from_rawdecode(
         inlinelen: spec.linelen() as f64,
         outlinelen: spec.sys_outlinelen,
         outlinecount: (spec.sys_frame_lines.line_count() / 2) + 1,
-        ire0_backporch: if spec.sys_frame_lines != LineSystem::Line525 {
-            (96, 160)
-        } else {
-            (74, 124)
+        // Back-porch measurement window for the ire0 picture adjustment,
+        // derived from the standard's geometry instead of hardcoded guesses:
+        // just past the sync tip, just before active video. The old hardcoded
+        // (96, 160) landed inside the 9 us 405-line sync tip, and only happened
+        // to sit in the porch for 525/625.
+        ire0_backporch: {
+            let start = (spec.sys_hsync_pulse_us * spec.sys_outfreq + 8.0) as usize;
+            let end = (spec.sys_active_video_us[0] * spec.sys_outfreq - 12.0) as usize;
+            if start + 16 < end && end < spec.sys_outlinelen {
+                (start, end)
+            } else if spec.sys_frame_lines != LineSystem::Line525 {
+                (96, 160)
+            } else {
+                (74, 124)
+            }
         },
         wow_level_adjust_smoothing: spec.wow_level_adjust_smoothing,
         wow_interpolation_method: spec.wow_interpolation_method,
@@ -883,7 +894,11 @@ pub(crate) fn predecode_field_from_rawdecode(
                     pending_field.out_scale =
                         Some(f64::from(0xD300 - 0x0100) / (100.0 - f64::from(spec.sys_vsync_ire)));
                     if pending_field.valid {
-                        if spec.rf_write_chroma {
+                        // SECAM carries no PAL/NTSC burst, and the phase-rotation
+                        // sequence this lock measures only feeds the heterodyne
+                        // up-conversion, which both SECAM paths skip - so the
+                        // per-line burst measurement is skipped as well.
+                        if spec.rf_write_chroma && spec.color_system != ColorSystem::Secam {
                             apply_burst_lock(
                                 &mut pending_field,
                                 spec,
