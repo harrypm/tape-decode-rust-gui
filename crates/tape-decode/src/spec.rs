@@ -6,7 +6,8 @@ use sci_rs::signal::filter::design::{FilterBandType, Sos};
 use std::sync::Arc;
 
 use crate::decode::{
-    butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, BLOCKCUT, BLOCKCUT_END,
+    butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, SECAM_BLOCK_BAND,
+    BLOCKCUT, BLOCKCUT_END,
     BLOCKSIZE,
 };
 use crate::optimized::{narrow_sos, SincLut};
@@ -178,6 +179,18 @@ impl DecoderSpec {
         } else {
             sys_params.color_system
         };
+        // SECAM direct-composite: a SECAM colour system with no carrier
+        // multiplication (Type C / Quadruplex record the composite directly,
+        // so the chroma block sits at the studio rest carriers in the
+        // demodulated composite instead of divided down in the RF baseband).
+        let secam_direct =
+            rf_color_system == ColorSystem::Secam && decoder_params.chroma_carrier_mult.is_none();
+        // Chroma AFC servos a colour-under heterodyne LO; the direct-composite
+        // SECAM path band-passes a fixed block instead, so there is nothing
+        // for it to tune.
+        if request.cafc && secam_direct {
+            bail!("Chroma AFC is not supported for direct-composite SECAM profiles");
+        }
         // cafc measures a single carrier peak, which the line-alternating
         // two-carrier SECAM FM chroma does not have.
         let do_cafc = if request.cafc && rf_color_system == ColorSystem::Secam {
@@ -469,13 +482,23 @@ impl DecoderSpec {
                     // colour edges.
                     (center - 0.67, center + 0.55)
                 }
-                _ if color_under_format => (
-                    sys_params.fsc_mhz - (color_under / 1e6) * 0.9,
-                    sys_params.fsc_mhz + (color_under / 1e6) * 0.75,
-                ),
-                // Using a narrow filter atm as this is just used for picking out
-                // burst signal in this case.
-                _ => (sys_params.fsc_mhz - 0.1, sys_params.fsc_mhz + 0.1),
+                // SECAM direct-composite: the block is already at the studio
+                // rest carriers in the demodulated composite, so the band
+                // anchors on the same block geometry as method 1's restored
+                // block. This band is what filters the luma out of the chroma.
+                None if secam_direct && color_under_format => {
+                    (SECAM_BLOCK_BAND.0 / 1e6, SECAM_BLOCK_BAND.1 / 1e6)
+                }
+                _ => {
+                    let (lower, upper) = if color_under_format {
+                        ((color_under / 1e6) * 0.9, (color_under / 1e6) * 0.75)
+                    } else {
+                        // Using a narrow filter atm as this is just used for picking out
+                        // burst signal in this case.
+                        (0.1, 0.1)
+                    };
+                    (sys_params.fsc_mhz - lower, sys_params.fsc_mhz + upper)
+                }
             };
             butter_sos(
                 4,
@@ -511,7 +534,20 @@ impl DecoderSpec {
         };
 
         // --- Build chroma filters ---
-        let chroma_filter_video_burst = if is_color_under {
+        let chroma_filter_video_burst = if secam_direct {
+            // Direct-composite SECAM: the burst channel carries the chroma block
+            // band-passed out of the DEMODULATED composite (see demodblock.rs),
+            // so the block-level band is the SECAM block band, not the
+            // colour-under RF band-pass below.
+            butter_sos(
+                decoder_params.chroma_bpf_order,
+                &[
+                    SECAM_BLOCK_BAND.0 / freq_hz_half,
+                    SECAM_BLOCK_BAND.1 / freq_hz_half,
+                ],
+                FilterBandType::Bandpass,
+            )?
+        } else if is_color_under {
             butter_sos(
                 decoder_params.chroma_bpf_order,
                 &[
@@ -593,6 +629,7 @@ impl DecoderSpec {
         let rf_secam_carrier_servo = request.rf_secam_carrier_servo;
         let secam_analytic_fft = if (conversion_lo.is_some() && rf_secam_carrier_servo)
             || carrier_mult.is_some()
+            || secam_direct
         {
             // Zero-padded past the field so the Hilbert transform runs at a
             // fast length.
@@ -636,7 +673,6 @@ impl DecoderSpec {
                 bail!("Track phase can only be 0, 1 or None");
             }
         }
-
         let wow_level_adjust_smoothing = request
             .wow_level_adjust_smoothing
             .unwrap_or(sys_params.frame_lines.line_count() as f32 / 2.0);
@@ -816,6 +852,14 @@ impl DecoderSpec {
     #[inline]
     pub(crate) fn chroma_afc_enabled(&self) -> bool {
         !self.chroma_afc_narrowband.is_empty()
+    }
+
+    /// Direct-composite SECAM (Type C / Quadruplex): the chroma block sits at
+    /// the studio rest carriers in the demodulated composite, with no carrier
+    /// multiplication and no colour-under heterodyne.
+    #[inline]
+    pub(crate) fn is_secam_direct(&self) -> bool {
+        self.color_system == ColorSystem::Secam && self.decoder_chroma_carrier_mult.is_none()
     }
 
     /// Output samples per second the TBC actually produces.
