@@ -424,7 +424,8 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_ire0_adjust: {
             let modes = cli.ire0_adjust.as_deref().unwrap_or_default();
             Ire0Adjust {
-                backporch: modes.contains(&CliIre0AdjustMode::Backporch),
+                backporch: modes.contains(&CliIre0AdjustMode::Backporch)
+                    || profile.decode_options.ire0_adjust,
                 hsync: modes.contains(&CliIre0AdjustMode::Hsync),
             }
         },
