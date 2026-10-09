@@ -398,6 +398,15 @@ fn process_chroma_internal(
         0.0
     };
     let mut chroma = downscale_raw_vec(field, &spec.sinc_lut, true, shift, None);
+    if spec.is_secam_direct() {
+        // Direct-composite SECAM (Type C / Quadruplex): the chroma block is
+        // already at the studio rest carriers in the demodulated composite,
+        // so it skips the shared burst-locked heterodyne path below entirely
+        // as well - there is no burst to lock and nothing to up-convert.
+        let restored =
+            secam::process_chroma_secam_direct(field, spec, &chroma, spec.burst_area);
+        return encode_chroma(&restored);
+    }
     if let Some(lo) = conversion_lo
         .as_deref_mut()
         .filter(|_| spec.rf_secam_carrier_servo)
