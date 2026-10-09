@@ -1,13 +1,18 @@
 # tape-decode
 
-A decoder for analog videotape tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, with a cut off at commit [fe3f6099](https://github.com/oyvindln/vhs-decode/commit/fe3f6099e9e6a77295f26585598f658f2d926bb4).
+A FM RF --> 4fsc .tbc (CVBS/S-Video) decoder for analog videotape tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, with a cut off at commit [fe3f6099](https://github.com/oyvindln/vhs-decode/commit/fe3f6099e9e6a77295f26585598f658f2d926bb4).
 
 
 ## GUI 
 
 
-<img width="862" height="559" alt="image" src="https://github.com/user-attachments/assets/3c0cc10b-f141-4248-a457-5b0fc1833030" />
+<img width="500" height="" alt="launcher" src="https://github.com/user-attachments/assets/3c0cc10b-f141-4248-a457-5b0fc1833030" />
 
+> Tape Decode GUI Launcher
+
+<img width="800" height="" alt="decoded" src="https://github.com/user-attachments/assets/7f1ac4d0-7f60-405a-871b-13ae82de4981" />
+
+> Decoded Result in [tbc-tools](https://github.com/harrypm/tbc-tools) tbc-analyse. 
 
 ## Installation
 
