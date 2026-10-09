@@ -165,12 +165,38 @@ white 583->174 (0.5% of span), yellow 2185->723 (1.9%), cyan 389->117, green
 (~10 dB reduction); levels unchanged (porch 16363, white 53898 ~= 100 IRE,
 black 16080).
 
+## Round 5 (2026-10-09): GUI + AppImage rebuild for the new profiles
+
+Local rebuild following the CI recipe (.github/workflows/build.yml, linux x86_64 job):
+
+1. cargo build --release --target x86_64-unknown-linux-gnu --bin tape-decode
+   (the target-triple path the packaging spec bundles).
+2. TAPE_DECODE_BIN=target/x86_64-unknown-linux-gnu/release/tape-decode
+   .venv-launcher/bin/python scripts/ci/build-linux-decode-bin.py
+   -> dist/decode-rust-gui (PyInstaller onefile, bundles the new binary + the
+   updated profiles.json; no stale target-x86-64-* level builds present).
+3. AppDir re-assembled per CI steps; appimagetool (local
+   appimagetool-x86_64.AppImage, --appimage-extract then squashfs-root/AppRun)
+   -> decode-rust-gui-linux_dev-5fc9596_x86_64.AppImage (152 MB).
+
+Verification (headless):
+- dist/decode-rust-gui --selftest: SELFTEST OK, exit 0.
+- dist/decode-rust-gui list-profiles: exit 0, 70 profiles, SECAM_QUADRUPLEX
+  and SECAM_TYPEC present.
+- AppImage --selftest (APPIMAGE_EXTRACT_AND_RUN=1, QT_QPA_PLATFORM=offscreen,
+  TAPE_DECODE_MICROARCH=x86-64-v1): SELFTEST OK, exit 0.
+- AppImage list-profiles: exit 0, 70 profiles, both SECAM profiles present.
+- USER-CONFIRMED (2026-10-09): AppImage launched on the desktop, GUI works,
+  SECAM_QUADRUPLEX and SECAM_TYPEC both listed in the profile dropdown.
+
 ## Not yet done / next steps
 - SECAM_TYPEC is untested (no SECAM Type C sample in hand); parameters mirror PAL_TYPEC.
 - Blanking-interval rest carrier is passed through as recorded (method-1 regenerates it
   because the divide-by-4 counter wrecks it; on this quad tape the natural rest carrier
   reads within ~8 kHz, so no regeneration was needed). Revisit if a machine shows a wrecked
   porch (regenerate_secam_blanking could be ported with carrier_mult = 1).
-- Luma LPF (3.4 MHz, order 10) suppresses the chroma band ~16 dB; sharper options (notch at
-  4.286 MHz / lower cutoff) can be tuned against this sample later.
-- GUI/AppImage bundles need a rebuild to pick up the new embedded profiles.
+- Luma LPF now 3.2 MHz/order 12 (round 4); further tuning (notch at 4.286 MHz, lower
+  cutoff) can be revisited against this sample or other quad material later.
+- Verified dev AppImage: decode-rust-gui-linux_dev-5fc9596_x86_64.AppImage (repo root,
+  built and user-confirmed 2026-10-09). CI release build still needed for a published
+  release with these profiles.
