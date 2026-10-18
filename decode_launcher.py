@@ -41,6 +41,7 @@ from decode_runtime import (
     microarch_target_dir,
     native_host_arch,
     normalize_microarch_level,
+    profile_is_composite,
     resolve_tape_decode_prefix,
 )
 
@@ -534,6 +535,20 @@ class DecodeLauncherWindow(QWidget):
 
         self._output_manually_set = False
 
+        # Composite (CVBS) profile detection state: whether the currently
+        # selected profile decodes the whole composite into the luma output
+        # (single combined .tbc), the user's remembered chroma-checkbox choice
+        # while a composite profile forces it off, and a debounce timer so
+        # profile typing / profile-file edits do not run a subprocess per
+        # keystroke.
+        self._profile_composite: Optional[bool] = None
+        self._chroma_user_checked: Optional[bool] = None
+        self._composite_query_cache: dict[str, bool] = {}
+        self._composite_check_timer = QTimer(self)
+        self._composite_check_timer.setSingleShot(True)
+        self._composite_check_timer.setInterval(250)
+        self._composite_check_timer.timeout.connect(self._run_composite_check)
+
         self._build_layout()
         self._wire_events()
         self._refresh_tool_state()
@@ -615,6 +630,11 @@ class DecodeLauncherWindow(QWidget):
         self.profile_combo.currentTextChanged.connect(self._refresh_tool_state)
         self.use_profile_file_check.toggled.connect(self._refresh_tool_state)
         self.profile_file_edit.textChanged.connect(self._refresh_tool_state)
+        # Composite (CVBS) profile detection: re-check whenever the profile
+        # selection or profile-file path may have changed (debounced).
+        self.profile_combo.currentTextChanged.connect(self._schedule_composite_check)
+        self.use_profile_file_check.toggled.connect(self._schedule_composite_check)
+        self.profile_file_edit.textChanged.connect(self._schedule_composite_check)
         self.frequency_edit.textChanged.connect(self._refresh_tool_state)
         self.input_format_combo.currentIndexChanged.connect(self._refresh_tool_state)
         self.threads_spin.valueChanged.connect(self._refresh_tool_state)
@@ -664,12 +684,16 @@ class DecodeLauncherWindow(QWidget):
         elif profiles:
             self.profile_combo.setCurrentIndex(0)
         self.profile_combo.blockSignals(False)
+        # addItems/setCurrentText ran with signals blocked, so the combo-change
+        # wiring never fired: schedule the composite-profile check here.
+        self._schedule_composite_check()
         self._refresh_tool_state()
 
     def _refresh_tool_state(self) -> None:
         tool = self._selected_tool()
         decode_selected = tool.subcommand == "decode"
         profile_file_selected = decode_selected and self.use_profile_file_check.isChecked()
+        composite = decode_selected and self._profile_composite is True
 
         for widget in (
             self.input_edit,
@@ -680,7 +704,6 @@ class DecodeLauncherWindow(QWidget):
             self.input_format_combo,
             self.threads_spin,
             self.mt_distance_size_spin,
-            self.include_chroma_check,
             self.include_metadata_check,
             self.ire0_adjust_check,
             self.overwrite_check,
@@ -691,12 +714,92 @@ class DecodeLauncherWindow(QWidget):
         ):
             widget.setEnabled(decode_selected)
 
+        # The chroma checkbox is handled separately: composite (CVBS) profiles
+        # such as SMPTE Type C and Quadruplex decode the whole composite into
+        # the luma output (single combined .tbc), so a separate chroma output
+        # does not apply to them.
+        self._apply_chroma_check_state(decode_selected, composite)
+
         self.profile_combo.setEnabled(decode_selected and not profile_file_selected)
         self.profile_file_edit.setEnabled(profile_file_selected)
         self.profile_file_browse_button.setEnabled(profile_file_selected)
 
         self.command_preview.setText(self._terminal_preview_command(tool))
-        self.note_label.setText(tool.notes)
+        note = tool.notes
+        if composite:
+            note += (
+                "\nCVBS/composite profile: single combined .tbc output - the luma "
+                ".tbc contains the full composite signal, so no separate "
+                "_chroma.tbc is written."
+            )
+        self.note_label.setText(note)
+
+    def _apply_chroma_check_state(self, decode_selected: bool, composite: bool) -> None:
+        check = self.include_chroma_check
+        if decode_selected and composite:
+            # Remember the user's choice only when first forced off, so
+            # switching back to a colour-under profile restores it.
+            if self._chroma_user_checked is None:
+                self._chroma_user_checked = check.isChecked()
+            check.blockSignals(True)
+            check.setChecked(False)
+            check.blockSignals(False)
+            check.setEnabled(False)
+            check.setToolTip(
+                "CVBS/composite profile (e.g. SMPTE Type C, Quadruplex): the\n"
+                "luma .tbc contains the combined composite signal, so a single\n"
+                ".tbc is written and there is no separate _chroma.tbc."
+            )
+        else:
+            if self._chroma_user_checked is not None:
+                check.blockSignals(True)
+                check.setChecked(self._chroma_user_checked)
+                check.blockSignals(False)
+                self._chroma_user_checked = None
+            check.setEnabled(decode_selected)
+            check.setToolTip("")
+
+    def _schedule_composite_check(self) -> None:
+        """(Re)start the debounce timer for the composite-profile check."""
+        self._composite_check_timer.start()
+
+    def _composite_check_key(self) -> Optional[str]:
+        """Selection key for the composite check: the active profile file path
+        (profile-file mode) or the profile name (embedded profile mode)."""
+        if self.use_profile_file_check.isChecked():
+            path = self.profile_file_edit.text().strip()
+            return f"file:{path}" if path else None
+        name = self.profile_combo.currentText().strip()
+        return f"profile:{name}" if name else None
+
+    def _run_composite_check(self) -> None:
+        """Resolve whether the current selection is a composite (CVBS) profile
+        and refresh the tool state (chroma checkbox, preview, note)."""
+        key = self._composite_check_key()
+        if key is None:
+            self._profile_composite = None
+        else:
+            cached = self._composite_query_cache.get(key)
+            if cached is not None:
+                self._profile_composite = cached
+            else:
+                try:
+                    if key.startswith("file:"):
+                        composite = profile_is_composite(
+                            profile_file=key[len("file:") :], timeout_seconds=10
+                        )
+                    else:
+                        composite = profile_is_composite(
+                            profile=key[len("profile:") :], timeout_seconds=10
+                        )
+                except Exception:
+                    composite = None
+                self._profile_composite = composite
+                if composite is not None and key.startswith("profile:"):
+                    # Embedded profile names are immutable for the session;
+                    # profile files can change on disk, so only names are cached.
+                    self._composite_query_cache[key] = composite
+        self._refresh_tool_state()
 
     def _infer_default_output_base(self, input_path: str) -> str:
         if not input_path.strip():
@@ -742,7 +845,9 @@ class DecodeLauncherWindow(QWidget):
 
         if luma_out:
             args += ["--luma-out", luma_out]
-        if chroma_out and self.include_chroma_check.isChecked():
+        # Composite (CVBS) profiles write a single combined .tbc: no chroma
+        # output even if the check state is somehow still set.
+        if chroma_out and self.include_chroma_check.isChecked() and not self._profile_composite:
             args += ["--chroma-out", chroma_out]
         if metadata_out and self.include_metadata_check.isChecked():
             args += ["--metadata-out", metadata_out]

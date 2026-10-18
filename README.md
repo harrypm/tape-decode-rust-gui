@@ -281,15 +281,13 @@ Options:
 ```text
 Flatten a named profile and write it to a JSON file
 
-Usage: tape-decode write-profile [OPTIONS] <--profile <PROFILE>|--profile-file <PROFILE_FILE>> <OUT>
-
-Arguments:
-  <OUT>  Destination path for the flattened profile JSON
+Usage: tape-decode write-profile [OPTIONS] --out <OUT> <--profile <PROFILE>|--profile-file <PROFILE_FILE>>
 
 Options:
       --profile <PROFILE>            Profile key from the embedded profile table
       --profile-file <PROFILE_FILE>  Path to a JSON profile object to load instead of an embedded profile key
       --overwrite                    Allow replacing an existing output file
+      --out <OUT>                    Destination path for the flattened profile JSON, or `-` to write to standard output
   -h, --help                         Print help
 ```
 
@@ -432,6 +430,25 @@ tape-decode decode \
   --mt-distance-size 60 \
   capture.u8
 ```
+
+**Composite (CVBS) formats write a single combined `.tbc`**
+
+SMPTE Type C (`*_TYPEC`), Quadruplex (`*_QUADRUPLEX`), Type B and VHD profiles - including the direct-composite SECAM variants (`SECAM_QUADRUPLEX`, `SECAM_TYPEC`) - record the whole composite signal: the luma `.tbc` already contains the combined composite (luma + chroma), so these formats write a single `.tbc` plus the `.tbc.json` sidecar and `--chroma-out` is ignored (with a warning). The Decode Launcher GUI detects this and disables the chroma-output checkbox for them.
+
+```bash
+tape-decode decode \
+  --luma-out decoded.tbc \
+  --chroma-out decoded_chroma.tbc \
+  --metadata-out decoded.tbc.json \
+  --profile PAL_QUADRUPLEX \
+  --frequency 40 \
+  --input-format flac \
+  capture.flac
+# WARN: Composite (CVBS) profile: the luma output is the combined composite
+# signal, so --chroma-out is ignored and a single .tbc is written
+```
+
+Colour is decoded downstream from that single combined `.tbc` (e.g. `tbc-chroma-decoder --input-json decoded.tbc.json decoded.tbc`).
 
 **Livestream 40 MHz PAL VHS from `/dev/cxadc0`**
 
