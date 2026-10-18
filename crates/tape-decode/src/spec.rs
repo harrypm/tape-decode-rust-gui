@@ -6,8 +6,8 @@ use sci_rs::signal::filter::design::{FilterBandType, Sos};
 use std::sync::Arc;
 
 use crate::decode::{
-    butter_sos, gen_chroma_heterodyne, ChromaSepClass, SECAM_BLOCK_BAND, BLOCKCUT, BLOCKCUT_END,
-    BLOCKSIZE,
+    butter_sos, gen_chroma_heterodyne, ChromaSepClass, SECAM_BLOCK_BAND, SECAM_BLOCK_CENTRE,
+    BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
 };
 use crate::optimized::narrow_sos;
 use crate::request::{
@@ -171,11 +171,12 @@ impl DecoderSpec {
             sys_params.color_system
         };
         // SECAM direct-composite: a SECAM colour system with no carrier
-        // multiplication (Type C / Quadruplex record the composite directly,
-        // so the chroma block sits at the studio rest carriers in the
-        // demodulated composite instead of divided down in the RF baseband).
-        let secam_direct =
-            rf_color_system == ColorSystem::Secam && decoder_params.chroma_carrier_mult.is_none();
+        // multiplication whose declared chroma carrier is the SECAM block
+        // centre (Type C / Quadruplex record the composite directly, so the
+        // chroma block sits at the studio rest carriers in the demodulated
+        // composite instead of divided down in the RF baseband). MESECAM
+        // colour-under must not match (block at the VHS colour-under carrier).
+        let secam_direct = decoder_params.is_secam_direct(rf_color_system);
         let do_cafc = request.cafc;
         // Validated and clamped once here; ResyncCore only reads the result.
         let level_detect_divisor = {
@@ -263,7 +264,12 @@ impl DecoderSpec {
             decoder_params.nonlinear.use_sub_deemphasis || request.subdeemp;
         let chroma_deemphasis_enabled = decoder_params.chroma_deemphasis_enabled;
         let fm_audio_notch = request.fm_audio_notch;
-        let rf_write_chroma = is_color_under && !request.rf_export_raw_tbc && !request.skip_chroma;
+        // Direct-composite SECAM (Type C / Quadruplex) is a CVBS format: the
+        // single combined .tbc IS the demodulated composite (chroma block
+        // embedded), for downstream CVBS chroma decoding - no separate chroma
+        // channel.
+        let rf_write_chroma =
+            is_color_under && !secam_direct && !request.rf_export_raw_tbc && !request.skip_chroma;
 
         let rf_disable_comb = request.disable_comb || rf_color_system == ColorSystem::Secam;
         let rf_fallback_vsync = request.fallback_vsync;
@@ -834,10 +840,13 @@ impl DecoderSpec {
 
     /// Direct-composite SECAM (Type C / Quadruplex): the chroma block sits at
     /// the studio rest carriers in the demodulated composite, with no carrier
-    /// multiplication and no colour-under heterodyne.
+    /// multiplication and no colour-under heterodyne. Same definition as
+    /// [`DecoderParams::is_secam_direct`], evaluated on the built spec.
     #[inline]
     pub(crate) fn is_secam_direct(&self) -> bool {
-        self.color_system == ColorSystem::Secam && self.decoder_chroma_carrier_mult.is_none()
+        self.color_system == ColorSystem::Secam
+            && self.decoder_chroma_carrier_mult.is_none()
+            && (self.decoder_color_under_carrier - SECAM_BLOCK_CENTRE).abs() < 1.0e3
     }
 
     #[inline]

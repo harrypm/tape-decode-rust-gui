@@ -11,6 +11,11 @@ passthrough). Proves the PyInstaller onefile bundle is self-contained:
    runtime DLLs are not bundled.
 2. The bundled Rust `tape-decode` binary resolves and runs `list-profiles`,
    proving the decoder binary is packaged and executable.
+3. CVBS single-output profile detection works through the bundled binary
+   (`write-profile --out -`): CVBS format profiles (SMPTE Type C,
+   Quadruplex, and the direct-composite SECAM variants -- single combined
+   .tbc output) read back as composite, and a colour-under profile (VHS)
+   does not.
 
 Prints `SELFTEST OK` and exits 0 on success; exits non-zero with a clear
 message on failure. Designed to run headless in CI via QT_QPA_PLATFORM=offscreen.
@@ -74,6 +79,41 @@ def run_selftest() -> int:
             failures.append("tape-decode list-profiles returned no profiles")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"tape-decode binary: {exc}")
+
+    # 3) CVBS single-output profile detection via the bundled binary.
+    try:
+        from decode_runtime import profile_is_composite
+
+        cvbs_profile = None
+        secam_cvbs_profile = None
+        under_profile = None
+        for name in profiles or []:
+            upper = name.upper()
+            if cvbs_profile is None and (
+                "QUADRUPLEX" in upper or "TYPEC" in upper or "TYPEB" in upper or "VHD" in upper
+            ):
+                cvbs_profile = name
+            if secam_cvbs_profile is None and upper.startswith("SECAM") and (
+                "QUADRUPLEX" in upper or "TYPEC" in upper
+            ):
+                secam_cvbs_profile = name
+            if under_profile is None and "VHS" in upper and not upper.startswith("SECAM"):
+                under_profile = name
+        if cvbs_profile is None:
+            failures.append("no CVBS profile found in list-profiles output")
+        elif profile_is_composite(profile=cvbs_profile, timeout_seconds=30) is not True:
+            failures.append(f"CVBS detection: {cvbs_profile} not reported as composite")
+        if secam_cvbs_profile is None:
+            failures.append("no SECAM QUAD/TYPEC profile found in list-profiles output")
+        elif profile_is_composite(profile=secam_cvbs_profile, timeout_seconds=30) is not True:
+            failures.append(
+                f"CVBS detection: {secam_cvbs_profile} not reported as single-output CVBS"
+            )
+        if under_profile is not None:
+            if profile_is_composite(profile=under_profile, timeout_seconds=30) is not False:
+                failures.append(f"CVBS detection: {under_profile} wrongly reported as composite")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"CVBS profile detection: {exc}")
 
     if failures:
         for item in failures:
