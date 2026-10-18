@@ -309,6 +309,70 @@ def list_profiles(timeout_seconds: int = 20) -> list[str]:
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
+def profile_is_composite(
+    profile: Optional[str] = None,
+    profile_file: Optional[str] = None,
+    *,
+    level: str = MICROARCH_AUTO,
+    timeout_seconds: int = 20,
+) -> Optional[bool]:
+    """Return True/False for whether a profile writes a single combined CVBS .tbc.
+
+    Flattens the profile through the tape-decode binary (`write-profile --out -`).
+    True for composite-colour formats (e.g. SMPTE Type C, Quadruplex - the luma
+    output already contains the combined composite) and for direct-composite
+    SECAM (Type C / Quadruplex: SECAM colour system with no chroma carrier
+    multiplication - the single .tbc is the full demodulated composite).
+    False for colour-under profiles (separate _chroma.tbc). Returns None when
+    the profile cannot be resolved or flattened (missing binary, unknown
+    profile, malformed JSON) - callers should treat that as "unknown" and
+    fall back to their default behaviour.
+    """
+    if (profile is None) == (profile_file is None):
+        return None
+    if profile is not None:
+        args = ["write-profile", "--profile", profile, "--out", "-"]
+    else:
+        args = ["write-profile", "--profile-file", str(profile_file), "--out", "-"]
+    command = build_tape_decode_command(args, level=level)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        data = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    params = data.get("decoder_params")
+    if not isinstance(params, dict):
+        return None
+    if bool(params.get("is_composite_color", False)):
+        return True
+    sys_params = data.get("sys_params")
+    # Direct-composite SECAM (Type C / Quadruplex): SECAM colour system with no
+    # carrier multiplication and the chroma carrier declared at the SECAM block
+    # centre (4.328125 MHz). MESECAM colour-under (block at the VHS colour-under
+    # carrier) must not match.
+    if (
+        isinstance(sys_params, dict)
+        and sys_params.get("color_system") == "SECAM"
+        and params.get("chroma_carrier_mult") is None
+        and abs(params.get("color_under_carrier", 0.0) - 4328125.0) < 1000.0
+    ):
+        return True
+    return False
+
+
 def fallback_profiles_from_repo() -> list[str]:
     # Search order:
     # 1) Inside a PyInstaller bundle (_MEIPASS)

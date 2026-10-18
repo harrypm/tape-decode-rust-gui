@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::decode::{
     butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, SECAM_BLOCK_BAND,
-    SECAM_LO_TRIM_LIMIT_HZ, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
+    SECAM_BLOCK_CENTRE, SECAM_LO_TRIM_LIMIT_HZ, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
@@ -240,11 +240,12 @@ impl DecoderSpec {
             0.0
         };
         // SECAM direct-composite: a SECAM colour system with no carrier
-        // multiplication (Type C / Quadruplex record the composite directly,
-        // so the chroma block sits at the studio rest carriers in the
-        // demodulated composite instead of divided down in the RF baseband).
-        let secam_direct =
-            rf_color_system == ColorSystem::Secam && decoder_params.chroma_carrier_mult.is_none();
+        // multiplication whose declared chroma carrier is the SECAM block
+        // centre (Type C / Quadruplex record the composite directly, so the
+        // chroma block sits at the studio rest carriers in the demodulated
+        // composite instead of divided down in the RF baseband). MESECAM
+        // colour-under must not match (block at the VHS colour-under carrier).
+        let secam_direct = decoder_params.is_secam_direct(rf_color_system);
         // Chroma AFC servos a colour-under heterodyne LO; the direct-composite
         // SECAM path band-passes a fixed block instead, so there is nothing
         // for it to tune.
@@ -377,7 +378,13 @@ impl DecoderSpec {
         let fm_audio_notch = request.fm_audio_notch;
         // Chroma processing, which also locks hsync to the burst, runs for every
         // color-under format; only producing the chroma output is optional.
-        let rf_write_chroma = is_color_under;
+        // Direct-composite SECAM (Type C / Quadruplex) is a CVBS format: the
+        // single combined .tbc IS the demodulated composite (chroma block
+        // embedded), for downstream CVBS chroma decoding - no separate chroma
+        // channel. Upstream keeps the chroma processing on under the raw TBC
+        // export (the burst lock's hsync refinement, commit a37e2b0), so only
+        // the CVBS exclusion is taken here.
+        let rf_write_chroma = is_color_under && !secam_direct;
         let chroma_output = rf_write_chroma && !request.skip_chroma;
         if chroma_output && sys_params.burst_abs_ref.is_none() {
             bail!("chroma output requires the format's burst_abs_ref");
@@ -985,10 +992,13 @@ impl DecoderSpec {
 
     /// Direct-composite SECAM (Type C / Quadruplex): the chroma block sits at
     /// the studio rest carriers in the demodulated composite, with no carrier
-    /// multiplication and no colour-under heterodyne.
+    /// multiplication and no colour-under heterodyne. Same definition as
+    /// [`DecoderParams::is_secam_direct`], evaluated on the built spec.
     #[inline]
     pub(crate) fn is_secam_direct(&self) -> bool {
-        self.color_system == ColorSystem::Secam && self.decoder_chroma_carrier_mult.is_none()
+        self.color_system == ColorSystem::Secam
+            && self.decoder_chroma_carrier_mult.is_none()
+            && (self.decoder_color_under_carrier - SECAM_BLOCK_CENTRE).abs() < 1.0e3
     }
 
     /// Output samples per second the TBC produces: `outlinelen` per line

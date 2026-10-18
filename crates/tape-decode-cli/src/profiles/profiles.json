@@ -1975,9 +1975,7 @@
         },
         "video_hpf_extra_order": 1,
         "video_lpf_extra": 14000000.0,
-        "video_lpf_extra_order": 3,
-        "video_lpf_freq": 3200000.0,
-        "video_lpf_order": 12
+        "video_lpf_extra_order": 3
       }
     },
     "decode_options": {
@@ -2009,8 +2007,7 @@
           "low": 1500000.0
         },
         "video_hpf_extra": 500000.0,
-        "video_lpf_freq": 3200000.0,
-        "video_lpf_order": 12
+        "video_lpf_freq": 5200000.0
       }
     },
     "sys_params": {
