@@ -1,6 +1,8 @@
 use anyhow::{bail, Error, Result};
 use serde::Deserialize;
 
+use crate::decode::SECAM_BLOCK_CENTRE;
+
 /// Shelving filter orientation used by custom profile filters and [`crate::spec::gen_shelf`].
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub enum ShelfKind {
@@ -204,6 +206,21 @@ pub struct DecoderParams {
     pub fm_audio_channels: Option<FmAudioChannels>,
     pub boost_bpf: Option<BoostBpf>,
     pub boost_ramp: Option<BoostRampFilter>,
+}
+
+impl DecoderParams {
+    /// Direct-composite SECAM (Type C / Quadruplex): SECAM colour system, no
+    /// carrier multiplication, and the declared chroma carrier at the SECAM
+    /// block centre - the demodulated composite carries the chroma block, so
+    /// the format is CVBS. Colour-under SECAM variants are NOT direct:
+    /// MESECAM transposes the block to the VHS colour-under carrier
+    /// (`color_under_carrier` far below the block centre), and SECAM method 1
+    /// records through a divide-by-4 counter (`chroma_carrier_mult`).
+    pub fn is_secam_direct(&self, color_system: ColorSystem) -> bool {
+        color_system == ColorSystem::Secam
+            && self.chroma_carrier_mult.is_none()
+            && (self.color_under_carrier - SECAM_BLOCK_CENTRE).abs() < 1.0e3
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
