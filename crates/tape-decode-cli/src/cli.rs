@@ -323,7 +323,8 @@ struct WriteProfileArgs {
     /// Allow replacing an existing output file.
     #[arg(long)]
     overwrite: bool,
-    /// Destination path for the flattened profile JSON.
+    /// Destination path for the flattened profile JSON, or `-` to write to standard output.
+    #[arg(long)]
     out: PathBuf,
 }
 
@@ -394,6 +395,17 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         (None, Some(path)) => load_profile_file(path)?,
         _ => bail!("exactly one of --profile or --profile-file is required"),
     };
+    // CVBS single-output formats: composite-colour formats (e.g. SMPTE Type C,
+    // Quadruplex), and direct-composite SECAM (Type C / Quadruplex - the
+    // demodulated composite carries the chroma block at the studio rest
+    // carriers). Both demodulate the whole composite into the luma output, so
+    // they write a single combined .tbc and take no --chroma-out. Captured
+    // before the profile moves into the request; see the chroma_out handling
+    // below.
+    let cvbs_single_output = profile.decoder_params.is_composite_color
+        || profile
+            .decoder_params
+            .is_secam_direct(profile.sys_params.color_system);
     let mut request = DecodeRequest {
         inputfreq: cli.frequency.unwrap_or(40.0),
 
@@ -477,7 +489,10 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
     }
     // Every option is checked before an output file is created.
     let mut spec = Arc::new(DecoderSpec::new(&request)?);
-    if cli.chroma_out.is_some() && !spec.decodes_chroma() {
+    // CVBS single-output formats take no --chroma-out at all: the warn-and-ignore
+    // below handles those, so the hard refusal applies only to genuinely
+    // monochrome profiles.
+    if !cvbs_single_output && cli.chroma_out.is_some() && !spec.decodes_chroma() {
         bail!("--chroma-out: the profile is monochrome and decodes no chroma");
     }
 
@@ -516,18 +531,33 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         })?
     };
 
-    let chroma_out = match cli.chroma_out {
-        Some(path) if path.as_os_str() != "-" => Some(
-            open_options
-                .clone()
-                .open(&path)
-                .with_context(|| format!("failed to open chroma output file {}", path.display()))?,
-        ),
-        Some(_) => Some(
-            os::stdout_file()
-                .with_context(|| "failed to open standard output for chroma output")?,
-        ),
-        _ => None,
+    // CVBS single-output formats (see `cvbs_single_output` above): ignore
+    // --chroma-out with a warning instead of failing mid-decode ("missing
+    // chroma output for chroma file"), so these formats always produce a
+    // single combined .tbc plus its .tbc.json sidecar.
+    let chroma_out = if cvbs_single_output {
+        if cli.chroma_out.is_some() {
+            tracing::warn!(
+                "Composite (CVBS) profile: the luma output is the combined composite signal, so --chroma-out is ignored and a single .tbc is written"
+            );
+        }
+        None
+    } else {
+        match cli.chroma_out {
+            Some(path) if path.as_os_str() != "-" => Some(
+                open_options
+                    .clone()
+                    .open(&path)
+                    .with_context(|| {
+                        format!("failed to open chroma output file {}", path.display())
+                    })?,
+            ),
+            Some(_) => Some(
+                os::stdout_file()
+                    .with_context(|| "failed to open standard output for chroma output")?,
+            ),
+            _ => None,
+        }
     };
 
     let metadata_out =
@@ -594,6 +624,13 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
 
 fn run_write_profile(args: WriteProfileArgs) -> Result<()> {
     let profile = flatten_profile(args.profile.as_deref(), args.profile_file.as_deref())?;
+    if args.out.as_os_str() == "-" {
+        // `-` writes the flattened profile JSON to standard output.
+        let stdout = io::stdout();
+        serde_json::to_writer(stdout.lock(), &profile)
+            .with_context(|| "failed to write profile to standard output")?;
+        return Ok(());
+    }
     let mut open_options = OpenOptions::new();
     if args.overwrite {
         open_options.write(true).create(true).truncate(true);
