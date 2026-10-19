@@ -189,6 +189,22 @@ Verification (headless):
 - USER-CONFIRMED (2026-10-09): AppImage launched on the desktop, GUI works,
   SECAM_QUADRUPLEX and SECAM_TYPEC both listed in the profile dropdown.
 
+## Round 6 (2026-10-09): commit + CI release build v4.1.0
+
+- Rebased the round-5 log commit onto the user's remote README commits
+  (fe11842 Quick image example fix, 4aea2ff Formatting - README only, no
+   conflicts) and pushed master -> 879058d.
+- Dispatched build.yml (workflow_dispatch, create_release=true,
+  release_tag=v4.1.0): run 37978873053, all jobs + release job succeeded.
+  The release job created tag v4.1.0 at 879058d (verified ls-remote) and
+  published the release directly (not a draft this time).
+- Release v4.1.0 assets: linux x86_64/arm64 AppImage zips, macOS x86_64/arm64
+  DMGs, windows x86_64/arm64 zips, tbc-tools v3.3.0 bundles (13 assets).
+- Downloaded decode-rust-gui-linux_4.1.0_x86_64.AppImage and verified on this
+  host: --selftest SELFTEST OK (exit 0); list-profiles exit 0, 70 profiles,
+  SECAM_QUADRUPLEX and SECAM_TYPEC present.
+  (Kept at /tmp/secamdirect/release/.)
+
 ## Not yet done / next steps
 - SECAM_TYPEC is untested (no SECAM Type C sample in hand); parameters mirror PAL_TYPEC.
 - Blanking-interval rest carrier is passed through as recorded (method-1 regenerates it
@@ -198,5 +214,5 @@ Verification (headless):
 - Luma LPF now 3.2 MHz/order 12 (round 4); further tuning (notch at 4.286 MHz, lower
   cutoff) can be revisited against this sample or other quad material later.
 - Verified dev AppImage: decode-rust-gui-linux_dev-5fc9596_x86_64.AppImage (repo root,
-  built and user-confirmed 2026-10-09). CI release build still needed for a published
-  release with these profiles.
+  built and user-confirmed 2026-10-09). Published release with these profiles: v4.1.0
+  (tag at 879058d, shipped AppImage verified on this host - see round 6).
