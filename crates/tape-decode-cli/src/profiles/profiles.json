@@ -1524,6 +1524,17 @@
     },
     "tape_format": "UMATIC"
   },
+  "PAL_UMATIC_SP": {
+    "format": {
+      "base": "UMATIC_SP"
+    },
+    "sys_params": {
+      "base": "PAL",
+      "hz_ire": 11428.57142857143,
+      "ire0": 6057142.857142857
+    },
+    "tape_format": "UMATIC"
+  },
   "PAL_VCR": {
     "format": {
       "base": "VCR",

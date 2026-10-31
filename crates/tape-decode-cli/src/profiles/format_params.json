@@ -474,20 +474,26 @@
   },
   "UMATIC_HI": {
     "base": "UMATIC",
+    "decode_options": {
+      "chroma_afc_fine_tune_fh_ratio": 0.25
+    },
     "decoder_params": {
       "boost_bpf": {
         "high": 6800000.0,
         "low": 6000000.0,
         "mult": 0.0
       },
-      "boost_ramp": null,
+      "boost_ramp": {
+        "rf_linear_0": 0.0,
+        "rf_linear_20": 1.0
+      },
       "chroma_bpf_upper": 1300000.0,
       "color_under_carrier": 923828.0,
       "nonlinear": {
         "highpass_limit_l": -20000.0
       },
       "video_bpf": {
-        "high": 7000000.0,
+        "high": 10000000.0,
         "order": 1
       },
       "video_hpf_extra": 1500000.0,
@@ -495,7 +501,41 @@
       "video_lpf_extra": 7200000.0,
       "video_lpf_extra_order": 3,
       "video_lpf_freq": 4200000.0,
-      "video_rf_peak": null
+      "video_rf_peak": {
+        "bandwidth": 16000000.0,
+        "freq": 5600000.0,
+        "gain": 2.0
+      }
+    }
+  },
+  "UMATIC_SP": {
+    "base": "UMATIC",
+    "decode_options": {
+      "chroma_afc_fine_tune_fh_ratio": 0.25
+    },
+    "decoder_params": {
+      "boost_bpf": {
+        "high": 7200000.0,
+        "low": 6800000.0,
+        "mult": 0.0
+      },
+      "boost_ramp": {
+        "rf_linear_0": 0.0,
+        "rf_linear_20": 1.0
+      },
+      "chroma_bpf_upper": 1700000.0,
+      "color_under_carrier": 923828.0,
+      "nonlinear": {
+        "highpass_limit_l": -20000.0
+      },
+      "video_lpf_extra": 10800000.0,
+      "video_lpf_extra_order": 14,
+      "video_lpf_freq": 4200000.0,
+      "video_rf_peak": {
+        "bandwidth": 16000000.0,
+        "freq": 6400000.0,
+        "gain": 2.0
+      }
     }
   },
   "VCR": {
