@@ -199,9 +199,6 @@ struct DecodeArgs {
     /// Enable FM audio notch filters; omitting the value uses Q=10.0.
     #[arg(long, num_args = 0..=1, default_missing_value = "10.0")]
     fm_audio_notch: Option<f64>,
-    /// Apply detected RF DC-offset correction to the decoded video.
-    #[arg(long)]
-    enable_dc_offset: bool,
     /// Enable nonlinear deemphasis.
     #[arg(long)]
     nldeemp: bool,
@@ -241,9 +238,6 @@ struct DecodeArgs {
     /// Disable the right-edge hsync zero-crossing refinement.
     #[arg(long)]
     disable_right_hsync: bool,
-    /// Divisor for the level-detection pass sample rate.
-    #[arg(long, default_value_t = 3)]
-    level_detect_divisor: i64,
     /// Override fallback vsync recovery; omitting the value enables it.
     #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     fallback_vsync: Option<bool>,
@@ -406,7 +400,6 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         fm_audio_notch: cli
             .fm_audio_notch
             .unwrap_or(profile.decode_options.fm_audio_notch),
-        rf_disable_dc_offset: !cli.enable_dc_offset,
         disable_comb: cli.no_comb,
         skip_chroma: cli.chroma_out.is_none(),
         video_nldeemp_enabled: cli.nldeemp,
@@ -414,7 +407,6 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         y_comb: cli.y_comb,
         cafc: cli.cafc.unwrap_or(profile.decode_options.cafc),
         rf_disable_right_hsync: cli.disable_right_hsync,
-        level_detect_divisor: cli.level_detect_divisor,
         fallback_vsync: cli
             .fallback_vsync
             .unwrap_or(profile.decode_options.fallback_vsync),
