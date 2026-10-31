@@ -1507,6 +1507,35 @@ fn gen_fft_notch(
     Ok(filtfft(&b, &a, block_len, true))
 }
 
+/// Half-spectrum response of an analog transfer function of first-order real
+/// zeros and poles given as time constants, H(s) = prod(1 + s tz) / prod(1 +
+/// s tp). Evaluated on the analog frequency axis rather than through a
+/// bilinear transform, so there is no warping towards Nyquist and the
+/// response is the same at any sample rate.
+fn gen_analog_filter(
+    zeros_tau: &[f64],
+    poles_tau: &[f64],
+    freq_hz: f64,
+    block_len: usize,
+) -> Vec<Complex64> {
+    use std::f64::consts::TAU;
+
+    let output_len = block_len / 2 + 1;
+    (0..output_len)
+        .map(|k| {
+            let f = if output_len > 1 {
+                freq_hz / 2.0 * k as f64 / (output_len - 1) as f64
+            } else {
+                0.0
+            };
+            let s = Complex64::new(0.0, TAU * f);
+            let factor = |tau: &f64| 1.0 + s * *tau;
+            zeros_tau.iter().map(factor).product::<Complex64>()
+                / poles_tau.iter().map(factor).product::<Complex64>()
+        })
+        .collect()
+}
+
 fn gen_custom_video_filters(
     filter_list: &[VideoLumaFilter],
     freq_hz: f64,
@@ -1515,19 +1544,12 @@ fn gen_custom_video_filters(
     let mut ret = vec![Complex64::new(1.0, 0.0); block_len / 2 + 1];
     for filter in filter_list {
         match filter {
-            VideoLumaFilter::File { filename } => {
-                if let Some(values) = embedded_filter_file(filename, freq_hz as i64) {
-                    assert_eq!(
-                        values.len(),
-                        ret.len(),
-                        "custom file filter length mismatch"
-                    );
-                    for (dst, src) in ret.iter_mut().zip(values) {
-                        *dst *= src;
-                    }
-                } else {
-                    tracing::warn!(filename, freq_hz, "Cannot load filter from file for samplerate. Output will likely not look correct!");
-                }
+            VideoLumaFilter::Analog {
+                zeros_tau,
+                poles_tau,
+            } => {
+                let fft = gen_analog_filter(zeros_tau, poles_tau, freq_hz, block_len);
+                ret = multiply(&ret, &fft);
             }
             VideoLumaFilter::Shelf {
                 shelf_kind,
@@ -1550,35 +1572,6 @@ fn gen_custom_video_filters(
         }
     }
     Ok(ret)
-}
-
-fn embedded_filter_file(filename: &str, freq_hz: i64) -> Option<Vec<Complex64>> {
-    let text = match (filename, freq_hz) {
-        ("svhs-sp-linear-subdeemphasis", 40000000) => {
-            include_str!("svhs-sp-linear-subdeemphasis-40000000.txt")
-        }
-        ("svhs-sp-linear-subdeemphasis", 17734475) => {
-            include_str!("svhs-sp-linear-subdeemphasis-17734475.txt")
-        }
-        _ => return None,
-    };
-    Some(text.lines().filter_map(parse_complex_line).collect())
-}
-
-fn parse_complex_line(line: &str) -> Option<Complex64> {
-    let trimmed = line.trim().trim_end_matches('j');
-    let mut split = None;
-    let bytes = trimmed.as_bytes();
-    for i in 1..bytes.len() {
-        let ch = bytes[i] as char;
-        let prev = bytes[i - 1] as char;
-        if (ch == '+' || ch == '-') && prev != 'e' && prev != 'E' {
-            split = Some(i);
-        }
-    }
-    let split = split?;
-    let (re, im) = trimmed.split_at(split);
-    Some(Complex64::new(re.parse().ok()?, im.parse().ok()?))
 }
 
 fn firwin_lowpass(numtaps: usize, cutoff_norm_to_nyquist: f64) -> Vec<f64> {

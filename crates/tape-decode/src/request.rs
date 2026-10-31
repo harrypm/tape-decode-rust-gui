@@ -274,8 +274,11 @@ pub struct NonlinearParams {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind")]
 pub enum VideoLumaFilter {
-    File {
-        filename: String,
+    /// Analog transfer function of first-order real zeros and poles given as
+    /// time constants in seconds: H(s) = prod(1 + s tz) / prod(1 + s tp).
+    Analog {
+        zeros_tau: Vec<f64>,
+        poles_tau: Vec<f64>,
     },
     Shelf {
         shelf_kind: ShelfKind,

@@ -284,8 +284,16 @@
       "video_bpf": null,
       "video_custom_luma_filters": [
         {
-          "filename": "svhs-sp-linear-subdeemphasis",
-          "kind": "File"
+          "kind": "Analog",
+          "poles_tau": [
+            8.825e-07,
+            8.876e-08,
+            1.718e-08
+          ],
+          "zeros_tau": [
+            1.305e-06,
+            6.383e-08
+          ]
         },
         {
           "gain": 4.0,
