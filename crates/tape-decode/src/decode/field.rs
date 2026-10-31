@@ -928,11 +928,8 @@ pub(crate) fn predecode_field_from_rawdecode(
                         res.blank_level,
                     );
                     let adjust = spec.rf_ire0_adjust;
-                    // Backporch mode takes the refined sync tip as its ire0,
-                    // which parks the hsync refinement's slicing threshold
-                    // below the sync tip.
                     if adjust.backporch {
-                        inter_field_state.levels.ire0 = sync_level;
+                        inter_field_state.levels.ire0 = blank_level;
                     }
                     if adjust.hsync {
                         inter_field_state.levels.hz_ire =
