@@ -1,12 +1,16 @@
 use super::sync::try_get_pulses;
 use super::*;
+use std::f64::consts::{PI, TAU};
 
+/// Measures the burst kept at output sample `burst_start` of the field
+/// buffer, on the line starting at `line_start`, against the reference
+/// subcarrier table.
 fn demod_burst(
     burst: &[f32],
     burst_start: usize,
     line_start: usize,
-    line_scale: f32,
     burst_wave: &[(f32, f32)],
+    fsc_hz: f64,
 ) -> Result<BurstMeasurement> {
     let burst_end = burst_start.saturating_add(burst.len());
     if burst_end > burst_wave.len() {
@@ -15,25 +19,134 @@ fn demod_burst(
 
     let mut i = 0.0f32;
     let mut q = 0.0f32;
+    let mut sum = 0.0f32;
     for (&sample, &(sin, cos)) in burst.iter().zip(&burst_wave[burst_start..burst_end]) {
+        sum += sample;
         i += sample * cos;
         q += sample * sin;
     }
 
-    let magnitude = i.hypot(q);
-    let phase = q.atan2(i).to_degrees().rem_euclid(360.0);
-    // Resampling the line by `line_scale` shifts the burst by `1 - line_scale`
-    // of its distance from hsync, a quarter subcarrier cycle per output sample.
-    let phase_error =
-        (burst_start as f32 - line_start as f32) * (1.0 - line_scale) * std::f32::consts::FRAC_PI_2;
-    let phase_offset = phase_error.to_degrees().rem_euclid(360.0);
+    let len = burst.len() as f64;
+    let seed = BurstFit {
+        amplitude: 2.0 * f64::from(i.hypot(q)) / len,
+        phase: f64::from(q.atan2(i)),
+        dc: f64::from(sum) / len,
+        frequency: fsc_hz,
+    };
+    let fit = fit_burst(burst, burst_start, fsc_hz, seed);
+    // The phase as a sample offset, four samples per cycle.
+    let phase_samples = fit.phase.rem_euclid(TAU) * (2.0 / PI);
     Ok(BurstMeasurement {
-        phase,
-        phase_offset,
-        magnitude,
+        phase: (fit.phase.to_degrees().rem_euclid(360.0)) as f32,
+        magnitude: (fit.amplitude * len / 2.0) as f32,
+        frequency: fit.frequency,
+        center: (burst_start - line_start) as f64 + (len - 1.0) / 2.0 + phase_samples,
         i,
         q,
     })
+}
+
+/// Parameters of the burst model `amplitude * cos(2 pi frequency t - phase) + dc`.
+#[derive(Clone, Copy)]
+struct BurstFit {
+    amplitude: f64,
+    /// Radians.
+    phase: f64,
+    dc: f64,
+    /// Hz.
+    frequency: f64,
+}
+
+/// Refines the correlation estimate `seed` by a Gauss-Newton fit of the burst
+/// model, with `t` in seconds from the start of the field buffer (the
+/// reference table's origin) at four samples per subcarrier cycle. The
+/// frequency is pulled towards `fsc_hz` by a prior, so a noisy burst cannot
+/// trade frequency against phase along the model's near-degenerate valley.
+fn fit_burst(burst: &[f32], burst_start: usize, fsc_hz: f64, seed: BurstFit) -> BurstFit {
+    const FREQUENCY_PRIOR_WEIGHT: f64 = 1e4;
+    const REGULARIZATION: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 32;
+    const PRECISION: f64 = 1e-10;
+
+    let mut fit = seed;
+    let time_at = |k: usize| (k + burst_start) as f64 / (4.0 * fsc_hz);
+    for _ in 0..MAX_ITERATIONS {
+        // Normal equations (J^T J) delta = J^T r of the residual r = burst -
+        // model, with the Jacobian columns in the parameter order
+        // (amplitude, phase, dc, frequency).
+        let mut jtj = [[0.0f64; 4]; 4];
+        let mut jtr = [0.0f64; 4];
+        for (k, &sample) in burst.iter().enumerate() {
+            let t = time_at(k);
+            let (sin, cos) = (TAU * fit.frequency * t - fit.phase).sin_cos();
+            let residual = f64::from(sample) - (fit.amplitude * cos + fit.dc);
+            let d_phase = fit.amplitude * sin;
+            let jacobian = [cos, d_phase, 1.0, -TAU * t * d_phase];
+            for ((jtj_row, jtr_row), &j_row) in jtj.iter_mut().zip(&mut jtr).zip(&jacobian) {
+                for (cell, &j_col) in jtj_row.iter_mut().zip(&jacobian) {
+                    *cell += j_row * j_col;
+                }
+                *jtr_row += j_row * residual;
+            }
+        }
+        jtj[3][3] += FREQUENCY_PRIOR_WEIGHT;
+        jtr[3] += FREQUENCY_PRIOR_WEIGHT * (fsc_hz - fit.frequency);
+        for (row, jtj_row) in jtj.iter_mut().enumerate() {
+            jtj_row[row] += REGULARIZATION;
+        }
+
+        let Some(delta) = solve_4x4(jtj, jtr) else {
+            break;
+        };
+        fit.amplitude += delta[0];
+        fit.phase += delta[1];
+        fit.dc += delta[2];
+        fit.frequency += delta[3];
+        if delta.iter().all(|step| step.abs() < PRECISION) {
+            break;
+        }
+    }
+    fit.phase = (fit.phase + PI).rem_euclid(TAU) - PI;
+    fit
+}
+
+/// Gaussian elimination with partial pivoting; `None` when a pivot vanishes.
+fn solve_4x4(a: [[f64; 4]; 4], b: [f64; 4]) -> Option<[f64; 4]> {
+    let mut m = [[0.0f64; 5]; 4];
+    for (row, a_row) in m.iter_mut().zip(&a) {
+        row[..4].copy_from_slice(a_row);
+    }
+    for (row, &b_row) in m.iter_mut().zip(&b) {
+        row[4] = b_row;
+    }
+
+    for i in 0..4 {
+        let mut pivot = i;
+        for row in i + 1..4 {
+            if m[row][i].abs() > m[pivot][i].abs() {
+                pivot = row;
+            }
+        }
+        m.swap(i, pivot);
+        if m[i][i].abs() < 1e-12 {
+            return None;
+        }
+        let (upper, lower) = m.split_at_mut(i + 1);
+        let pivot_row = &upper[i];
+        for row in lower {
+            let factor = row[i] / pivot_row[i];
+            for col in i..5 {
+                row[col] -= factor * pivot_row[col];
+            }
+        }
+    }
+
+    let mut x = [0.0f64; 4];
+    for i in (0..4).rev() {
+        let sum: f64 = (i + 1..4).map(|j| m[i][j] * x[j]).sum();
+        x[i] = (m[i][4] - sum) / m[i][i];
+    }
+    Some(x)
 }
 
 fn resolve_signed_index(len: usize, index: isize) -> Option<usize> {
@@ -336,57 +449,47 @@ fn get_upconverted_burst(
     chroma_heterodyne: &[Vec<f32>],
     chroma_filter: &[Sos<f32>],
     current_phase: usize,
-    burstarea: (isize, isize),
+    burst_area: (usize, usize),
     burst_wave: &[(f32, f32)],
-    line_scale: f32,
-    linenumber: usize,
+    fsc_hz: f64,
+    line_number: usize,
     lineoffset: usize,
     outwidth: usize,
 ) -> Result<BurstMeasurement> {
-    let burst_padding = burstarea.1 - burstarea.0;
-    if burst_padding < 0 {
-        bail!("burst area end precedes start");
-    }
-    let burst_padding = burst_padding as usize;
-
-    let line_start = (linenumber as isize - lineoffset as isize) * outwidth as isize;
-    let burst_start = 0.max(line_start + burstarea.0 - burst_padding as isize) as usize;
-    let burst_end_limit = burst_start as isize + burstarea.1 + burst_padding as isize;
-    let burst_end = chroma.len().min(0.max(burst_end_limit) as usize);
-    if burst_start >= burst_end {
+    // Upconvert and filter from the line start to as far past the burst as
+    // the burst sits from the line start, so the filter transients fall
+    // outside the kept window.
+    let padding = burst_area.0;
+    let line_start = (line_number - lineoffset) * outwidth;
+    let window_end = chroma.len().min(line_start + burst_area.1 + padding);
+    if line_start >= window_end {
         bail!("empty burst window");
     }
 
     let heterodyne_row = chroma_heterodyne
         .get(current_phase)
         .context("heterodyne phase row is out of range")?;
-    if burst_end > heterodyne_row.len() {
+    if window_end > heterodyne_row.len() {
         bail!("burst window exceeds heterodyne row length");
     }
 
-    let burst = (burst_start..burst_end)
-        .map(|index| chroma[index] * heterodyne_row[index])
+    let upconverted = chroma[line_start..window_end]
+        .iter()
+        .zip(&heterodyne_row[line_start..window_end])
+        .map(|(&sample, &het)| sample * het)
         .collect::<Vec<f32>>();
-
-    let filtered_padded = sosfiltfilt_f32(chroma_filter, &burst);
-    let filtered = if burst_padding == 0 {
-        &filtered_padded[0..0]
-    } else {
-        let start = burst_padding.min(filtered_padded.len());
-        let end = filtered_padded.len().saturating_sub(burst_padding);
-        if start <= end {
-            &filtered_padded[start..end]
-        } else {
-            &filtered_padded[0..0]
-        }
-    };
+    let filtered_padded = sosfiltfilt_f32(chroma_filter, &upconverted);
+    let kept_end = filtered_padded.len().saturating_sub(padding);
+    if padding >= kept_end {
+        bail!("empty burst window");
+    }
 
     demod_burst(
-        filtered,
-        burst_start + burst_padding,
-        line_start as usize,
-        line_scale,
+        &filtered_padded[padding..kept_end],
+        line_start + padding,
+        line_start,
         burst_wave,
+        fsc_hz,
     )
 }
 
@@ -396,7 +499,7 @@ fn get_phase_sequence(
     chroma: &[f32],
     chroma_heterodyne: &[Vec<f32>],
     chroma_rotation_starting_index: Option<i64>,
-    burstarea: (isize, isize),
+    burst_area: (usize, usize),
     track_change_threshold: f32,
 ) -> Result<(i64, Vec<PhaseSequenceEntry>)> {
     const BURST_CHECK_SKIP_LINES: usize = 16;
@@ -404,7 +507,6 @@ fn get_phase_sequence(
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
     let do_phase_rotation_check = spec.rf_detect_chroma_track_phase && chroma_rotation.is_some();
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
-    let linelocs = field.linelocs.as_deref().context("missing linelocs")?;
     let lineoffset = field.lineoffset + 1;
     let last_line = field.outlinecount + lineoffset;
     let rotation_check_start_line = lineoffset + field.outlinecount - BURST_CHECK_SKIP_LINES;
@@ -423,24 +525,15 @@ fn get_phase_sequence(
         track_rotation = starting_index;
     }
 
-    // Length of the line relative to the nominal one, as the TBC resamples it.
-    let line_scale = |linenumber: usize| -> f32 {
-        if linenumber + 1 < last_line {
-            (f64::from(linelocs[linenumber + 1] - linelocs[linenumber]) / field.inlinelen) as f32
-        } else {
-            1.0
-        }
-    };
-
     let upconvert = |phase: usize, linenumber: usize| {
         get_upconverted_burst(
             chroma,
             chroma_heterodyne,
             &spec.chroma_filter_final,
             phase,
-            burstarea,
+            burst_area,
             &spec.rf_fsc_wave,
-            line_scale(linenumber),
+            spec.sys_fsc_mhz * 1e6,
             linenumber,
             lineoffset,
             field.outlinelen,
@@ -514,7 +607,7 @@ fn get_phase_rotation_sequence(
     chroma: &[f32],
     chroma_heterodyne: &[Vec<f32>],
     chroma_rotation_index: Option<i64>,
-    burstarea: (isize, isize),
+    burst_area: (usize, usize),
     prev_burst_start_line: i64,
 ) -> Result<(i64, BurstLock)> {
     const TRACK_CHANGE_THRESHOLD: f32 = 90.0;
@@ -534,7 +627,7 @@ fn get_phase_rotation_sequence(
         chroma,
         chroma_heterodyne,
         chroma_rotation_index,
-        burstarea,
+        burst_area,
         TRACK_CHANGE_THRESHOLD,
     )?;
 
@@ -572,7 +665,7 @@ fn get_phase_rotation_sequence(
             chroma,
             chroma_heterodyne,
             Some(chroma_rotation_index),
-            burstarea,
+            burst_area,
             TRACK_CHANGE_THRESHOLD,
         )?;
     }
@@ -655,22 +748,26 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     };
     // Output samples per subcarrier cycle: a phase error maps to that many
     // output samples, scaled back to the line's input length.
-    let fsc_ratio = (spec.sys_outfreq / spec.sys_fsc_mhz) as f32;
+    let fsc_ratio = spec.sys_outfreq / spec.sys_fsc_mhz;
+    let fsc_hz = spec.sys_fsc_mhz * 1e6;
     // The first lines sit in vsync; after a mid-field burst turn-on only the
     // lines with color are refined.
     let start = lock.burst_start_line.max(9) as usize;
     for entry in lock.phase_sequence.iter().skip(start) {
         let line = entry.line_number;
+        let burst = entry.burst;
         let target = if line % 2 == 1 {
             odd_target
         } else {
             even_target
         };
-        let phase_delta = (target - entry.burst.phase + entry.burst.phase_offset + 180.0)
-            .rem_euclid(360.0)
-            - 180.0;
-        let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f32;
-        linelocs[line] += phase_delta / 360.0 * fsc_ratio * scale;
+        let phase_delta = (target - burst.phase + 180.0).rem_euclid(360.0) - 180.0;
+        let line_adjust = f64::from(phase_delta) / 360.0 * fsc_ratio;
+        // Less the subcarrier drift the fitted frequency accumulates between
+        // the line start and the burst center.
+        let drift = (burst.frequency - fsc_hz) * burst.center / fsc_hz;
+        let scale = f64::from(linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
+        linelocs[line] += ((line_adjust - drift) * scale) as f32;
     }
     Some(linelocs)
 }
@@ -681,7 +778,6 @@ fn apply_burst_lock(
     inter_field_state: &mut InterFieldState,
     chroma_afc_state: &ChromaAfcState,
 ) -> Result<()> {
-    let burstarea = padded_burst_area(spec);
     let chroma_heterodyne = active_chroma_heterodyne(spec, chroma_afc_state);
     let prev_burst_start_line = field
         .prevfield
@@ -695,7 +791,7 @@ fn apply_burst_lock(
         &burst_downscaled,
         chroma_heterodyne,
         inter_field_state.track_phase,
-        burstarea,
+        burst_area(spec),
         prev_burst_start_line,
     )?;
     inter_field_state.track_phase = Some(track_phase);

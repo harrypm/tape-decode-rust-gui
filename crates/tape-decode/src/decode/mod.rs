@@ -495,16 +495,22 @@ fn demod_mean(data: &[f32], start: i64, end: i64) -> f32 {
     slice.iter().sum::<f32>() / slice.len() as f32
 }
 
-/// Color burst of one line, demodulated against the reference subcarrier
-/// after the chroma heterodyne.
+/// Color burst of one line after the chroma heterodyne, fitted as
+/// `amplitude * cos(2 pi frequency t - phase) + dc` against the reference
+/// subcarrier, with `t` counted from the start of the field buffer.
 #[derive(Clone, Copy)]
 struct BurstMeasurement {
-    /// Burst phase in degrees.
+    /// Burst phase in degrees, [0, 360).
     phase: f32,
-    /// Phase error in degrees that the line's TBC resampling introduces
-    /// between hsync and the burst.
-    phase_offset: f32,
+    /// Amplitude on the scale of the correlation sums below (half the burst
+    /// length times the amplitude), which the color killer threshold and the
+    /// phase averages are set against.
     magnitude: f32,
+    /// Fitted subcarrier frequency in Hz.
+    frequency: f64,
+    /// Burst center in output samples from the line start.
+    center: f64,
+    /// Correlation sums against the reference cosine and sine.
     i: f32,
     q: f32,
 }
@@ -1354,13 +1360,14 @@ fn field_phase_id(first_field: bool, second_phase: bool) -> i64 {
     }
 }
 
-// Color burst window with the small padding used by both the phase-rotation
-// lock and the chroma upconvert.
-fn padded_burst_area(spec: &DecoderSpec) -> (isize, isize) {
-    (
-        (spec.sys_color_burst_us[0] * spec.sys_outfreq).floor() as isize - 5,
-        (spec.sys_color_burst_us[1] * spec.sys_outfreq).ceil() as isize + 10,
-    )
+// Color burst window in output samples from the line start, padded a little
+// past the nominal burst, used by both the burst lock and the chroma
+// upconvert. Its length is a whole number of subcarrier cycles (four samples
+// each) so the correlation against the reference subcarrier is unbiased.
+fn burst_area(spec: &DecoderSpec) -> (usize, usize) {
+    let start = ((spec.sys_color_burst_us[0] * spec.sys_outfreq).floor() as isize - 4).max(0) as usize;
+    let end = (spec.sys_color_burst_us[1] * spec.sys_outfreq).ceil() as usize + 8;
+    (start, end - (end - start) % 4)
 }
 
 // Minimal state needed to progress a decode: the immutable spec, the running

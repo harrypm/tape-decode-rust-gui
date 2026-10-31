@@ -141,7 +141,7 @@ fn burst_deemphasis(chroma: &mut [f32], field: &DecodedField, burstarea_end: usi
     for line in lineoffset..field.outlinecount + lineoffset {
         let linestart = (line - lineoffset) * field.outlinelen;
         let lineend = linestart + field.outlinelen;
-        for sample in &mut chroma[linestart + burstarea_end + 5..lineend] {
+        for sample in &mut chroma[linestart + burstarea_end + 4..lineend] {
             *sample *= 2.0;
         }
     }
@@ -213,11 +213,11 @@ fn process_chroma_internal(
             tracing::debug!(offset_hz = offset, "SECAM carrier servo measurement");
         }
     }
-    let burstarea = padded_burst_area(spec);
+    let burstarea = burst_area(spec);
 
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
-        burst_deemphasis(&mut chroma, field, burstarea.1 as usize)
+        burst_deemphasis(&mut chroma, field, burstarea.1)
     }
 
     let phase_sequence = &field
@@ -262,8 +262,8 @@ fn process_chroma_internal(
     Ok(acc(
         &uphet,
         burst_abs_ref,
-        burstarea.0 as usize,
-        burstarea.1 as usize,
+        burstarea.0,
+        burstarea.1,
         field.outlinelen,
         field.outlinecount,
         burst_start_line,
