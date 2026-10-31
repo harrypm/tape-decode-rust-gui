@@ -243,6 +243,9 @@
         }
       }
     },
+    "decode_options": {
+      "burst_hsync": false
+    },
     "sys_params": {
       "base": "MPAL"
     }
@@ -285,6 +288,9 @@
           "freq": 3900000.0
         }
       }
+    },
+    "decode_options": {
+      "burst_hsync": false
     },
     "sys_params": {
       "base": "MPAL"
@@ -329,6 +335,9 @@
         }
       }
     },
+    "decode_options": {
+      "burst_hsync": false
+    },
     "sys_params": {
       "base": "MPAL"
     }
@@ -371,6 +380,9 @@
           "freq": 3900000.0
         }
       }
+    },
+    "decode_options": {
+      "burst_hsync": false
     },
     "sys_params": {
       "base": "MPAL"
@@ -820,7 +832,7 @@
     },
     "sys_params": {
       "base": "NTSC",
-      "burst_abs_ref": 4000.0,
+      "burst_abs_ref": 2500.0,
       "hz_ire": 11428.57142857143,
       "ire0": 4257143.0
     },

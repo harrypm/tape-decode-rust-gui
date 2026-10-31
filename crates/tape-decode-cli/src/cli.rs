@@ -210,6 +210,9 @@ struct DecodeArgs {
     /// Detect chroma track phase from the decoded signal.
     #[arg(long)]
     detect_chroma_track_phase: bool,
+    /// Enable the color killer: blank the chroma of fields without a detectable color burst.
+    #[arg(long)]
+    enable_color_killer: bool,
     /// Disable chroma phase correction.
     #[arg(long)]
     disable_phase_correction: bool,
@@ -406,7 +409,8 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_export_raw_tbc: cli.export_raw_tbc,
         rf_ire0_adjust: cli.ire0_adjust,
         rf_detect_chroma_track_phase: cli.detect_chroma_track_phase,
-        rf_disable_burst_hsync: cli.disable_burst_hsync,
+        rf_enable_color_killer: cli.enable_color_killer,
+        rf_disable_burst_hsync: cli.disable_burst_hsync || !profile.decode_options.burst_hsync,
         rf_disable_phase_correction: cli.disable_phase_correction,
 
         wow_level_adjust_smoothing: cli.wow_level_adjust_smoothing,
@@ -900,6 +904,7 @@ fn compare_field(expected: &FieldInfoEntry, actual: &FieldInfoEntry, index: usiz
     diff.bool(&format!("{p}.isFirstField"), expected.is_first_field, actual.is_first_field);
     diff.bool(&format!("{p}.detectedFirstField"), expected.detected_first_field, actual.detected_first_field);
     diff.bool(&format!("{p}.isDuplicateField"), expected.is_duplicate_field, actual.is_duplicate_field);
+    diff.int(&format!("{p}.burstStartLine"), expected.burst_start_line, actual.burst_start_line);
     diff.int(&format!("{p}.syncConf"), expected.sync_conf, actual.sync_conf);
     diff.int(&format!("{p}.seqNo"), expected.seq_no, actual.seq_no);
     diff.float(&format!("{p}.diskLoc"), expected.disk_loc.into(), actual.disk_loc.into());

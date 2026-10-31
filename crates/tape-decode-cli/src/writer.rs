@@ -60,9 +60,9 @@ impl DecodeWriter {
         }
         if let Some(outfile) = &mut self.outfile_chroma {
             let chroma = field
-                .chroma()
+                .chroma_output()
                 .context("missing chroma output for chroma file")?;
-            write_native_slice(outfile, chroma)?;
+            write_native_slice(outfile, &chroma)?;
         }
         let now = Instant::now();
         let start = self.first_field_write.get_or_insert(now);

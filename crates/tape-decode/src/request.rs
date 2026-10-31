@@ -20,6 +20,8 @@ pub enum FieldOrderAction {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct DecodeOptions {
+    /// Refine hsync from the color burst phase.
+    pub burst_hsync: bool,
     pub cafc: bool,
     pub chroma_afc_fine_tune_fh_ratio: f64,
     pub fallback_vsync: bool,
@@ -31,6 +33,7 @@ pub struct DecodeOptions {
 impl Default for DecodeOptions {
     fn default() -> Self {
         Self {
+            burst_hsync: true,
             cafc: false,
             chroma_afc_fine_tune_fh_ratio: 0.25,
             fallback_vsync: false,
@@ -293,6 +296,7 @@ pub struct DecodeRequest {
     pub rf_export_raw_tbc: bool,
     pub rf_ire0_adjust: bool,
     pub rf_detect_chroma_track_phase: bool,
+    pub rf_enable_color_killer: bool,
     pub rf_disable_burst_hsync: bool,
     pub rf_disable_phase_correction: bool,
 

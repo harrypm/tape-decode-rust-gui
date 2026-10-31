@@ -105,6 +105,7 @@ pub struct DecoderSpec {
     pub(crate) rf_ire0_adjust: bool,
     pub(crate) rf_relaxed_line0: bool,
     pub(crate) rf_detect_chroma_track_phase: bool,
+    pub(crate) rf_enable_color_killer: bool,
     pub(crate) rf_disable_burst_hsync: bool,
     pub(crate) rf_disable_phase_correction: bool,
 
@@ -133,7 +134,6 @@ pub struct DecoderSpec {
     pub(crate) fft_block_r2c_f32: Arc<dyn RealToComplex<f32>>,
     pub(crate) fft_block_c2r_f32: Arc<dyn ComplexToReal<f32>>,
     pub(crate) fft_field_forward_f32: Arc<dyn Fft<f32>>,
-    pub(crate) fft_field_inverse_f32: Arc<dyn Fft<f32>>,
 
     pub(crate) resync_divisor: usize,
     pub(crate) resync_vsync_env_decimation: usize,
@@ -237,7 +237,6 @@ impl DecoderSpec {
         let mut fft_planner_f32 = FftPlanner::<f32>::new();
         let fft_block_inverse_f32 = fft_planner_f32.plan_fft_inverse(blocklen);
         let fft_field_forward_f32 = fft_planner_f32.plan_fft_forward(fieldlen);
-        let fft_field_inverse_f32 = fft_planner_f32.plan_fft_inverse(fieldlen);
         // Half-spectrum transforms for the real-valued block signals: the
         // forward r2c produces only the blocklen/2 + 1 unique bins and the c2r
         // inverse consumes the same, so each runs on a half-length inner FFT.
@@ -662,6 +661,7 @@ impl DecoderSpec {
             rf_ire0_adjust: request.rf_ire0_adjust,
             rf_relaxed_line0: request.rf_relaxed_line0,
             rf_detect_chroma_track_phase: request.rf_detect_chroma_track_phase,
+            rf_enable_color_killer: request.rf_enable_color_killer,
             rf_disable_burst_hsync: request.rf_disable_burst_hsync,
             rf_disable_phase_correction: request.rf_disable_phase_correction,
 
@@ -690,7 +690,6 @@ impl DecoderSpec {
             fft_block_r2c_f32,
             fft_block_c2r_f32,
             fft_field_forward_f32,
-            fft_field_inverse_f32,
 
             resync_divisor,
             resync_vsync_env_decimation,

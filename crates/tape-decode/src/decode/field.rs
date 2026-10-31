@@ -4,30 +4,36 @@ use super::*;
 fn demod_burst(
     burst: &[f32],
     burst_start: usize,
-    burst_len: usize,
+    line_start: usize,
+    line_scale: f32,
     burst_wave: &[(f32, f32)],
-) -> Result<(f32, f32, f32, f32)> {
-    if burst_len > burst.len() {
-        bail!("burst_len exceeds burst length");
-    }
-
-    let burst_end = burst_start.saturating_add(burst_len);
+) -> Result<BurstMeasurement> {
+    let burst_end = burst_start.saturating_add(burst.len());
     if burst_end > burst_wave.len() {
         bail!("burst window exceeds reference waveform length");
     }
 
     let mut i = 0.0f32;
     let mut q = 0.0f32;
-    for (index, &sample) in burst.iter().take(burst_len).enumerate() {
-        let phase_index = index + burst_start;
-        let (sin, cos) = burst_wave[phase_index];
+    for (&sample, &(sin, cos)) in burst.iter().zip(&burst_wave[burst_start..burst_end]) {
         i += sample * cos;
         q += sample * sin;
     }
 
-    let burst_magnitude = i.hypot(q);
-    let burst_phase_deg = q.atan2(i).to_degrees().rem_euclid(360.0);
-    Ok((burst_phase_deg, burst_magnitude, i, q))
+    let magnitude = i.hypot(q);
+    let phase = q.atan2(i).to_degrees().rem_euclid(360.0);
+    // Resampling the line by `line_scale` shifts the burst by `1 - line_scale`
+    // of its distance from hsync, a quarter subcarrier cycle per output sample.
+    let phase_error =
+        (burst_start as f32 - line_start as f32) * (1.0 - line_scale) * std::f32::consts::FRAC_PI_2;
+    let phase_offset = phase_error.to_degrees().rem_euclid(360.0);
+    Ok(BurstMeasurement {
+        phase,
+        phase_offset,
+        magnitude,
+        i,
+        q,
+    })
 }
 
 fn nb_absmax(values: &[f32]) -> f32 {
@@ -433,10 +439,11 @@ fn get_upconverted_burst(
     current_phase: usize,
     burstarea: (isize, isize),
     burst_wave: &[(f32, f32)],
+    line_scale: f32,
     linenumber: usize,
     lineoffset: usize,
     outwidth: usize,
-) -> Result<(f32, f32, f32, f32)> {
+) -> Result<BurstMeasurement> {
     let burst_padding = burstarea.1 - burstarea.0;
     if burst_padding < 0 {
         bail!("burst area end precedes start");
@@ -478,7 +485,8 @@ fn get_upconverted_burst(
     demod_burst(
         filtered,
         burst_start + burst_padding,
-        filtered.len(),
+        line_start as usize,
+        line_scale,
         burst_wave,
     )
 }
@@ -496,6 +504,8 @@ fn get_phase_sequence(
 
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
     let do_phase_rotation_check = spec.rf_detect_chroma_track_phase && chroma_rotation.is_some();
+    let is_ntsc = spec.color_system == ColorSystem::Ntsc;
+    let linelocs = field.linelocs.as_deref().context("missing linelocs")?;
     let lineoffset = field.lineoffset + 1;
     let last_line = field.outlinecount + lineoffset;
     let rotation_check_start_line = lineoffset + field.outlinecount - BURST_CHECK_SKIP_LINES;
@@ -514,6 +524,15 @@ fn get_phase_sequence(
         track_rotation = starting_index;
     }
 
+    // Length of the line relative to the nominal one, as the TBC resamples it.
+    let line_scale = |linenumber: usize| -> f32 {
+        if linenumber + 1 < last_line {
+            (f64::from(linelocs[linenumber + 1] - linelocs[linenumber]) / field.inlinelen) as f32
+        } else {
+            1.0
+        }
+    };
+
     let upconvert = |phase: usize, linenumber: usize| {
         get_upconverted_burst(
             chroma,
@@ -522,51 +541,46 @@ fn get_phase_sequence(
             phase,
             burstarea,
             &spec.rf_fsc_wave,
+            line_scale(linenumber),
             linenumber,
             lineoffset,
             field.outlinelen,
         )
     };
 
-    let mut phase_sequence = Vec::with_capacity(last_line.saturating_sub(lineoffset));
+    let mut phase_sequence: Vec<PhaseSequenceEntry> =
+        Vec::with_capacity(last_line.saturating_sub(lineoffset));
     let mut current_phase = 0usize;
-    let mut use_next_phase = false;
-    let mut next_phase = 0usize;
-    let mut next_burst_phase = 0.0;
-    let mut next_burst_i = 0.0;
-    let mut next_burst_q = 0.0;
-    let mut next_burst_magnitude = 0.0;
+    // The next line's burst, when the rotation check already measured it.
+    let mut next: Option<(usize, BurstMeasurement)> = None;
 
     for linenumber in lineoffset..last_line {
-        let (current_burst_phase, current_burst_magnitude, current_burst_i, current_burst_q) =
-            if use_next_phase {
-                current_phase = next_phase;
-                use_next_phase = false;
-                (
-                    next_burst_phase,
-                    next_burst_magnitude,
-                    next_burst_i,
-                    next_burst_q,
-                )
-            } else {
-                current_phase = rotated_phase(current_phase, track_rotation);
-                upconvert(current_phase, linenumber)?
-            };
+        let current_burst = if let Some((phase, burst)) = next.take() {
+            current_phase = phase;
+            burst
+        } else {
+            current_phase = rotated_phase(current_phase, track_rotation);
+            upconvert(current_phase, linenumber)?
+        };
 
         if do_phase_rotation_check
             && linenumber >= rotation_check_start_line
             && linenumber + 1 < last_line
         {
-            next_phase = rotated_phase(current_phase, track_rotation);
-            (
-                next_burst_phase,
-                next_burst_magnitude,
-                next_burst_i,
-                next_burst_q,
-            ) = upconvert(next_phase, linenumber + 1)?;
+            let next_phase = rotated_phase(current_phase, track_rotation);
+            let next_burst = upconvert(next_phase, linenumber + 1)?;
 
+            // PAL-family bursts alternate between lines, so the next line is
+            // compared against the one two back; NTSC against the current one.
+            let comparison_phase = if is_ntsc {
+                current_burst.phase
+            } else {
+                phase_sequence
+                    .last()
+                    .map_or(current_burst.phase, |entry| entry.burst.phase)
+            };
             let phase_delta_quadrant =
-                ((next_burst_phase - current_burst_phase + 180.0).rem_euclid(360.0) - 180.0).abs();
+                ((next_burst.phase - comparison_phase + 180.0).rem_euclid(360.0) - 180.0).abs();
             if phase_delta_quadrant > track_change_threshold {
                 chroma_rotation_index = (chroma_rotation_index + 1).rem_euclid(2);
                 if let Some(rotation) = chroma_rotation {
@@ -577,18 +591,15 @@ fn get_phase_sequence(
                     };
                 }
             } else {
-                use_next_phase = true;
+                next = Some((next_phase, next_burst));
             }
         }
 
-        phase_sequence.push((
-            linenumber,
-            current_phase,
-            current_burst_phase,
-            current_burst_magnitude,
-            current_burst_i,
-            current_burst_q,
-        ));
+        phase_sequence.push(PhaseSequenceEntry {
+            line_number: linenumber,
+            heterodyne_phase: current_phase,
+            burst: current_burst,
+        });
     }
 
     if chroma_rotation.is_some() && chroma_rotation_index == starting_index {
@@ -605,9 +616,14 @@ fn get_phase_rotation_sequence(
     chroma_heterodyne: &[Vec<f32>],
     chroma_rotation_index: Option<i64>,
     burstarea: (isize, isize),
-) -> Result<(i64, Vec<PhaseSequenceEntry>, Option<f32>)> {
+    prev_burst_start_line: i64,
+) -> Result<(i64, BurstLock)> {
     const TRACK_CHANGE_THRESHOLD: f32 = 90.0;
     const BURST_CHECK_SKIP_LINES: isize = 16;
+    // Field-average burst magnitude below which the color killer blanks the
+    // field. Set on the 16-bit sample scale, which the reader normalizes by
+    // 32768; a healthy burst measures a few times this.
+    const BURST_MAGNITUDE_THRESHOLD: f32 = 2.5e4 / 32768.0;
 
     let lineoffset = field.lineoffset + 1;
     let end = field.outlinecount + lineoffset;
@@ -630,9 +646,9 @@ fn get_phase_rotation_sequence(
         let mut delta_counts = [0usize; 4];
 
         for window in phase_sequence.windows(2) {
-            let previous_burst_phase = window[0].2;
-            let line_number = window[1].0 as isize;
-            let current_burst_phase = window[1].2;
+            let previous_burst_phase = window[0].burst.phase;
+            let line_number = window[1].line_number as isize;
+            let current_burst_phase = window[1].burst.phase;
 
             if line_number > burst_check_start && line_number < burst_check_end {
                 let delta = (current_burst_phase - previous_burst_phase).rem_euclid(360.0);
@@ -662,23 +678,102 @@ fn get_phase_rotation_sequence(
         )?;
     }
 
-    let burst_phase_avg = if is_ntsc {
-        let mut i_total = 0.0;
-        let mut q_total = 0.0;
-        for &(line_number, _, _, magnitude, i_value, q_value) in &phase_sequence {
-            let line_number = line_number as isize;
-            if line_number > burst_check_start && line_number < burst_check_end && magnitude != 0.0
-            {
-                i_total += i_value / magnitude;
-                q_total += q_value / magnitude;
-            }
+    // Average burst phase per line parity (PAL bursts alternate), plus the
+    // color killer state.
+    let mut even = (0.0f32, 0.0f32);
+    let mut odd = (0.0f32, 0.0f32);
+    let mut count = 0usize;
+    let mut magnitude_sum = 0.0f64;
+    let mut burst_start_line = 0i64;
+    for entry in &phase_sequence {
+        let line_number = entry.line_number as isize;
+        let burst = entry.burst;
+        if line_number <= burst_check_start
+            || line_number >= burst_check_end
+            || burst.magnitude == 0.0
+        {
+            continue;
         }
-        Some(q_total.atan2(i_total).to_degrees().rem_euclid(360.0))
+        count += 1;
+        magnitude_sum += f64::from(burst.magnitude);
+        // After a blanked field, color resumes at the first line whose burst
+        // clears the threshold: broadcasts could switch the burst on
+        // mid-field.
+        if spec.rf_enable_color_killer
+            && prev_burst_start_line == -1
+            && burst_start_line == 0
+            && burst.magnitude > BURST_MAGNITUDE_THRESHOLD
+        {
+            burst_start_line = entry.line_number as i64;
+        }
+        let total = if entry.line_number % 2 == 1 {
+            &mut odd
+        } else {
+            &mut even
+        };
+        total.0 += burst.i / burst.magnitude;
+        total.1 += burst.q / burst.magnitude;
+    }
+    let magnitude_avg = if count == 0 {
+        0.0
     } else {
-        None
+        (magnitude_sum / count as f64) as f32
     };
+    if spec.rf_enable_color_killer && magnitude_avg < BURST_MAGNITUDE_THRESHOLD {
+        burst_start_line = -1;
+    }
 
-    Ok((chroma_rotation_index, phase_sequence, burst_phase_avg))
+    let phase_deg = |(i, q): (f32, f32)| q.atan2(i).to_degrees().rem_euclid(360.0);
+    Ok((
+        chroma_rotation_index,
+        BurstLock {
+            phase_sequence,
+            burst_start_line,
+            phase_avg: phase_deg((even.0 + odd.0, even.1 + odd.1)),
+            even_phase_avg: phase_deg(even),
+            odd_phase_avg: phase_deg(odd),
+        },
+    ))
+}
+
+/// Line locations refined from the burst phase, or `None` when burst hsync
+/// refinement is disabled or the color killer blanks the field.
+fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Vec<f32>> {
+    if spec.rf_disable_burst_hsync {
+        return None;
+    }
+    let lock = field
+        .burst_lock
+        .as_ref()
+        .filter(|lock| lock.burst_start_line != -1)?;
+    let mut linelocs = field.linelocs.clone()?;
+    // Every NTSC line targets the field-average burst phase; PAL-family bursts
+    // alternate with line parity, so each parity targets its own average.
+    let (even_target, odd_target) = if spec.color_system == ColorSystem::Ntsc {
+        (lock.phase_avg, lock.phase_avg)
+    } else {
+        (lock.even_phase_avg, lock.odd_phase_avg)
+    };
+    // Output samples per subcarrier cycle: a phase error maps to that many
+    // output samples, scaled back to the line's input length.
+    let fsc_ratio = (spec.sys_outfreq / spec.sys_fsc_mhz) as f32;
+    // The first lines sit in vsync; after a mid-field burst turn-on only the
+    // lines with color are refined.
+    let start = lock.burst_start_line.max(9) as usize;
+    for entry in lock.phase_sequence.iter().skip(start) {
+        let line = entry.line_number;
+        let target = if line % 2 == 1 {
+            odd_target
+        } else {
+            even_target
+        };
+        let phase_delta = (target - entry.burst.phase + entry.burst.phase_offset + 180.0)
+            .rem_euclid(360.0)
+            - 180.0;
+        let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f32;
+        linelocs[line] += phase_delta / 360.0 * fsc_ratio * scale;
+    }
+    Some(linelocs)
 }
 
 fn slice_subtract_mean(data: &[f32], start: isize, end: isize) -> Option<Vec<f32>> {
@@ -706,19 +801,23 @@ fn apply_burst_lock(
 ) -> Result<()> {
     let burstarea = padded_burst_area(spec);
     let chroma_heterodyne = active_chroma_heterodyne(spec, chroma_afc_state);
+    let prev_burst_start_line = field
+        .prevfield
+        .as_ref()
+        .map_or(0, |prev| prev.burst_start_line);
 
     let burst_downscaled = downscale_raw_vec(field, None, None, None, true)?;
-    let phase_result = get_phase_rotation_sequence(
+    let (track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
         field,
         &burst_downscaled,
         chroma_heterodyne,
         inter_field_state.track_phase,
         burstarea,
+        prev_burst_start_line,
     )?;
-    inter_field_state.track_phase = Some(phase_result.0);
-    field.phase_sequence = Some(phase_result.1);
-    field.burst_phase_avg = phase_result.2;
+    inter_field_state.track_phase = Some(track_phase);
+    field.burst_lock = Some(burst_lock);
     Ok(())
 }
 
@@ -765,8 +864,7 @@ pub(crate) fn predecode_field_from_rawdecode(
         phase_adjust_median: 0.0,
         valid: false,
         sync_confidence: 100,
-        phase_sequence: None,
-        burst_phase_avg: None,
+        burst_lock: None,
         wow_analysis: None,
     };
     if let Some(prevfield) = &pending_field.prevfield {
@@ -822,7 +920,9 @@ pub(crate) fn predecode_field_from_rawdecode(
             if lastline < proclines as f32 {
                 if pending_field.prevfield.is_some() {
                     tracing::info!(lastline, proclines, meanlinelen = res.meanlinelen, line0loc);
-                    tracing::info!("Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit");
+                    tracing::info!(
+                        "Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit"
+                    );
                 }
                 pending_field.nextfieldoffset = Some(f64::from(
                     (line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen as f32),
@@ -890,6 +990,9 @@ pub(crate) fn predecode_field_from_rawdecode(
                                 inter_field_state,
                                 chroma_afc_state,
                             )?;
+                            if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
+                                pending_field.linelocs = Some(refined);
+                            }
                         }
                         let is_first_field = pending_field.is_first_field.unwrap_or(false);
                         let linecount = match (spec.sys_frame_lines, is_first_field) {
@@ -918,32 +1021,9 @@ pub(crate) fn predecode_field_from_rawdecode(
                                     inter_field_state,
                                     chroma_afc_state,
                                 )?;
-                                if !spec.rf_disable_burst_hsync
-                                    && spec.color_system == ColorSystem::Ntsc
+                                if let Some(refined) = burst_refined_linelocs(&pending_field, spec)
                                 {
-                                    if let Some(phase_sequence) = &pending_field.phase_sequence {
-                                        let burst_phase_avg = pending_field
-                                            .burst_phase_avg
-                                            .context("missing burst_phase_avg")?;
-                                        for (index, &(line_number, _, burst_phase, ..)) in
-                                            phase_sequence.iter().enumerate()
-                                        {
-                                            if index < 9 {
-                                                continue;
-                                            }
-                                            let phase_delta = (burst_phase_avg - burst_phase
-                                                + 180.0)
-                                                .rem_euclid(360.0)
-                                                - 180.0;
-                                            let line_start = refined_linelocs[line_number];
-                                            let line_end = refined_linelocs[line_number + 1];
-                                            let line_length = line_end - line_start;
-                                            let scale =
-                                                line_length / pending_field.outlinelen as f32;
-                                            let line_adjust = phase_delta / 360.0 * 4.0;
-                                            refined_linelocs[line_number] += line_adjust * scale;
-                                        }
-                                    }
+                                    refined_linelocs = refined;
                                 }
                             }
                         } else {

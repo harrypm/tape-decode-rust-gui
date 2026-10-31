@@ -23,7 +23,7 @@ mod field;
 mod sync;
 mod vits;
 
-use chroma::decode_chroma;
+use chroma::{color_framed, decode_chroma};
 use demodblock::decode_video_block;
 use dropouts::detect_dropouts_rf;
 use field::predecode_field_from_rawdecode;
@@ -184,36 +184,6 @@ fn ifft_complex_owned_f32(
 ) -> Vec<Complex32> {
     fft_in_place_f32(&mut buffer, inverse_fft, true);
     buffer
-}
-
-fn hilbert_f32(
-    input: &[f32],
-    forward_fft: &dyn Fft<f32>,
-    inverse_fft: &dyn Fft<f32>,
-) -> Vec<Complex32> {
-    let n = input.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    let mut spectrum = fft_real_f32(input, forward_fft);
-    if n.is_multiple_of(2) {
-        for sample in &mut spectrum[1..(n / 2)] {
-            *sample *= 2.0;
-        }
-        for sample in &mut spectrum[(n / 2 + 1)..] {
-            *sample = Complex32::new(0.0, 0.0);
-        }
-    } else if n > 1 {
-        for sample in &mut spectrum[1..=((n - 1) / 2)] {
-            *sample *= 2.0;
-        }
-        for sample in &mut spectrum[n.div_ceil(2)..] {
-            *sample = Complex32::new(0.0, 0.0);
-        }
-    }
-
-    ifft_complex_owned_f32(spectrum, inverse_fft)
 }
 
 fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> {
@@ -522,7 +492,41 @@ fn demod_mean(data: &[f32], start: i64, end: i64) -> f32 {
     slice.iter().sum::<f32>() / slice.len() as f32
 }
 
-type PhaseSequenceEntry = (usize, usize, f32, f32, f32, f32);
+/// Color burst of one line, demodulated against the reference subcarrier
+/// after the chroma heterodyne.
+#[derive(Clone, Copy)]
+struct BurstMeasurement {
+    /// Burst phase in degrees.
+    phase: f32,
+    /// Phase error in degrees that the line's TBC resampling introduces
+    /// between hsync and the burst.
+    phase_offset: f32,
+    magnitude: f32,
+    i: f32,
+    q: f32,
+}
+
+#[derive(Clone, Copy)]
+struct PhaseSequenceEntry {
+    line_number: usize,
+    /// Heterodyne phase row the line is upconverted with.
+    heterodyne_phase: usize,
+    burst: BurstMeasurement,
+}
+
+/// Field-wide result of locking the chroma heterodyne to the color burst.
+#[derive(Clone)]
+struct BurstLock {
+    phase_sequence: Vec<PhaseSequenceEntry>,
+    /// Color killer state, as reported in the `burstStartLine` metadata: -1
+    /// when the whole field is blanked, 0 when the whole field has color,
+    /// otherwise the line the burst switched on at.
+    burst_start_line: i64,
+    /// Field-average burst phase in degrees over all, even and odd lines.
+    phase_avg: f32,
+    even_phase_avg: f32,
+    odd_phase_avg: f32,
+}
 
 // Whether any sample in the chunk sits on the given side of the threshold,
 // as a branch-free OR-reduction the compiler vectorizes.
@@ -620,6 +624,10 @@ pub struct FieldInfoEntry {
     pub is_first_field: bool,
     pub detected_first_field: bool,
     pub is_duplicate_field: bool,
+    /// -1: color killer active for the whole field; 0: color for the whole
+    /// field; n: color from field line n on.
+    #[serde(default)]
+    pub burst_start_line: i64,
     pub sync_conf: i64,
     pub seq_no: usize,
     pub disk_loc: f32,
@@ -842,6 +850,7 @@ struct PrevFieldState {
     readloc: u64,
     field_number: i64,
     phase_adjust_median: f64,
+    burst_start_line: i64,
 }
 
 #[derive(Clone)]
@@ -894,12 +903,19 @@ struct DecodedField {
     phase_adjust_median: f64,
     valid: bool,
     sync_confidence: i64,
-    phase_sequence: Option<Vec<PhaseSequenceEntry>>,
-    burst_phase_avg: Option<f32>,
+    burst_lock: Option<BurstLock>,
     /// Cached `(median, mad)` of the field's wow-factor distribution. These
     /// depend only on the line-location spline, so they are identical for every
     /// channel; `downscale_raw_vec` fills this on the first call and reuses it.
     wow_analysis: Option<(f64, f64)>,
+}
+
+impl DecodedField {
+    fn burst_start_line(&self) -> i64 {
+        self.burst_lock
+            .as_ref()
+            .map_or(0, |lock| lock.burst_start_line)
+    }
 }
 
 struct DecodeFieldResult {
@@ -910,11 +926,19 @@ struct DecodeFieldResult {
 pub struct WriteableField {
     pub info: FieldInfoEntry,
     picture: Arc<WriteablePicture>,
-    /// The signal-derived field phase ID, or `None` when the phase ID in `info`
-    /// was instead derived from the running sequence number. Multithreaded
-    /// stitching needs this to recompute `info.field_phase_id` against a global
-    /// sequence number; it is not serialized and does not affect serial output.
-    pub field_phase_id_raw: Option<i64>,
+    /// The signal-derived field phase ID, or `None` when `info.field_phase_id`
+    /// follows the field's position in the output instead (see
+    /// [`Self::set_sequence_position`]).
+    field_phase_id_raw: Option<i64>,
+    /// The decoder's count of consecutive valid fields up to this one, which
+    /// keys the NTSC color-frame sequence.
+    pub field_number: i64,
+    /// Set when this field restarted that count (its predecessor was invalid).
+    pub field_number_reset: bool,
+    /// Set when the chroma was phase-compensated onto the NTSC color-frame
+    /// sequence: the phase ID then follows `field_number`, and the second
+    /// color frame is written with the chroma inverted.
+    pub color_framed: bool,
 }
 
 struct WriteablePicture {
@@ -922,17 +946,58 @@ struct WriteablePicture {
     chroma: Option<Vec<u16>>,
 }
 
+/// Whether a field falls in the second half of the NTSC four-field color
+/// sequence, counting consecutive valid fields.
+fn ntsc_second_color_frame(field_number: i64) -> bool {
+    (field_number / 2) % 2 == 1
+}
+
+/// fieldPhaseID of a field without a signal-derived one: color-framed NTSC
+/// chroma follows the field count, anything else the output sequence number.
+fn sequence_field_phase_id(
+    first_field: bool,
+    color_framed: bool,
+    seq_no: usize,
+    field_number: i64,
+) -> i64 {
+    if color_framed {
+        field_phase_id(first_field, !ntsc_second_color_frame(field_number))
+    } else {
+        field_phase_id(first_field, (seq_no / 2).is_multiple_of(2))
+    }
+}
+
 impl WriteableField {
     fn new(
         info: FieldInfoEntry,
         luma: LumaOutput,
         chroma: Option<Vec<u16>>,
-        field_phase_id_raw: Option<i64>,
+        field: &DecodedField,
+        color_framed: bool,
     ) -> Self {
         Self {
             info,
             picture: Arc::new(WriteablePicture { luma, chroma }),
-            field_phase_id_raw,
+            field_phase_id_raw: field.field_phase_id,
+            field_number: field.field_number,
+            field_number_reset: field.prevfield.is_none(),
+            color_framed,
+        }
+    }
+
+    /// Renumber the field for its position in the output and re-derive the
+    /// metadata that follows from it. Multithreaded stitching uses this to map
+    /// a worker's local numbering onto the global sequence.
+    pub fn set_sequence_position(&mut self, seq_no: usize, field_number: i64) {
+        self.info.seq_no = seq_no;
+        self.field_number = field_number;
+        if self.field_phase_id_raw.is_none() {
+            self.info.field_phase_id = sequence_field_phase_id(
+                self.info.detected_first_field,
+                self.color_framed,
+                seq_no,
+                field_number,
+            );
         }
     }
 
@@ -941,9 +1006,23 @@ impl WriteableField {
         &self.picture.luma
     }
 
+    /// The chroma as decoded: color-framed fields carry the first color
+    /// frame's phase regardless of `field_number`.
     #[inline]
     pub fn chroma(&self) -> Option<&[u16]> {
         self.picture.chroma.as_deref()
+    }
+
+    /// The chroma as it is to be written: inverted on the second color frame.
+    pub fn chroma_output(&self) -> Option<std::borrow::Cow<'_, [u16]>> {
+        let chroma = self.chroma()?;
+        Some(
+            if self.color_framed && ntsc_second_color_frame(self.field_number) {
+                chroma.iter().copied().map(chroma::invert).collect()
+            } else {
+                std::borrow::Cow::Borrowed(chroma)
+            },
+        )
     }
 }
 
@@ -1295,6 +1374,7 @@ impl Decoder {
                         readloc: field_obj.readloc,
                         field_number: field_obj.field_number,
                         phase_adjust_median: field_obj.phase_adjust_median,
+                        burst_start_line: field_obj.burst_start_line(),
                     });
                 let pending_frac = self.fdoffset_frac + decoded_offset.unwrap_or(0.0);
                 let scheduled_readloc_value = (self.fdoffset as i64 - BLOCKCUT as i64
@@ -1424,7 +1504,6 @@ impl Decoder {
                         picture_chroma =
                             decode_chroma(&mut field_obj, &self.spec, &mut self.chroma_afc_state)?;
 
-                        field_obj.prevfield = None;
                         field_done = true;
                     }
                     field = Some(field_obj);
@@ -1457,9 +1536,14 @@ impl Decoder {
                 let disk_loc = roundfloat(field_obj.readloc as f64 / bytes_per_field as f64, 1);
                 let file_loc = field_obj.readloc;
 
-                // Field phase ID.
+                let color_framed = color_framed(&self.spec, &field_obj);
                 let field_phase_id = field_obj.field_phase_id.unwrap_or_else(|| {
-                    field_phase_id(is_first_field, (seq_no / 2).is_multiple_of(2))
+                    sequence_field_phase_id(
+                        is_first_field,
+                        color_framed,
+                        seq_no,
+                        field_obj.field_number,
+                    )
                 });
                 let mut write_field = true;
 
@@ -1553,6 +1637,7 @@ impl Decoder {
                     is_first_field,
                     detected_first_field,
                     is_duplicate_field,
+                    burst_start_line: field_obj.burst_start_line(),
                     sync_conf,
                     seq_no,
                     disk_loc: disk_loc as f32,
@@ -1573,7 +1658,8 @@ impl Decoder {
                             .take()
                             .context("valid field missing luma picture")?,
                         picture_chroma.take(),
-                        field_obj.field_phase_id,
+                        &field_obj,
+                        color_framed,
                     );
                     self.lastvalidfield[idx] = Some(dataset.clone());
                     if is_duplicate_field {

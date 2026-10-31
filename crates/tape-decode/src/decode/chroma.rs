@@ -1,19 +1,24 @@
 use super::*;
 
-fn adjust_phase(
-    input_data: &[Complex32],
-    output_data: &mut [f32],
-    input_phase: f32,
-    target_phase: f32,
-) {
-    assert_eq!(input_data.len(), output_data.len());
+const SIGNED_SAMPLE_MAX: f32 = 32767.0;
+/// Output value of zero chroma.
+const ZERO_LEVEL: u16 = SIGNED_SAMPLE_MAX as u16;
+/// Burst phase in degrees the NTSC chroma is compensated to.
+const NTSC_TARGET_BURST_PHASE: f32 = -33.0;
 
-    let phase_adjustment = (target_phase - input_phase).to_radians();
-    let (rotation_im, rotation_re) = phase_adjustment.sin_cos();
+/// Mirror an output sample around the zero level.
+pub(super) fn invert(sample: u16) -> u16 {
+    (2 * ZERO_LEVEL).wrapping_sub(sample)
+}
 
-    for (input, output) in input_data.iter().zip(output_data.iter_mut()) {
-        *output = input.re.mul_add(rotation_re, -(input.im * rotation_im));
-    }
+/// Whether the field's chroma follows the NTSC color-frame sequence: every
+/// line is phase-compensated to a fixed burst phase, which the second color
+/// frame carries inverted.
+pub(super) fn color_framed(spec: &DecoderSpec, field: &DecodedField) -> bool {
+    spec.rf_write_chroma
+        && spec.color_system == ColorSystem::Ntsc
+        && !spec.rf_disable_phase_correction
+        && field.burst_start_line() != -1
 }
 
 fn acc(
@@ -23,21 +28,20 @@ fn acc(
     burstend: usize,
     linelength: usize,
     lines: usize,
+    burst_start_line: i64,
 ) -> Vec<u16> {
     const STARTING_LINE: usize = 16;
-    const SIGNED_SAMPLE_MAX: f32 = 32767.0;
     assert!(lines > STARTING_LINE);
 
-    // Burst-normalize each line and encode it straight to the u16 output in one
-    // pass. The lead-in lines below STARTING_LINE (and any samples past `lines`)
-    // carry no normalization: the old two-step path left them 0.0f32 and then
-    // encoded that to the 32767 zero level, so initialize them to that level and
-    // overwrite the normalized region in place. This drops the intermediate
-    // field-sized f32 buffer and the separate encode pass that re-read it.
-    let zero_level = SIGNED_SAMPLE_MAX as u16;
-    let mut output = vec![zero_level; chroma.len()];
+    // Burst-normalize each line and encode it straight to the u16 output.
+    // Lines without chroma (the lead-in below STARTING_LINE, lines the color
+    // killer blanks, any tail past `lines`) stay at the zero level.
+    let mut output = vec![ZERO_LEVEL; chroma.len()];
 
     for linenumber in STARTING_LINE..lines {
+        if (linenumber as i64) < burst_start_line {
+            continue;
+        }
         let linestart = linelength * linenumber;
         let lineend = linestart + linelength;
         let line = &chroma[linestart..lineend];
@@ -55,30 +59,34 @@ fn acc(
     output
 }
 
+/// Output sample range of a field line, clamped to the buffer.
+fn line_bounds(field: &DecodedField, len: usize, line_number: usize) -> (usize, usize) {
+    let lineoffset = field.lineoffset + 1;
+    let linestart = (line_number as isize - lineoffset as isize) * field.outlinelen as isize;
+    let lineend = linestart + field.outlinelen as isize;
+    (
+        resolve_slice_bound(len, linestart),
+        resolve_slice_bound(len, lineend),
+    )
+}
+
 fn upconvert_chroma(
     chroma: &[f32],
     field: &DecodedField,
+    phase_sequence: &[PhaseSequenceEntry],
     chroma_heterodyne: &[Vec<f32>],
-) -> Result<Vec<f32>> {
-    let lineoffset = field.lineoffset + 1;
-    let phase_rotation_sequence = field
-        .phase_sequence
-        .as_ref()
-        .context("missing phase sequence")?;
+) -> Vec<f32> {
     let mut uphet = vec![0.0f32; chroma.len()];
 
-    for &(linenumber, current_phase, ..) in phase_rotation_sequence {
-        let linestart = (linenumber as isize - lineoffset as isize) * field.outlinelen as isize;
-        let lineend = linestart + field.outlinelen as isize;
-        let start = resolve_slice_bound(chroma.len(), linestart);
-        let end = resolve_slice_bound(chroma.len(), lineend);
+    for entry in phase_sequence {
+        let (start, end) = line_bounds(field, chroma.len(), entry.line_number);
         if start >= end {
             continue;
         }
 
         // Pair the line as slices so the loop carries no per-sample bounds
         // checks and vectorizes.
-        let heterodyne_row = &chroma_heterodyne[current_phase][start..end];
+        let heterodyne_row = &chroma_heterodyne[entry.heterodyne_phase][start..end];
         for ((out, &sample), &het) in uphet[start..end]
             .iter_mut()
             .zip(&chroma[start..end])
@@ -88,7 +96,44 @@ fn upconvert_chroma(
         }
     }
 
-    Ok(uphet)
+    uphet
+}
+
+/// Upconvert each line with its heterodyne rotated so that the line's burst
+/// lands on `target_phase` (degrees), instead of one rotation for the field.
+fn upconvert_chroma_phase_comp(
+    chroma: &[f32],
+    field: &DecodedField,
+    phase_sequence: &[PhaseSequenceEntry],
+    chroma_heterodyne: &[Vec<f32>],
+    target_phase: f32,
+) -> Vec<f32> {
+    let mut uphet = vec![0.0f32; chroma.len()];
+    // The heterodyne rows are -cos(a) and sin(a) of the carrier phase, and
+    // -cos(a + b) = -cos(a) cos(b) + sin(a) sin(b), so rotating a line by b is
+    // a fixed mix of the two rows with no per-sample trigonometry.
+    let (neg_cos_row, sin_row) = (&chroma_heterodyne[0], &chroma_heterodyne[1]);
+
+    for entry in phase_sequence {
+        let (start, end) = line_bounds(field, chroma.len(), entry.line_number);
+        if start >= end {
+            continue;
+        }
+
+        let rotation = entry.heterodyne_phase as f32 * std::f32::consts::FRAC_PI_2
+            + (target_phase + entry.burst.phase).to_radians();
+        let (sin_b, cos_b) = rotation.sin_cos();
+        for (((out, &sample), &neg_cos), &sin) in uphet[start..end]
+            .iter_mut()
+            .zip(&chroma[start..end])
+            .zip(&neg_cos_row[start..end])
+            .zip(&sin_row[start..end])
+        {
+            *out = sample * neg_cos.mul_add(cos_b, sin * sin_b);
+        }
+    }
+
+    uphet
 }
 
 fn burst_deemphasis(chroma: &mut [f32], field: &DecodedField, burstarea_end: usize) {
@@ -146,6 +191,11 @@ fn process_chroma_internal(
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
 ) -> Result<Vec<u16>> {
+    let burst_start_line = field.burst_start_line();
+    if burst_start_line == -1 {
+        return Ok(vec![ZERO_LEVEL; field.outlinecount * field.outlinelen]);
+    }
+
     let chroma_downscaled = downscale_raw_vec(field, None, None, None, true)?;
     let mut chroma: Vec<f32> = if spec.chroma_afc_enabled() {
         let bandpass = chroma_afc_state.get_chroma_bandpass(spec)?;
@@ -169,20 +219,30 @@ fn process_chroma_internal(
         burst_deemphasis(&mut chroma, field, burstarea.1 as usize)
     }
 
-    let chroma_heterodyne = active_chroma_heterodyne(spec, chroma_afc_state);
-
-    let mut uphet = upconvert_chroma(&chroma, field, chroma_heterodyne)?;
-
-    if is_ntsc && !spec.rf_disable_phase_correction {
-        // Rotate the chroma so the measured burst phase lines up with 0 degrees.
-        let burst_phase_avg = field.burst_phase_avg.context("missing burst phase avg")?;
-        let hilbert = hilbert_f32(
-            &uphet,
-            spec.fft_field_forward_f32.as_ref(),
-            spec.fft_field_inverse_f32.as_ref(),
-        );
-        adjust_phase(&hilbert, &mut uphet, burst_phase_avg, 0.0);
-    }
+    let phase_sequence = &field
+        .burst_lock
+        .as_ref()
+        .context("missing burst lock")?
+        .phase_sequence;
+    let mut uphet = if color_framed(spec, field) {
+        // Heterodynes with the nominal carrier even under chroma AFC, which
+        // measured the burst phases against the tracked carrier; the
+        // compensation is then off by the two carriers' phase difference.
+        upconvert_chroma_phase_comp(
+            &chroma,
+            field,
+            phase_sequence,
+            &spec.rf_chroma_heterodyne,
+            NTSC_TARGET_BURST_PHASE,
+        )
+    } else {
+        upconvert_chroma(
+            &chroma,
+            field,
+            phase_sequence,
+            active_chroma_heterodyne(spec, chroma_afc_state),
+        )
+    };
 
     uphet = sosfiltfilt_f32(&spec.chroma_filter_final, &uphet);
 
@@ -203,6 +263,7 @@ fn process_chroma_internal(
         burstarea.1 as usize,
         field.outlinelen,
         field.outlinecount,
+        burst_start_line,
     ))
 }
 
