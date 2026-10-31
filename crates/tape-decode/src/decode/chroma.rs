@@ -24,21 +24,35 @@ pub(super) fn color_framed(spec: &DecoderSpec, field: &DecodedField) -> bool {
         && field.burst_start_line() != -1
 }
 
-/// Burst-normalizes the chroma and encodes it straight to the u16 output.
+/// Signed chroma to the unsigned 16-bit output.
+fn encode_chroma(chroma: &[f32]) -> Vec<u16> {
+    chroma
+        .iter()
+        .map(|&sample| (sample + SIGNED_SAMPLE_MAX) as i64 as u16)
+        .collect()
+}
+
+/// Burst-normalizes the chroma in place and measures its noise floor.
 /// Each line's gain is `burst_abs_ref` over its fitted burst amplitude,
 /// capped at the field's median plus two MADs (so a line that lost its burst
 /// to a dropout is not blown up), smoothed over the neighbouring lines and
 /// ramped linearly across the line into the next line's gain. Lines the
-/// color killer blanks stay at the zero level.
+/// color killer blanks are zeroed. The noise floor is the MAD-estimated
+/// standard deviation of the `sync_tip_len` samples before each gained
+/// line's successor, less four at either end, averaged over the field.
 fn chroma_automatic_gain(
-    chroma: &[f32],
+    chroma: &mut [f32],
     burst_abs_ref: f32,
     field: &DecodedField,
     phase_sequence: &[PhaseSequenceEntry],
     burst_start_line: i64,
-) -> Vec<u16> {
+    sync_tip_len: usize,
+) -> f32 {
     const SMOOTHING_HALF_WINDOW: usize = 4;
     const CAP_MADS: f64 = 2.0;
+    // Standard deviation of a normal distribution per MAD.
+    const MAD_TO_SIGMA: f64 = 1.4826;
+    const EDGE: usize = 4;
 
     let burst_abs_ref = f64::from(burst_abs_ref);
     let has_color = |entry: &PhaseSequenceEntry| entry.line_number as i64 >= burst_start_line;
@@ -75,33 +89,101 @@ fn chroma_automatic_gain(
         })
         .collect();
 
-    let mut output = vec![ZERO_LEVEL; chroma.len()];
-    let line_start = |entry: &PhaseSequenceEntry| line_bounds(field, chroma.len(), entry.line_number).0;
+    let len = chroma.len();
+    let line_start = |entry: &PhaseSequenceEntry| line_bounds(field, len, entry.line_number).0;
+    let mut noise_sum = 0.0f64;
+    let mut noise_lines = 0usize;
     for (i, entry) in phase_sequence.iter().enumerate() {
-        if !has_color(entry) {
-            continue;
-        }
         let start = line_start(entry);
         let (end, gain_end) = match phase_sequence.get(i + 1) {
             Some(next) => (line_start(next), smoothed_gains[i + 1]),
-            None => (chroma.len(), smoothed_gains[i]),
+            None => (len, smoothed_gains[i]),
         };
         if start >= end {
             continue;
         }
+        if !has_color(entry) {
+            chroma[start..end].fill(0.0);
+            continue;
+        }
         let gain_start = smoothed_gains[i];
         let gain_step = (gain_end - gain_start) / (end - start) as f64;
-        for (j, (out, &sample)) in output[start..end]
-            .iter_mut()
-            .zip(&chroma[start..end])
-            .enumerate()
-        {
-            let gain = (gain_start + j as f64 * gain_step) as f32;
-            *out = (sample.mul_add(gain, SIGNED_SAMPLE_MAX) as i64) as u16;
+        for (j, sample) in chroma[start..end].iter_mut().enumerate() {
+            *sample *= (gain_start + j as f64 * gain_step) as f32;
         }
+
+        let window_end = end.saturating_sub(EDGE);
+        let window_start = (end + EDGE).saturating_sub(sync_tip_len).min(window_end);
+        let window = &chroma[window_start..window_end];
+        if window.is_empty() {
+            continue;
+        }
+        let median = median_from_values(&mut window.to_vec());
+        let mut deviations: Vec<f32> = window.iter().map(|&v| (v - median).abs()).collect();
+        noise_sum += f64::from(median_from_values(&mut deviations)) * MAD_TO_SIGMA;
+        noise_lines += 1;
     }
 
-    output
+    if noise_lines == 0 {
+        0.0
+    } else {
+        (noise_sum / noise_lines as f64) as f32
+    }
+}
+
+/// Chroma transient improvement: steepens the color transitions the
+/// color-under band limit smeared, without disturbing the hue. Each sample
+/// forms an (I, Q) pair with its predecessor, compared with the pairs
+/// `radius` samples back and ahead; where the vector distance swept across
+/// them clears the noise gate, the sample is pulled towards the nearer end
+/// of the sweep by a sigmoid of its progress along it, so the transition
+/// sharpens around its midpoint. Four passes, each reading the previous
+/// one's result with a quarter of its mix. `width` sets the radius in
+/// subcarrier cycles (at least one) and scales the gate, which starts from
+/// the chroma noise standard deviation `noise_floor`.
+fn chroma_transient_improvement(
+    chroma: &mut [f32],
+    line_len: usize,
+    noise_floor: f32,
+    width: u32,
+    mix: f32,
+) {
+    const PASSES: usize = 4;
+    const DECAY: f32 = 0.25;
+
+    if line_len == 0 {
+        return;
+    }
+    let radius = (width as usize * 4).max(4);
+    let gate = noise_floor * (width as f32).sqrt();
+    let end = line_len.saturating_sub(radius + 1);
+    let mut source = vec![0.0f32; line_len];
+    for line in chroma.chunks_exact_mut(line_len) {
+        for pass in 0..PASSES {
+            let mix = mix * DECAY.powi(pass as i32);
+            source.copy_from_slice(line);
+            for s in radius + 1..end {
+                let (i_now, q_now) = (source[s], source[s - 1]);
+                let (i_past, q_past) = (source[s - radius], source[s - radius - 1]);
+                let (i_next, q_next) = (source[s + radius], source[s + radius - 1]);
+                let dist_back = ((i_now - i_past).powi(2) + (q_now - q_past).powi(2)).sqrt();
+                let dist_forward = ((i_next - i_now).powi(2) + (q_next - q_now).powi(2)).sqrt();
+                let total = dist_back + dist_forward;
+                if total <= gate {
+                    continue;
+                }
+                let progress = dist_back / total;
+                let (weight, from, to) = if progress < 0.5 {
+                    (4.0 * progress * progress, i_past, i_now)
+                } else {
+                    let remaining = 1.0 - progress;
+                    (1.0 - 4.0 * remaining * remaining, i_now, i_next)
+                };
+                let target = from + weight * (to - from);
+                line[s] = i_now + mix * (target - i_now);
+            }
+        }
+    }
 }
 
 /// Output sample range of a field line, clamped to the buffer.
@@ -150,15 +232,14 @@ fn upconvert_chroma(
 /// towards the next line's, so a slowly drifting carrier is tracked without
 /// phase steps at the line boundaries.
 fn upconvert_chroma_phase_comp(
-    chroma: &[f32],
+    chroma: &mut [f32],
     field: &DecodedField,
     spec: &DecoderSpec,
     phase_sequence: &[PhaseSequenceEntry],
     target_phase: f32,
-) -> Vec<f32> {
+) {
     use std::f64::consts::FRAC_PI_2;
 
-    let mut uphet = vec![0.0f32; chroma.len()];
     let fsc_hz = spec.sys_fsc_mhz * 1e6;
     let color_under = spec.decoder_color_under_carrier;
     // Phase advance per output sample of the nominal heterodyne (the sum of
@@ -190,14 +271,12 @@ fn upconvert_chroma_phase_comp(
         let mut phasor = Complex64::from_polar(1.0, theta_0);
         let mut phasor_step = Complex64::from_polar(1.0, step + chirp);
         let phasor_step_step = Complex64::from_polar(1.0, 2.0 * chirp);
-        for (out, &sample) in uphet[start..end].iter_mut().zip(&chroma[start..end]) {
-            *out = (f64::from(sample) * -phasor.re - dc) as f32;
+        for sample in &mut chroma[start..end] {
+            *sample = (f64::from(*sample) * -phasor.re - dc) as f32;
             phasor *= phasor_step;
             phasor_step *= phasor_step_step;
         }
     }
-
-    uphet
 }
 
 fn burst_deemphasis(chroma: &mut [f32], field: &DecodedField, burstarea_end: usize) {
@@ -365,10 +444,7 @@ fn process_chroma_internal(
     }
     if let Some(mult) = spec.decoder_chroma_carrier_mult {
         let restored = secam::process_chroma(field, spec, &chroma, mult)?;
-        return Ok(restored
-            .iter()
-            .map(|&sample| (sample + SIGNED_SAMPLE_MAX) as i64 as u16)
-            .collect());
+        return Ok(encode_chroma(&restored));
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
@@ -385,12 +461,13 @@ fn process_chroma_internal(
         // measured the burst phases against the tracked carrier; the
         // compensation is then off by the two carriers' phase difference.
         upconvert_chroma_phase_comp(
-            &chroma,
+            &mut chroma,
             field,
             spec,
             phase_sequence,
             NTSC_TARGET_BURST_PHASE,
-        )
+        );
+        chroma
     } else {
         let chroma_heterodyne = match conversion_lo {
             Some(lo) => lo.heterodyne(
@@ -420,13 +497,30 @@ fn process_chroma_internal(
     }
 
     let burst_abs_ref = spec.sys_burst_abs_ref.context("missing burst_abs_ref")?;
-    Ok(chroma_automatic_gain(
-        &uphet,
+    let sync_tip_len = (spec.sys_hsync_pulse_us * spec.sys_outfreq).floor() as usize;
+    let noise_floor = chroma_automatic_gain(
+        &mut uphet,
         burst_abs_ref,
         field,
         phase_sequence,
         burst_start_line,
-    ))
+        sync_tip_len,
+    );
+
+    tracing::debug!(noise_floor, "chroma noise floor");
+
+    if spec.cti_mix != 0.0 {
+        let first_line = ((field.lineoffset + 1) * field.outlinelen).min(uphet.len());
+        chroma_transient_improvement(
+            &mut uphet[first_line..],
+            field.outlinelen,
+            noise_floor,
+            spec.cti_width,
+            spec.cti_mix,
+        );
+    }
+
+    Ok(encode_chroma(&uphet))
 }
 
 // The TBC'd chroma, with the carrier re-measured from it under chroma AFC.

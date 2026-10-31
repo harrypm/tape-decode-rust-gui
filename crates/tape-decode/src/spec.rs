@@ -117,6 +117,8 @@ pub struct DecoderSpec {
     pub(crate) rf_disable_phase_correction: bool,
     pub(crate) rf_secam_carrier_servo: bool,
     pub(crate) secam_lo_trim: Option<f64>,
+    pub(crate) cti_mix: f32,
+    pub(crate) cti_width: u32,
 
     pub(crate) chroma_burst_block_fft_gain: Vec<f32>,
     pub(crate) chroma_filter_video_notch: Option<Vec<Sos<f32>>>,
@@ -712,6 +714,8 @@ impl DecoderSpec {
             rf_disable_phase_correction: request.rf_disable_phase_correction,
             rf_secam_carrier_servo,
             secam_lo_trim: request.secam_lo_trim,
+            cti_mix: request.cti_mix,
+            cti_width: request.cti_width,
 
             chroma_burst_block_fft_gain,
             chroma_filter_video_notch: chroma_filter_video_notch.map(store_sos_filter),

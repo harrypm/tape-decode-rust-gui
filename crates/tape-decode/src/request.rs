@@ -323,6 +323,10 @@ pub struct DecodeRequest {
     pub rf_secam_carrier_servo: bool,
     /// Conversion LO trim in Hz the ME-SECAM servo average starts from.
     pub secam_lo_trim: Option<f64>,
+    /// Chroma transient improvement mix; 0 disables it.
+    pub cti_mix: f32,
+    /// Chroma transient improvement width in subcarrier cycles.
+    pub cti_width: u32,
 
     // Extra options.
     pub wow_level_adjust_smoothing: Option<f32>,

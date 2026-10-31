@@ -232,6 +232,12 @@ struct DecodeArgs {
     /// Seed the SECAM chroma conversion LO trim in Hz (e.g. a converged servo value from a previous run) so it applies from the first field; with --secam-servo-passes 0 it is a fixed trim (ME-SECAM only).
     #[arg(long, value_name = "HZ")]
     secam_lo_trim: Option<f64>,
+    /// Chroma transient improvement mix (color-under only); 0 disables it.
+    #[arg(long, default_value_t = 1.0)]
+    cti_mix: f32,
+    /// Chroma transient improvement width in subcarrier cycles (color-under only): wider sharpens color edges more at the cost of hue detail.
+    #[arg(long, default_value_t = 2)]
+    cti_width: u32,
     /// Disable chroma comb filtering.
     #[arg(long)]
     no_comb: bool,
@@ -428,6 +434,8 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_disable_phase_correction: cli.disable_phase_correction,
         rf_secam_carrier_servo: cli.secam_servo_passes >= 1,
         secam_lo_trim: cli.secam_lo_trim,
+        cti_mix: cli.cti_mix,
+        cti_width: cli.cti_width,
 
         wow_level_adjust_smoothing: cli.wow_level_adjust_smoothing,
         wow_interpolation_method: cli.wow_interpolation_method.into(),
