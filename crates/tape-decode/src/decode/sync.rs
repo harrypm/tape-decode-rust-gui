@@ -797,10 +797,11 @@ fn get_line0_fallback(
     relaxed: bool,
     expected_line0: Option<f64>,
     expected_first_field: Option<i64>,
-) -> Result<Option<Line0FallbackResult>> {
-    if raw_pulses.is_empty() {
-        bail!("get_line0_fallback expects at least one raw pulse");
-    }
+) -> Option<Line0FallbackResult> {
+    assert!(
+        !raw_pulses.is_empty(),
+        "line 0 fallback on a field without pulses"
+    );
 
     // Try a more primitive way of locating line 0 if the normal approach fails.
     // This doesn't actually fine line 0, rather it locates the approx position of the last vsync before vertical blanking
@@ -1317,11 +1318,11 @@ fn get_line0_fallback(
     }
 
     if let Some(line0) = line_0 {
-        return Ok(Some(Line0FallbackResult {
+        return Some(Line0FallbackResult {
             line0: line0 as f32,
             first_field,
             first_field_confidence,
-        }));
+        });
     }
 
     // Fifth fallback: find the last hsync in front of a long block.
@@ -1332,7 +1333,7 @@ fn get_line0_fallback(
         .collect::<Vec<_>>();
 
     if long_pulses.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     // Offset from the first vsync to the location expected by line-zero recovery.
@@ -1354,11 +1355,11 @@ fn get_line0_fallback(
         line_0 = Some(first_long_pulse_pos as f64 - (3.0 * linelen));
     }
 
-    Ok(Some(Line0FallbackResult {
+    Some(Line0FallbackResult {
         line0: line_0.unwrap() as f32,
         first_field: -1,
         first_field_confidence: -1,
-    }))
+    })
 }
 
 fn median_sample_count(values: &mut [i64]) -> f64 {
@@ -1380,7 +1381,7 @@ fn try_get_pulses_core(
     raw_pulses: &[PulseSample],
     field: &DecodedField,
     inter_field_state: &InterFieldState,
-) -> Result<PulseClassificationResult> {
+) -> PulseClassificationResult {
     let linelen = spec.linelen() as f64;
     let num_pulses = spec.sys_num_pulses as f64;
     let frame_lines = spec.sys_frame_lines.line_count() as i64;
@@ -1579,7 +1580,7 @@ fn try_get_pulses_core(
             spec.rf_relaxed_line0,
             expected_line0,
             expected_first_field,
-        )?;
+        );
     }
 
     // Find the location of the first hsync pulse (first line of video after the vsync pulses).
@@ -1601,7 +1602,7 @@ fn try_get_pulses_core(
         fallback,
     );
 
-    Ok(PulseClassificationResult {
+    PulseClassificationResult {
         valid_starts,
         lt_vsync,
         meanlinelen,
@@ -1612,7 +1613,7 @@ fn try_get_pulses_core(
         is_first_field: first_hsync.first_field,
         is_progressive_field: first_hsync.progressive_field,
         prev_hsync_diff: first_hsync.prev_hsync_diff,
-    })
+    }
 }
 
 pub(crate) struct PulseResult {
@@ -1851,7 +1852,7 @@ pub(crate) fn try_get_pulses(
     spec: &DecoderSpec,
     inter_field_state: &mut InterFieldState,
     do_level_detect: bool,
-) -> Result<Option<PulseResult>> {
+) -> Option<PulseResult> {
     // Without level detection the field is sliced between the working levels.
     let estimates = (!do_level_detect).then(|| {
         let levels = inter_field_state.levels;
@@ -1872,10 +1873,10 @@ pub(crate) fn try_get_pulses(
         && (inter_field_state.prev_first_hsync_loc == -1.0 || spec.rf_fallback_vsync)
     {
         field.lt_vsync = None;
-        return Ok(None);
+        return None;
     }
 
-    let result = try_get_pulses_core(spec, &found.pulses, field, inter_field_state)?;
+    let result = try_get_pulses_core(spec, &found.pulses, field, inter_field_state);
 
     field.validpulses = result.valid_starts;
     field.vblank_next = result.vblank_next.map(f64::from);
@@ -1888,14 +1889,14 @@ pub(crate) fn try_get_pulses(
         inter_field_state.prev_first_hsync_diff = result.prev_hsync_diff;
     }
     inter_field_state.prev_first_field = if result.is_first_field { 1 } else { 0 };
-    Ok(Some(PulseResult {
+    Some(PulseResult {
         line0loc: result.line0loc,
         first_hsync_loc: result.first_hsync_loc,
         first_hsync_loc_line: Some(result.first_hsync_loc_line),
         meanlinelen: result.meanlinelen,
         sync_level: found.sync_level,
         blank_level: found.blank_level,
-    }))
+    })
 }
 
 /// Refines the sync tip and blanking levels measured on the hsync pulses

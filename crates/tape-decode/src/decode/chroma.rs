@@ -339,14 +339,15 @@ impl ChromaFftFilter {
         }
     }
 
-    fn apply(&self, chroma: &[f32]) -> Result<Vec<f32>> {
+    fn apply(&self, chroma: &[f32]) -> Vec<f32> {
         let n = self.r2c.len();
         let len = chroma.len();
         let pad_left = n.saturating_sub(len) / 2;
         let pad_right = n.saturating_sub(len) - pad_left;
-        if len + 2 * Self::PAD > n || pad_right >= len {
-            bail!("chroma of {len} samples does not fit the {n}-sample filter");
-        }
+        assert!(
+            len + 2 * Self::PAD <= n && pad_right < len,
+            "chroma of {len} samples does not fit the {n}-sample filter sized for the field"
+        );
         let mut padded = Vec::with_capacity(n);
         padded.extend((1..=pad_left).rev().map(|i| chroma[i]));
         padded.extend_from_slice(chroma);
@@ -369,10 +370,10 @@ impl ChromaFftFilter {
             .process(&mut spectrum, &mut padded)
             .expect("c2r inverse FFT failed");
         let scale = 1.0 / n as f32;
-        Ok(padded[pad_left..pad_left + len]
+        padded[pad_left..pad_left + len]
             .iter()
             .map(|&sample| sample * scale)
-            .collect())
+            .collect()
     }
 }
 
@@ -443,7 +444,7 @@ fn process_chroma_internal(
         }
     }
     if let Some(mult) = spec.decoder_chroma_carrier_mult {
-        let restored = secam::process_chroma(field, spec, &chroma, mult)?;
+        let restored = secam::process_chroma(field, spec, &chroma, mult);
         return Ok(encode_chroma(&restored));
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
@@ -454,7 +455,7 @@ fn process_chroma_internal(
     let phase_sequence = &field
         .burst_lock
         .as_ref()
-        .context("missing burst lock")?
+        .expect("valid field without a burst lock")
         .phase_sequence;
     let mut uphet = if color_framed(spec, field) {
         // Heterodynes with the nominal carrier even under chroma AFC, which
@@ -486,7 +487,7 @@ fn process_chroma_internal(
     // lose the tight top edge that suppresses high-side FM splatter from
     // saturated transitions.
     uphet = match &spec.chroma_fft_filter {
-        Some(filter) => filter.apply(&uphet)?,
+        Some(filter) => filter.apply(&uphet),
         None => sosfiltfilt_f32(&spec.chroma_filter_final, &uphet),
     };
 
@@ -499,7 +500,9 @@ fn process_chroma_internal(
         comb_c(&mut uphet, field.outlinelen, line_distance);
     }
 
-    let burst_abs_ref = spec.sys_burst_abs_ref.context("missing burst_abs_ref")?;
+    let burst_abs_ref = spec
+        .sys_burst_abs_ref
+        .expect("chroma output without burst_abs_ref");
     let sync_tip_len = (spec.sys_hsync_pulse_us * spec.sys_outfreq).floor() as usize;
     let noise_floor = chroma_automatic_gain(
         &mut uphet,

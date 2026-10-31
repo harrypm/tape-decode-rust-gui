@@ -11,16 +11,15 @@ fn demod_burst(
     line_start: usize,
     burst_wave: &[(f32, f32)],
     fsc_hz: f64,
-) -> Result<BurstMeasurement> {
-    let burst_end = burst_start.saturating_add(burst.len());
-    if burst_end > burst_wave.len() {
-        bail!("burst window exceeds reference waveform length");
-    }
+) -> BurstMeasurement {
+    let reference = burst_wave
+        .get(burst_start..burst_start + burst.len())
+        .expect("the reference subcarrier table spans the field");
 
     let mut i = 0.0f32;
     let mut q = 0.0f32;
     let mut sum = 0.0f32;
-    for (&sample, &(sin, cos)) in burst.iter().zip(&burst_wave[burst_start..burst_end]) {
+    for (&sample, &(sin, cos)) in burst.iter().zip(reference) {
         sum += sample;
         i += sample * cos;
         q += sample * sin;
@@ -36,7 +35,7 @@ fn demod_burst(
     let fit = fit_burst(burst, burst_start, fsc_hz, seed);
     // The phase as a sample offset, four samples per cycle.
     let phase_samples = fit.phase.rem_euclid(TAU) * (2.0 / PI);
-    Ok(BurstMeasurement {
+    BurstMeasurement {
         phase: (fit.phase.to_degrees().rem_euclid(360.0)) as f32,
         amplitude: fit.amplitude as f32,
         magnitude: (fit.amplitude * len / 2.0) as f32,
@@ -45,7 +44,7 @@ fn demod_burst(
         center: (burst_start - line_start) as f64 + (len - 1.0) / 2.0 + phase_samples,
         i,
         q,
-    })
+    }
 }
 
 /// Parameters of the burst model `amplitude * cos(2 pi frequency t - phase) + dc`.
@@ -458,38 +457,23 @@ fn get_upconverted_burst(
     line_number: usize,
     lineoffset: usize,
     outwidth: usize,
-) -> Result<BurstMeasurement> {
+) -> BurstMeasurement {
     // Upconvert and filter from the line start to as far past the burst as
     // the burst sits from the line start, so the filter transients fall
     // outside the kept window.
-    let padding = burst_area.0;
+    let (burst_start, burst_end) = burst_area;
     let line_start = (line_number - lineoffset) * outwidth;
-    let window_end = chroma.len().min(line_start + burst_area.1 + padding);
-    if line_start >= window_end {
-        bail!("empty burst window");
-    }
-
-    let heterodyne_row = chroma_heterodyne
-        .get(current_phase)
-        .context("heterodyne phase row is out of range")?;
-    if window_end > heterodyne_row.len() {
-        bail!("burst window exceeds heterodyne row length");
-    }
-
+    let window_end = line_start + burst_end + burst_start;
     let upconverted = chroma[line_start..window_end]
         .iter()
-        .zip(&heterodyne_row[line_start..window_end])
+        .zip(&chroma_heterodyne[current_phase][line_start..window_end])
         .map(|(&sample, &het)| sample * het)
         .collect::<Vec<f32>>();
-    let filtered_padded = sosfiltfilt_f32(chroma_filter, &upconverted);
-    let kept_end = filtered_padded.len().saturating_sub(padding);
-    if padding >= kept_end {
-        bail!("empty burst window");
-    }
+    let filtered = sosfiltfilt_f32(chroma_filter, &upconverted);
 
     demod_burst(
-        &filtered_padded[padding..kept_end],
-        line_start + padding,
+        &filtered[burst_start..burst_end],
+        line_start + burst_start,
         line_start,
         burst_wave,
         fsc_hz,
@@ -504,7 +488,7 @@ fn get_phase_sequence(
     chroma_rotation_starting_index: Option<i64>,
     burst_area: (usize, usize),
     track_change_threshold: f32,
-) -> Result<(i64, Vec<PhaseSequenceEntry>)> {
+) -> (i64, Vec<PhaseSequenceEntry>) {
     const BURST_CHECK_SKIP_LINES: usize = 16;
 
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
@@ -521,7 +505,7 @@ fn get_phase_sequence(
         track_rotation = match chroma_rotation_index {
             0 => rotation.0,
             1 => rotation.1,
-            _ => bail!("chroma rotation index must be 0 or 1"),
+            _ => unreachable!("track phase {chroma_rotation_index} is neither 0 nor 1"),
         };
     } else {
         chroma_rotation_index = 0;
@@ -555,7 +539,7 @@ fn get_phase_sequence(
             burst
         } else {
             current_phase = rotated_phase(current_phase, track_rotation);
-            upconvert(current_phase, linenumber)?
+            upconvert(current_phase, linenumber)
         };
 
         if do_phase_rotation_check
@@ -563,7 +547,7 @@ fn get_phase_sequence(
             && linenumber + 1 < last_line
         {
             let next_phase = rotated_phase(current_phase, track_rotation);
-            let next_burst = upconvert(next_phase, linenumber + 1)?;
+            let next_burst = upconvert(next_phase, linenumber + 1);
 
             // PAL-family bursts alternate between lines, so the next line is
             // compared against the one two back; NTSC against the current one.
@@ -601,7 +585,7 @@ fn get_phase_sequence(
         chroma_rotation_index = (chroma_rotation_index + 1).rem_euclid(2);
     }
 
-    Ok((chroma_rotation_index, phase_sequence))
+    (chroma_rotation_index, phase_sequence)
 }
 
 fn get_phase_rotation_sequence(
@@ -612,7 +596,7 @@ fn get_phase_rotation_sequence(
     chroma_rotation_index: Option<i64>,
     burst_area: (usize, usize),
     prev_burst_start_line: i64,
-) -> Result<(i64, BurstLock)> {
+) -> (i64, BurstLock) {
     const TRACK_CHANGE_THRESHOLD: f32 = 90.0;
     const BURST_CHECK_SKIP_LINES: isize = 16;
     // Field-average burst magnitude below which the color killer blanks the
@@ -632,7 +616,7 @@ fn get_phase_rotation_sequence(
         chroma_rotation_index,
         burst_area,
         TRACK_CHANGE_THRESHOLD,
-    )?;
+    );
 
     let burst_check_start = BURST_CHECK_SKIP_LINES;
     let burst_check_end = end as isize - BURST_CHECK_SKIP_LINES;
@@ -670,7 +654,7 @@ fn get_phase_rotation_sequence(
             Some(chroma_rotation_index),
             burst_area,
             TRACK_CHANGE_THRESHOLD,
-        )?;
+        );
     }
 
     // Average burst phase per line parity (PAL bursts alternate), plus the
@@ -719,7 +703,7 @@ fn get_phase_rotation_sequence(
     }
 
     let phase_deg = |(i, q): (f32, f32)| q.atan2(i).to_degrees().rem_euclid(360.0);
-    Ok((
+    (
         chroma_rotation_index,
         BurstLock {
             phase_sequence,
@@ -728,7 +712,7 @@ fn get_phase_rotation_sequence(
             even_phase_avg: phase_deg(even),
             odd_phase_avg: phase_deg(odd),
         },
-    ))
+    )
 }
 
 /// Line locations refined from the burst phase, or `None` when burst hsync
@@ -796,7 +780,7 @@ fn apply_burst_lock(
         inter_field_state.track_phase,
         burst_area(spec),
         prev_burst_start_line,
-    )?;
+    );
     inter_field_state.track_phase = Some(track_phase);
     field.burst_lock = Some(burst_lock);
     Ok(())
@@ -856,14 +840,14 @@ pub(crate) fn predecode_field_from_rawdecode(
     }
 
     let do_level_detect = !spec.rf_saved_levels || inter_field_state.compute_linelocs_issues;
-    let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect)?;
+    let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect);
     let needs_level_retry = match &res {
         None => true,
         Some(res) => res.line0loc.is_none() || pending_field.sync_confidence == 0,
     };
     if needs_level_retry && !do_level_detect {
         tracing::debug!("Search for pulses failed, re-checking levels");
-        res = try_get_pulses(&mut pending_field, spec, inter_field_state, true)?;
+        res = try_get_pulses(&mut pending_field, spec, inter_field_state, true);
     }
 
     inter_field_state.compute_linelocs_issues = true;

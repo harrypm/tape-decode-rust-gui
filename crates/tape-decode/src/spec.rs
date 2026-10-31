@@ -276,6 +276,9 @@ impl DecoderSpec {
         // color-under format; only producing the chroma output is optional.
         let rf_write_chroma = is_color_under && !request.rf_export_raw_tbc;
         let chroma_output = rf_write_chroma && !request.skip_chroma;
+        if chroma_output && sys_params.burst_abs_ref.is_none() {
+            bail!("chroma output requires the format's burst_abs_ref");
+        }
 
         let rf_disable_comb = request.disable_comb || rf_color_system == ColorSystem::Secam;
         // SECAM has no phase-locked burst: its "burst" is an FM carrier whose

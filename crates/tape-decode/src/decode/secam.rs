@@ -104,20 +104,15 @@ struct Upconverted {
 /// the under carrier's phase by `mult`, with the bell amplitude regenerated
 /// from the restored instantaneous frequency. `rest_amplitude` is the peak
 /// amplitude of the undeviated carrier.
-fn upconvert(
-    chroma: &[f32],
-    spec: &DecoderSpec,
-    mult: u32,
-    rest_amplitude: f64,
-) -> Result<Upconverted> {
+fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64) -> Upconverted {
     let under_filter = spec
         .secam_under_filter
         .as_ref()
-        .context("missing SECAM under band-pass")?;
+        .expect("SECAM method 1 spec without its under band-pass");
     let fft = spec
         .secam_analytic_fft
         .as_ref()
-        .context("missing SECAM analytic transform")?;
+        .expect("SECAM method 1 spec without its analytic transform");
     let filtered = sosfiltfilt_f32(under_filter, chroma);
     // Over the whole field, so short-window edge effects do not bias the
     // phase.
@@ -184,11 +179,11 @@ fn upconvert(
             (rest_amplitude * bell_gain(freq) * limited * (f64::from(mult) * phase).cos()) as f32
         })
         .collect();
-    Ok(Upconverted {
+    Upconverted {
         signal,
         inst_freq,
         envelope,
-    })
+    }
 }
 
 struct LineAlternation {
@@ -511,11 +506,13 @@ pub(super) fn process_chroma(
     spec: &DecoderSpec,
     chroma: &[f32],
     mult: u32,
-) -> Result<Vec<f32>> {
+) -> Vec<f32> {
     let outwidth = field.outlinelen;
     // Peak amplitude putting the undeviated carrier near the porch RMS level
     // the other formats' chroma AGC normalizes to.
-    let burst_abs_ref = spec.sys_burst_abs_ref.context("missing burst_abs_ref")?;
+    let burst_abs_ref = spec
+        .sys_burst_abs_ref
+        .expect("chroma output without burst_abs_ref");
     let rest_amplitude = f64::from(burst_abs_ref) * 2f64.sqrt();
     let first_line = STARTING_LINE.max(field.burst_start_line().max(0) as usize);
     let porch_end_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as usize;
@@ -524,7 +521,7 @@ pub(super) fn process_chroma(
     // inside the TBC active window), so the splice starts a little early.
     let blank_start_px = ((spec.sys_active_video_us[1] - 0.85) * spec.sys_outfreq) as usize;
 
-    let pass1 = upconvert(chroma, spec, mult, rest_amplitude)?;
+    let pass1 = upconvert(chroma, spec, mult, rest_amplitude);
     let fit = fit_line_alternation(&pass1.inst_freq, outwidth, first_line, porch_end_px)
         .filter(|fit| fit.confidence >= IDENT_MIN_CONFIDENCE);
     let layout = BlankingLayout::new(outwidth, blank_start_px, porch_end_px);
@@ -546,7 +543,7 @@ pub(super) fn process_chroma(
                 fit.dr_on_even,
                 mult,
             );
-            upconvert(&cleaned, spec, mult, rest_amplitude)?.signal
+            upconvert(&cleaned, spec, mult, rest_amplitude).signal
         }
         None => {
             tracing::debug!("SECAM blanking left as-is (line identification confidence too low)");
@@ -557,5 +554,5 @@ pub(super) fn process_chroma(
     let mut block = sosfiltfilt_f32(&spec.chroma_filter_final, &restored);
     let blanked = (first_line * outwidth).min(block.len());
     block[..blanked].fill(0.0);
-    Ok(block)
+    block
 }
