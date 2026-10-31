@@ -1,6 +1,6 @@
 # tape-decode
 
-A decoder for analog tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, commit [943e6599](https://github.com/oyvindln/vhs-decode/commit/943e65992ce1bc7be0234c2baad0ca4e0bbd78db).
+A decoder for analog tape formats, written in Rust. Ported from the [vhs-decode](https://github.com/oyvindln/vhs-decode) project, commit [2f21e8ed](https://github.com/oyvindln/vhs-decode/commit/2f21e8ed6018b14561396cc95f1f6828054470b8).
 
 ## Installation
 

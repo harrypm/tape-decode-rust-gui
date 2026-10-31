@@ -1,4 +1,4 @@
-use super::sync::try_get_pulses;
+use super::sync::{refine_levels_from_vsync, try_get_pulses};
 use super::*;
 use std::f64::consts::{PI, TAU};
 
@@ -918,6 +918,27 @@ pub(crate) fn predecode_field_from_rawdecode(
                     );
                 }
                 pending_field.nextfieldoffset = Some(nextfield);
+
+                if !spec.rf_saved_levels {
+                    let (sync_level, blank_level) = refine_levels_from_vsync(
+                        &pending_field.data.video.demod,
+                        line0loc,
+                        res.meanlinelen,
+                        res.sync_level,
+                        res.blank_level,
+                    );
+                    let adjust = spec.rf_ire0_adjust;
+                    // Backporch mode takes the refined sync tip as its ire0,
+                    // which parks the hsync refinement's slicing threshold
+                    // below the sync tip.
+                    if adjust.backporch {
+                        inter_field_state.levels.ire0 = sync_level;
+                    }
+                    if adjust.hsync {
+                        inter_field_state.levels.hz_ire =
+                            (blank_level - sync_level) / -spec.sys_vsync_ire;
+                    }
+                }
 
                 let linelocs2_vec = if !spec.rf_skip_hsync_refine {
                     let normal_hsync_length = usectoinpx(

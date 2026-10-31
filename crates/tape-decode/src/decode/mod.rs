@@ -1554,6 +1554,16 @@ impl Decoder {
                                     hz_ire =
                                         (ire0 - hsync_level) / -f64::from(self.spec.sys_vsync_ire);
                                     tracing::debug!(hz_ire, "calculated hz_ire");
+                                    // A dropout or sync loss can put the same
+                                    // level in both windows.
+                                    if !hz_ire.is_finite() || hz_ire == 0.0 {
+                                        tracing::warn!(
+                                            ire0,
+                                            hsync_level,
+                                            "degenerate hz_ire from the hsync level, keeping the working one"
+                                        );
+                                        hz_ire = f64::from(self.inter_field_state.levels.hz_ire);
+                                    }
                                 }
                             }
                             if let Some(track_phase) = self.inter_field_state.track_phase {

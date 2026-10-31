@@ -1620,6 +1620,9 @@ pub(crate) struct PulseResult {
     pub(crate) first_hsync_loc: Option<f32>,
     pub(crate) first_hsync_loc_line: Option<f32>,
     pub(crate) meanlinelen: f32,
+    /// The field's sync tip and blanking levels as measured on its pulses.
+    pub(crate) sync_level: f32,
+    pub(crate) blank_level: f32,
 }
 
 /// Sync pulses of a field, with the sync tip and blanking levels they were
@@ -1890,5 +1893,89 @@ pub(crate) fn try_get_pulses(
         first_hsync_loc: result.first_hsync_loc,
         first_hsync_loc_line: Some(result.first_hsync_loc_line),
         meanlinelen: result.meanlinelen,
+        sync_level: found.sync_level,
+        blank_level: found.blank_level,
     }))
+}
+
+/// Refines the sync tip and blanking levels measured on the hsync pulses
+/// against the vertical interval, lines 1 to 9.5 of the field on the
+/// full-band demod, whose broad pulses and their gaps hold both levels for
+/// far longer than an hsync pulse does. Each sample joins the nearer
+/// level's cluster, the clusters are cleaned of outliers, and each level is
+/// blended towards its cluster mean by a weight that rises with the
+/// cluster's SNR (level separation squared over the cluster variance). A
+/// level stays put unless both clusters are populated, the measured
+/// separation is within half of the expected one and its SNR is at least 9.
+pub(crate) fn refine_levels_from_vsync(
+    demod: &[f32],
+    line0loc: f32,
+    meanlinelen: f32,
+    sync_level: f32,
+    blank_level: f32,
+) -> (f32, f32) {
+    const WINDOW_LINES: f32 = 8.5;
+    const MIN_YIELD_FRACTION: f64 = 0.15;
+    const MIN_YIELD_SAMPLES: usize = 5;
+    const OUTLIER_MADS: f64 = 3.5;
+    const MAD_FLOOR: f64 = 1e-5;
+    const SEPARATION_RANGE: (f64, f64) = (0.5, 1.5);
+    const SIGNAL_POWER_FLOOR: f64 = 1e-5;
+    const VARIANCE_FLOOR: f64 = 1e-6;
+    const MIN_SNR: f64 = 9.0;
+    // The SNR at which a level is blended halfway to its cluster mean.
+    const HALF_WEIGHT_SNR: f64 = 20.0;
+
+    let start = (line0loc + meanlinelen).round_ties_even();
+    let end = (start + meanlinelen * WINDOW_LINES).round_ties_even();
+    let Some((start, end)) = demod_slice_bounds(demod.len(), start as i64, end as i64) else {
+        return (sync_level, blank_level);
+    };
+    let window = &demod[start..end];
+    let min_yield = ((window.len() as f64 * MIN_YIELD_FRACTION) as usize).max(MIN_YIELD_SAMPLES);
+
+    let (sync_orig, blank_orig) = (f64::from(sync_level), f64::from(blank_level));
+    let (mut sync, mut blank): (Vec<f64>, Vec<f64>) = window
+        .iter()
+        .map(|&v| f64::from(v))
+        .partition(|&v| (v - sync_orig).abs() < (v - blank_orig).abs());
+    let drop_outliers = |samples: &mut Vec<f64>| {
+        if samples.len() <= MIN_YIELD_SAMPLES {
+            return;
+        }
+        let median = median_from_values(&mut samples.clone());
+        let mut deviations: Vec<f64> = samples.iter().map(|v| (v - median).abs()).collect();
+        let mad = median_from_values(&mut deviations).max(MAD_FLOOR);
+        samples.retain(|v| (v - median).abs() < OUTLIER_MADS * mad);
+    };
+    drop_outliers(&mut sync);
+    drop_outliers(&mut blank);
+    if sync.len() < min_yield || blank.len() < min_yield {
+        return (sync_level, blank_level);
+    }
+
+    let (sync_mean, blank_mean) = (mean(&sync), mean(&blank));
+    let measured = blank_mean - sync_mean;
+    let expected = blank_orig - sync_orig;
+    if !(SEPARATION_RANGE.0 * expected < measured && measured < SEPARATION_RANGE.1 * expected) {
+        return (sync_level, blank_level);
+    }
+    let signal_power = (measured * measured).max(SIGNAL_POWER_FLOOR);
+    let refine = |orig: f64, samples: &[f64], cluster_mean: f64| {
+        let variance = samples
+            .iter()
+            .map(|v| (v - cluster_mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let snr = signal_power / variance.max(VARIANCE_FLOOR);
+        if snr < MIN_SNR {
+            return orig as f32;
+        }
+        let weight = snr / (HALF_WEIGHT_SNR + snr);
+        ((1.0 - weight) * orig + weight * cluster_mean) as f32
+    };
+    (
+        refine(sync_orig, &sync, sync_mean),
+        refine(blank_orig, &blank, blank_mean),
+    )
 }
