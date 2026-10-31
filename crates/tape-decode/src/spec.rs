@@ -100,7 +100,6 @@ pub struct DecoderSpec {
 
     pub(crate) rf_disable_comb: bool,
     pub(crate) rf_disable_right_hsync: bool,
-    pub(crate) rf_disable_dc_offset: bool,
     pub(crate) rf_fallback_vsync: bool,
     pub(crate) rf_field_order_confidence: i64,
     pub(crate) rf_saved_levels: bool,
@@ -147,12 +146,6 @@ pub struct DecoderSpec {
     pub(crate) fft_block_c2r_f32: Arc<dyn ComplexToReal<f32>>,
     pub(crate) fft_field_forward_f32: Arc<dyn Fft<f32>>,
 
-    pub(crate) resync_divisor: usize,
-    pub(crate) resync_vsync_env_decimation: usize,
-    pub(crate) resync_vsync_env_filter: Vec<Sos<f32>>,
-    pub(crate) resync_serration_filter_base: [Vec<Sos<f32>>; 2],
-    pub(crate) resync_serration_filter_envelope: Vec<Sos<f32>>,
-
     pub(crate) ntscj: bool,
     pub(crate) track_phase: Option<i64>,
     pub(crate) wow_level_adjust_smoothing: f32,
@@ -187,24 +180,6 @@ impl DecoderSpec {
             false
         } else {
             request.cafc
-        };
-        // Validated and clamped once here; ResyncCore only reads the result.
-        let level_detect_divisor = {
-            let requested = request.level_detect_divisor;
-            if !(1..=10).contains(&requested) {
-                bail!(
-                    "requested level detection divisor {} is not supported",
-                    requested
-                );
-            } else if request.inputfreq / (requested as f64) < 4.0 {
-                bail!(
-                    "requested level detection divisor {} too high for frequency {} MHz",
-                    requested,
-                    rf_freq
-                );
-            } else {
-                requested
-            }
         };
         // Controls the sharpness EQ gain.
         let sharpness_level = request.sharpness as f64 / 100.0;
@@ -638,33 +613,6 @@ impl DecoderSpec {
             None
         };
 
-        let resync_divisor = level_detect_divisor as usize;
-        let samp_rate = freq_hz / resync_divisor as f64;
-        let fv = sys_params.fps * 2.0;
-        let venv_limit = 5.0;
-        let serration_limit = 3.0;
-        let env_cutoff = fv * venv_limit;
-        // The per-field envelope lowpass sits near the field rate, leaving it
-        // hugely oversampled at the working rate. Run it on a heavily decimated
-        // copy of the rectified signal so it stays well above its own cutoff,
-        // keeping its poles clear of the unit circle. Clamp the factor so it
-        // never collapses to no decimation.
-        let resync_vsync_env_decimation =
-            ((samp_rate / env_cutoff) / 60.0).floor().max(1.0) as usize;
-        let env_samp_rate = samp_rate / resync_vsync_env_decimation as f64;
-        let resync_vsync_env_filter =
-            store_sos_filter(iir_lowpass_sos(env_samp_rate, env_cutoff, 1e3, 20)?);
-        let resync_serration_filter_base = [
-            store_sos_filter(iir_highpass_sos(samp_rate, fh, fh, 20)?),
-            store_sos_filter(iir_lowpass_sos(samp_rate, fh, fh, 20)?),
-        ];
-        let resync_serration_filter_envelope = store_sos_filter(iir_lowpass_sos(
-            samp_rate,
-            fh / serration_limit,
-            fh / 2.0,
-            20,
-        )?);
-
         let track_phase = request.track_phase;
         if let Some(track_phase) = track_phase {
             if rf_color_system == ColorSystem::Secam {
@@ -740,7 +688,6 @@ impl DecoderSpec {
 
             rf_disable_comb,
             rf_disable_right_hsync: request.rf_disable_right_hsync,
-            rf_disable_dc_offset: request.rf_disable_dc_offset,
             rf_fallback_vsync,
             rf_field_order_confidence: request.rf_field_order_confidence,
             rf_saved_levels: request.rf_saved_levels,
@@ -784,12 +731,6 @@ impl DecoderSpec {
             fft_block_r2c_f32,
             fft_block_c2r_f32,
             fft_field_forward_f32,
-
-            resync_divisor,
-            resync_vsync_env_decimation,
-            resync_vsync_env_filter,
-            resync_serration_filter_base,
-            resync_serration_filter_envelope,
 
             ntscj: request.ntscj,
             track_phase,
@@ -883,77 +824,6 @@ impl DecoderSpec {
     }
 
     #[inline]
-    pub(crate) fn resync_divisor(&self) -> i64 {
-        self.resync_divisor as i64
-    }
-
-    #[inline]
-    fn resync_samp_rate(&self) -> f64 {
-        self.freq_hz() / self.resync_divisor as f64
-    }
-
-    #[inline]
-    fn resync_fv(&self) -> f64 {
-        self.sys_fps * 2.0
-    }
-
-    #[inline]
-    fn resync_fh(&self) -> f64 {
-        self.sys_fps * self.sys_frame_lines.line_count() as f64
-    }
-
-    #[inline]
-    pub(crate) fn resync_eq_pulselen_downsampled(&self) -> usize {
-        t_to_samples(self.resync_samp_rate(), self.sys_eq_pulse_us * 1e-6).round_ties_even()
-            as usize
-    }
-
-    #[inline]
-    pub(crate) fn resync_vsynclen_downsampled(&self) -> usize {
-        (self.resync_samp_rate() / self.resync_fv()).round_ties_even() as usize
-    }
-
-    #[inline]
-    pub(crate) fn resync_linelen_downsampled(&self) -> usize {
-        (self.resync_samp_rate() / self.resync_fh()).round_ties_even() as usize
-    }
-
-    #[inline]
-    pub(crate) fn resync_vbi_time_range(&self) -> (f64, f64) {
-        let line_time = 1.0 / self.resync_fh();
-        let vbi_time = 6.5 * line_time;
-        (
-            t_to_samples(self.resync_samp_rate(), vbi_time * 3.0 / 4.0),
-            t_to_samples(self.resync_samp_rate(), vbi_time * 5.0 / 4.0),
-        )
-    }
-
-    #[inline]
-    pub(crate) fn resync_field_ma_depth(&self) -> usize {
-        let fv = self.resync_fv();
-        if fv < 60.0 {
-            (fv / 5.0).round_ties_even() as usize
-        } else {
-            (fv / 6.0).round_ties_even() as usize
-        }
-    }
-
-    #[inline]
-    pub(crate) fn resync_eq_pulselen(&self) -> usize {
-        self.resync_eq_pulselen_downsampled() * self.resync_divisor
-    }
-
-    #[inline]
-    fn resync_linelen(&self) -> usize {
-        self.resync_linelen_downsampled() * self.resync_divisor
-    }
-
-    #[inline]
-    pub(crate) fn resync_long_pulse_max(&self) -> f64 {
-        self.resync_linelen() as f64 * 5.0
-    }
-
-    #[inline]
     pub fn readlen(&self) -> usize {
         let linelen = self.linelen();
         match self.sys_frame_lines {
@@ -993,10 +863,6 @@ impl DecoderSpec {
 
 // Filter-design helpers, moved here from decode.rs because spec.rs
 // (DecoderSpec construction) is their sole consumer.
-
-fn t_to_samples(samp_rate: f64, time: f64) -> f64 {
-    samp_rate * time
-}
 
 /// Smallest 5-smooth length at or above `n`, which the FFT runs with only
 /// small radices.

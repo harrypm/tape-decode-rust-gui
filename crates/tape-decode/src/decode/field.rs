@@ -236,7 +236,7 @@ fn refine_linelocs_hsync(
     demod_05: &[f32],
     linebad: &mut [u8],
     normal_hsync_length: usize,
-    zc_threshold: f32,
+    levels: VideoLevels,
 ) -> Result<Vec<f32>> {
     if linebad.len() != initial_linelocs.len() {
         bail!("linebad length doesn't match linelocs length");
@@ -244,9 +244,10 @@ fn refine_linelocs_hsync(
 
     let one_usec = spec.freq as usize;
     let is_pal = spec.sys_frame_lines != LineSystem::Line525;
-    let ire_30 = iretohz(spec.sys_ire0, spec.sys_hz_ire, 30.0);
-    let ire_n_65 = iretohz(spec.sys_ire0, spec.sys_hz_ire, -65.0);
-    let ire_110 = iretohz(spec.sys_ire0, spec.sys_hz_ire, 110.0);
+    let zc_threshold = levels.iretohz(spec.sys_vsync_ire / 2.0);
+    let ire_30 = levels.iretohz(30.0);
+    let ire_n_65 = levels.iretohz(-65.0);
+    let ire_110 = levels.iretohz(110.0);
 
     let mut linelocs_refined = initial_linelocs.to_vec();
     let mut refined_from_right_lineloc = -1.0;
@@ -807,7 +808,6 @@ pub(crate) fn predecode_field_from_rawdecode(
     scheduled_prevfield: Option<PrevFieldState>,
     inter_field_state: &mut InterFieldState,
     scheduled_readloc: u64,
-    resync_state: &mut ResyncState,
     chroma_afc_state: &ChromaAfcState,
 ) -> Result<DecodeFieldResult> {
     // Build and classify the next DecodedField from coalesced block data. This is
@@ -855,29 +855,15 @@ pub(crate) fn predecode_field_from_rawdecode(
         }
     }
 
-    let has_levels = resync_state.has_levels();
-    let do_level_detect =
-        !spec.rf_saved_levels || !has_levels || inter_field_state.compute_linelocs_issues;
-    let mut res = try_get_pulses(
-        &mut pending_field,
-        spec,
-        inter_field_state,
-        do_level_detect,
-        resync_state,
-    )?;
+    let do_level_detect = !spec.rf_saved_levels || inter_field_state.compute_linelocs_issues;
+    let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect)?;
     let needs_level_retry = match &res {
         None => true,
         Some(res) => res.line0loc.is_none() || pending_field.sync_confidence == 0,
     };
     if needs_level_retry && !do_level_detect {
         tracing::debug!("Search for pulses failed, re-checking levels");
-        res = try_get_pulses(
-            &mut pending_field,
-            spec,
-            inter_field_state,
-            true,
-            resync_state,
-        )?;
+        res = try_get_pulses(&mut pending_field, spec, inter_field_state, true)?;
     }
 
     inter_field_state.compute_linelocs_issues = true;
@@ -949,7 +935,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                         &pending_field.data.video.demod_05,
                         &mut linebad_vec,
                         normal_hsync_length,
-                        resync_state.last_pulse_threshold(),
+                        inter_field_state.levels,
                     )?
                 } else {
                     linelocs_vec.clone()

@@ -27,15 +27,32 @@ use chroma::{color_framed, decode_chroma};
 use demodblock::decode_video_block;
 use dropouts::detect_dropouts_rf;
 use field::predecode_field_from_rawdecode;
-use sync::ResyncState;
 use vits::compute_vits_metrics;
 
 pub(crate) fn iretohz(ire0: f32, hz_ire: f32, ire: f32) -> f32 {
     ire0 + (hz_ire * ire)
 }
 
-fn hztoire(ire0: f32, hz_ire: f32, hz: f32) -> f32 {
-    (hz - ire0) / hz_ire
+/// Video levels of the demodulated signal: the carrier frequency of 0 IRE and
+/// the deviation per IRE. The decoder starts from the profile's nominal values
+/// and the `--ire0-adjust` modes retune them from each field's sync pulses.
+#[derive(Clone, Copy)]
+struct VideoLevels {
+    ire0: f32,
+    hz_ire: f32,
+}
+
+impl VideoLevels {
+    fn nominal(spec: &DecoderSpec) -> Self {
+        Self {
+            ire0: spec.sys_ire0,
+            hz_ire: spec.sys_hz_ire,
+        }
+    }
+
+    fn iretohz(self, ire: f32) -> f32 {
+        iretohz(self.ire0, self.hz_ire, ire)
+    }
 }
 
 fn inrange<T: PartialOrd>(a: T, mi: T, ma: T) -> bool {
@@ -540,67 +557,6 @@ struct BurstLock {
     odd_phase_avg: f32,
 }
 
-// Whether any sample in the chunk sits on the given side of the threshold,
-// as a branch-free OR-reduction the compiler vectorizes.
-#[inline]
-fn chunk_crosses(chunk: &[f32], high: f32, above: bool) -> bool {
-    if above {
-        chunk.iter().fold(false, |acc, &value| acc | (value > high))
-    } else {
-        chunk
-            .iter()
-            .fold(false, |acc, &value| acc | (value <= high))
-    }
-}
-
-fn findpulses_raw(
-    sync_ref: &[f32],
-    high: f32,
-    min_synclen: f64,
-    max_synclen: f64,
-) -> (Vec<i64>, Vec<i64>) {
-    let mut in_pulse = sync_ref[0] <= high;
-    let mut starts = Vec::new();
-    let mut lengths = Vec::new();
-    let mut cur_start = 0usize;
-
-    // The signal crosses the threshold only a few hundred times per field, so
-    // first test whole chunks for a crossing out of the current state and run
-    // the per-sample edge logic only on the chunks that contain one.
-    const CHUNK: usize = 64;
-    let mut pos = 0usize;
-    let n = sync_ref.len();
-    while pos < n {
-        let end = (pos + CHUNK).min(n);
-        let chunk = &sync_ref[pos..end];
-        if !chunk_crosses(chunk, high, in_pulse) {
-            pos = end;
-            continue;
-        }
-        for (offset, &value) in chunk.iter().enumerate() {
-            if in_pulse {
-                if value > high {
-                    let length = pos + offset - cur_start;
-                    if (length as f64) >= min_synclen
-                        && (length as f64) <= max_synclen
-                        && cur_start != 0
-                    {
-                        starts.push(cur_start as i64);
-                        lengths.push(length as i64);
-                    }
-                    in_pulse = false;
-                }
-            } else if value <= high {
-                cur_start = pos + offset;
-                in_pulse = true;
-            }
-        }
-        pos = end;
-    }
-
-    (starts, lengths)
-}
-
 pub const BLOCKSIZE: usize = 32 * 1024;
 pub(crate) const BLOCKCUT: usize = 1024;
 pub(crate) const BLOCKCUT_END: usize = 1024;
@@ -705,10 +661,6 @@ impl<T: Float + std::iter::Sum> StackableMa<T> {
 
     fn has_values(&self) -> bool {
         self.stack.len() > self.min_watermark
-    }
-
-    fn size(&self) -> usize {
-        self.stack.len()
     }
 }
 
@@ -943,17 +895,21 @@ struct InterFieldState {
     prev_first_field: i64,
     track_phase: Option<i64>,
     compute_linelocs_issues: bool,
+    /// The working video levels; with `--use-saved-levels` the next field is
+    /// sliced between them instead of re-detecting its levels.
+    levels: VideoLevels,
 }
 
 impl InterFieldState {
-    fn new(track_phase: Option<i64>) -> Self {
+    fn new(spec: &DecoderSpec) -> Self {
         Self {
             prev_first_hsync_readloc: -1,
             prev_first_hsync_loc: -1.0,
             prev_first_hsync_diff: -1.0,
             prev_first_field: -1,
-            track_phase,
+            track_phase: spec.track_phase,
             compute_linelocs_issues: false,
+            levels: VideoLevels::nominal(spec),
         }
     }
 }
@@ -1380,7 +1336,6 @@ pub struct Decoder {
     fdoffset: u64,
     fdoffset_frac: f64,
     inter_field_state: InterFieldState,
-    resync_state: ResyncState,
     chroma_afc_state: ChromaAfcState,
     conversion_lo: Option<ConversionLoState>,
     fields: Vec<FieldInfoEntry>,
@@ -1394,8 +1349,7 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(spec: Arc<DecoderSpec>, fdoffset: u64) -> Self {
-        let inter_field_state = InterFieldState::new(spec.track_phase);
-        let resync_state = ResyncState::new(&spec);
+        let inter_field_state = InterFieldState::new(&spec);
         let chroma_afc_state = ChromaAfcState::new(&spec);
         let conversion_lo = spec
             .chroma_phase_continuous()
@@ -1405,7 +1359,6 @@ impl Decoder {
             fdoffset,
             fdoffset_frac: 0.0,
             inter_field_state,
-            resync_state,
             chroma_afc_state,
             conversion_lo,
             fields: Vec::new(),
@@ -1527,7 +1480,6 @@ impl Decoder {
                         scheduled_prevfield,
                         &mut self.inter_field_state,
                         scheduled_readloc_value,
-                        &mut self.resync_state,
                         &self.chroma_afc_state,
                     )?)
                 } else {
