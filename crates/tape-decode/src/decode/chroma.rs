@@ -275,6 +275,13 @@ fn process_chroma_internal(
             tracing::debug!(offset_hz = offset, "SECAM carrier servo measurement");
         }
     }
+    if let Some(mult) = spec.decoder_chroma_carrier_mult {
+        let restored = secam::process_chroma(field, spec, &chroma, mult)?;
+        return Ok(restored
+            .iter()
+            .map(|&sample| (sample + SIGNED_SAMPLE_MAX) as i64 as u16)
+            .collect());
+    }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
         burst_deemphasis(&mut chroma, field, burst_area(spec).1)
@@ -374,7 +381,7 @@ pub(crate) fn decode_chroma(
 
 /// Analytic signal of `data` (its Hilbert transform as the imaginary part)
 /// through the zero-padded transform pair.
-fn analytic_signal(
+pub(super) fn analytic_signal(
     data: &[f32],
     (r2c, inverse): &(Arc<dyn RealToComplex<f32>>, Arc<dyn Fft<f32>>),
 ) -> Vec<Complex32> {
@@ -391,7 +398,7 @@ fn analytic_signal(
 }
 
 /// Phase advance from `a` to `b`, in (-pi, pi].
-fn phase_step(a: Complex32, b: Complex32) -> f64 {
+pub(super) fn phase_step(a: Complex32, b: Complex32) -> f64 {
     let (ar, ai) = (f64::from(a.re), f64::from(a.im));
     let (br, bi) = (f64::from(b.re), f64::from(b.im));
     // arg(b * conj(a))
@@ -422,7 +429,7 @@ fn secam_under_carrier_offset(
     // the two clusters land somewhere else entirely.
     const SEPARATION_RANGE: std::ops::RangeInclusive<f64> = 90e3..=230e3;
 
-    let fft = spec.secam_servo_fft.as_ref()?;
+    let fft = spec.secam_analytic_fft.as_ref()?;
     let pair_center = spec.decoder_color_under_carrier;
     let freq_scale = spec.tbc_sample_rate() / std::f64::consts::TAU;
     // Over the whole field, so the short per-line windows are free of

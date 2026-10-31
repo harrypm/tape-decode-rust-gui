@@ -65,6 +65,7 @@ pub struct DecoderSpec {
     pub(crate) decoder_chroma_bpf_order: usize,
     pub(crate) decoder_chroma_bpf_lower: f64,
     pub(crate) decoder_chroma_conversion_lo: Option<f64>,
+    pub(crate) decoder_chroma_carrier_mult: Option<u32>,
     pub(crate) decoder_chroma_rotation: Option<[i64; 2]>,
     pub(crate) decoder_chroma_offset: f64,
     pub(crate) decoder_nonlinear_highpass_limit_l: f32,
@@ -84,10 +85,11 @@ pub struct DecoderSpec {
 
     pub(crate) chroma_afc_narrowband: Vec<Vec<Sos<f32>>>,
     pub(crate) chroma_afc_fine_tune_fh_ratio: f64,
-    // Analytic-signal transform pair for the ME-SECAM carrier servo: a real
-    // forward transform and the complex inverse, at a fast length padded past
-    // the field. None unless the servo runs.
-    pub(crate) secam_servo_fft: Option<(Arc<dyn RealToComplex<f32>>, Arc<dyn Fft<f32>>)>,
+    // Whole-field analytic-signal transform pair (the ME-SECAM carrier servo
+    // and the SECAM method 1 restoration): a real forward transform and the
+    // complex inverse, at a fast length padded past the field. None unless
+    // one of them runs.
+    pub(crate) secam_analytic_fft: Option<(Arc<dyn RealToComplex<f32>>, Arc<dyn Fft<f32>>)>,
 
     pub(crate) dod_threshold_p: f32,
     pub(crate) dod_threshold_a: Option<f32>,
@@ -121,6 +123,9 @@ pub struct DecoderSpec {
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_final: Vec<Sos<f32>>,
+    // Post-TBC band-pass around the SECAM method 1 under carriers, ahead of
+    // the phase multiplication.
+    pub(crate) secam_under_filter: Option<Vec<Sos<f32>>>,
 
     pub(crate) video_rf_filter: Vec<f32>,
     pub(crate) video_notch_filter: Option<Vec<f32>>,
@@ -229,6 +234,18 @@ impl DecoderSpec {
         let fh = sys_params.fps * sys_params.frame_lines.line_count() as f64;
         let color_under = decoder_params.color_under_carrier;
         let conversion_lo = decoder_params.chroma_conversion_lo;
+        let carrier_mult = decoder_params.chroma_carrier_mult;
+        if conversion_lo.is_some() && carrier_mult.is_some() {
+            bail!("chroma_conversion_lo and chroma_carrier_mult are mutually exclusive");
+        }
+        // Both SECAM variants restore the chroma block to the same place:
+        // ME-SECAM by mixing against the conversion LO, method 1 by
+        // multiplying the carrier up.
+        let secam_block_center_mhz = match (conversion_lo, carrier_mult) {
+            (Some(conversion_lo), _) => Some((conversion_lo - color_under) / 1e6),
+            (None, Some(mult)) => Some(color_under * f64::from(mult) / 1e6),
+            (None, None) => None,
+        };
         let out_sample_rate_mhz = sys_params.fsc_mhz * 4.0;
         // The rate the TBC output is actually clocked at (outlinelen samples
         // per line period), which 4 * fsc only approximates after outlinelen
@@ -457,15 +474,14 @@ impl DecoderSpec {
             .map(|boost_bpf| request.high_boost.unwrap_or(boost_bpf.mult) as f32);
 
         let chroma_bandpass_final = |color_under_format: bool| -> Result<Vec<Sos<f64>>> {
-            let (band_low, band_high) = match conversion_lo {
-                Some(conversion_lo) if color_under_format => {
+            let (band_low, band_high) = match secam_block_center_mhz {
+                Some(center) if color_under_format => {
                     // Place the band around the restored SECAM chroma block
                     // rather than around fsc. The tight top edge suppresses
                     // high-side FM splatter from saturated transitions, which
                     // otherwise reaches downstream discriminators with wide
                     // take-off filters and turns into clicks and streaks at
                     // colour edges.
-                    let center = (conversion_lo - color_under) / 1e6;
                     (center - 0.67, center + 0.55)
                 }
                 _ if color_under_format => (
@@ -586,7 +602,9 @@ impl DecoderSpec {
             (Vec::new(), Vec::new())
         };
         let rf_secam_carrier_servo = request.rf_secam_carrier_servo;
-        let secam_servo_fft = if conversion_lo.is_some() && rf_secam_carrier_servo {
+        let secam_analytic_fft = if (conversion_lo.is_some() && rf_secam_carrier_servo)
+            || carrier_mult.is_some()
+        {
             // Zero-padded past the field so the Hilbert transform runs at a
             // fast length.
             let n = next_fast_len(fieldlen);
@@ -597,6 +615,20 @@ impl DecoderSpec {
         } else {
             None
         };
+        // The band covers the under carrier pair (1.0625/1.1015625 MHz) plus
+        // the +-126.5 kHz maximum deviation and as much sideband room as fits
+        // below the luma FM area; out-of-band noise would turn straight into
+        // phase noise, which the multiplication amplifies.
+        let secam_under_filter = carrier_mult
+            .map(|_| {
+                let nyquist = tbc_sample_rate / 2.0;
+                butter_sos(
+                    3,
+                    &[550e3 / nyquist, 1300e3 / nyquist],
+                    FilterBandType::Bandpass,
+                )
+            })
+            .transpose()?;
 
         // Increase the cutoff at the end of blocks to avoid edge distortion from filters making it through.
 
@@ -653,7 +685,7 @@ impl DecoderSpec {
 
             chroma_afc_narrowband,
             chroma_afc_fine_tune_fh_ratio: decode_options.chroma_afc_fine_tune_fh_ratio,
-            secam_servo_fft,
+            secam_analytic_fft,
 
             freq: rf_freq,
             color_system: rf_color_system,
@@ -685,6 +717,7 @@ impl DecoderSpec {
             decoder_chroma_bpf_order: decoder_params.chroma_bpf_order,
             decoder_chroma_bpf_lower: decoder_params.chroma_bpf_lower,
             decoder_chroma_conversion_lo: conversion_lo,
+            decoder_chroma_carrier_mult: carrier_mult,
             decoder_chroma_rotation: decoder_params.chroma_rotation,
             decoder_chroma_offset: decoder_params.chroma_offset,
             decoder_nonlinear_highpass_limit_l: decoder_params.nonlinear.highpass_limit_l,
@@ -730,6 +763,7 @@ impl DecoderSpec {
             chroma_filter_deemphasis: chroma_filter_deemphasis.map(store_sos_filter),
             chroma_filter_audio_notch: chroma_filter_audio_notch.map(store_sos_filter),
             chroma_filter_final: store_sos_filter(chroma_filter_final),
+            secam_under_filter: secam_under_filter.map(store_sos_filter),
 
             video_rf_filter: store_real_filter(video_rf_filter),
             video_notch_filter: video_notch_filter.map(store_real_filter),

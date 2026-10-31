@@ -19,6 +19,7 @@ mod chroma;
 mod demodblock;
 mod dropouts;
 mod field;
+mod secam;
 mod sync;
 mod vits;
 

@@ -186,6 +186,12 @@ pub struct DecoderParams {
     /// centres the band-pass.
     #[serde(default)]
     pub chroma_conversion_lo: Option<f64>,
+    /// Carrier restore multiplier (SECAM method 1, recorded through a
+    /// divide-by-4 counter): the chroma block is restored by multiplying the
+    /// colour-under carrier phase by this instead of mixing against a
+    /// heterodyne, and lands at `color_under_carrier` times it.
+    #[serde(default)]
+    pub chroma_carrier_mult: Option<u32>,
     pub chroma_rotation: Option<[i64; 2]>,
     pub chroma_audio_notch_freq: f64,
     pub chroma_offset: f64,

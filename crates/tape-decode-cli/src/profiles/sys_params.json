@@ -227,5 +227,9 @@
       0.0,
       0.0
     ]
+  },
+  "SECAM": {
+    "base": "PAL",
+    "color_system": "SECAM"
   }
 }
