@@ -904,6 +904,9 @@ fn compare_video_parameters(expected: &VideoParameters, actual: &VideoParameters
     diff.float(&format!("{p}.sampleRate"), expected.sample_rate, actual.sample_rate);
     diff.float(&format!("{p}.black16bIRE"), expected.black_16b_ire, actual.black_16b_ire);
     diff.float(&format!("{p}.white16bIRE"), expected.white_16b_ire, actual.white_16b_ire);
+    if let (Some(expected), Some(actual)) = (expected.blanking_16b_ire, actual.blanking_16b_ire) {
+        diff.float(&format!("{p}.blanking16bIRE"), expected, actual);
+    }
     diff.int(&format!("{p}.fieldHeight"), expected.field_height, actual.field_height);
     diff.int(&format!("{p}.colourBurstStart"), expected.colour_burst_start, actual.colour_burst_start);
     diff.int(&format!("{p}.colourBurstEnd"), expected.colour_burst_end, actual.colour_burst_end);

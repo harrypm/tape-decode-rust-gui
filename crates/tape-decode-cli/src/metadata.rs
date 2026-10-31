@@ -41,6 +41,9 @@ pub(crate) struct VideoParameters {
     pub(crate) sample_rate: f64,
     pub(crate) black_16b_ire: f64,
     pub(crate) white_16b_ire: f64,
+    // Absent from older sidecars.
+    #[serde(default)]
+    pub(crate) blanking_16b_ire: Option<f64>,
     pub(crate) field_height: usize,
     pub(crate) colour_burst_start: i64,
     pub(crate) colour_burst_end: i64,
@@ -67,6 +70,7 @@ pub(crate) fn metadata_to_tbc(metadata: &DecoderMetadata, field_count: usize) ->
             sample_rate: metadata.sample_rate,
             black_16b_ire: metadata.black_16b_ire,
             white_16b_ire: metadata.white_16b_ire,
+            blanking_16b_ire: Some(metadata.blanking_16b_ire),
             field_height: metadata.field_height,
             colour_burst_start: metadata.colour_burst_start,
             colour_burst_end: metadata.colour_burst_end,

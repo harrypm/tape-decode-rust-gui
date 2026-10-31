@@ -653,6 +653,7 @@ pub struct DecoderMetadata {
     pub sample_rate: f64,
     pub black_16b_ire: f64,
     pub white_16b_ire: f64,
+    pub blanking_16b_ire: f64,
     pub field_height: usize,
     pub colour_burst_start: i64,
     pub colour_burst_end: i64,
@@ -1725,6 +1726,7 @@ impl Decoder {
         };
         let black = ire_to_output(spec.black_ire() as f32);
         let white = ire_to_output(100.0);
+        let blanking = ire_to_output(0.0);
         let to_sample = |us: f64| (us * spec.sys_outfreq + BADJ).round_ties_even() as i64;
         let system = match (spec.sys_frame_lines, spec.color_system) {
             (LineSystem::Line525, ColorSystem::Pal) => "PAL-M",
@@ -1737,6 +1739,7 @@ impl Decoder {
             sample_rate: spec.sys_outfreq * 1_000_000.0,
             black_16b_ire: black * (1.0 - spec.level_adjust as f64),
             white_16b_ire: white * (1.0 + spec.level_adjust as f64),
+            blanking_16b_ire: blanking,
             field_height: metadata_field.outlinecount,
             colour_burst_start: to_sample(spec.sys_color_burst_us[0]),
             colour_burst_end: to_sample(spec.sys_color_burst_us[1]),
