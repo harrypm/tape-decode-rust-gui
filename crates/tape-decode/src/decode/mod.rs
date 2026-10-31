@@ -55,10 +55,7 @@ fn hz_to_output_array(
         spec.sys_output_zero as f32 - spec.sys_vsync_ire * out_scale - (ire0 as f32) * scale;
     input
         .iter()
-        .map(|&sample| {
-            let value = sample * scale + offset;
-            value.clamp(0.0, 65535.0) as u16
-        })
+        .map(|&sample| (sample * scale + offset + 0.5).clamp(0.0, 65535.0) as u16)
         .collect()
 }
 
