@@ -10,19 +10,15 @@ use tape_decode::{Decoder, DecoderMetadata, DecoderSpec, LumaOutput, WriteableFi
 use crate::reader::DecodeReader;
 use crate::writer::DecodeWriter;
 
-/// Decode the whole input serially. Like the multithreaded path, the input is
-/// streamed once from the stream start and the decoder skips past everything
-/// before `start_offset` itself (so this works on non-seekable inputs such as
-/// pipes); `start_offset` is taken directly rather than inferred from the
-/// reader's position.
-pub fn decode_all(
+/// Stream `reader` from its current position (the stream start) through
+/// `decoder`, handing every batch of decoded fields to `sink` until the input
+/// ends or `sink` returns false.
+fn decode_serial(
     reader: &mut DecodeReader,
-    writer: &mut DecodeWriter,
-    spec: Arc<DecoderSpec>,
-    start_offset: u64,
+    decoder: &mut Decoder,
+    spec: &DecoderSpec,
+    mut sink: impl FnMut(&[WriteableField], Option<&DecoderMetadata>) -> Result<bool>,
 ) -> Result<()> {
-    let mut decoder = Decoder::new(Arc::clone(&spec), start_offset);
-
     // Feed the decoder one chunk at a time over a sliding window starting at
     // absolute sample `base` (0, since reading begins at the stream start). A
     // chunk exceeds one field's span, so each refill makes progress. `decode`
@@ -34,7 +30,6 @@ pub fn decode_all(
     let mut base: u64 = 0;
     let mut read_pos: u64 = 0;
 
-    let mut fields_written = 0usize;
     loop {
         let read = reader.read(&mut read_buffer)?;
         window.extend_from_slice(&read_buffer[..read]);
@@ -42,14 +37,8 @@ pub fn decode_all(
         read_pos += read as u64;
 
         let (consumed, fields) = decoder.decode(&window, base, final_chunk)?;
-        let metadata = decoder.metadata();
-        for field in &fields {
-            writer.write_writeable(field, metadata.as_ref())?;
-        }
-        fields_written += fields.len();
-
-        if final_chunk {
-            break;
+        if !sink(&fields, decoder.metadata().as_ref())? || final_chunk {
+            return Ok(());
         }
         if consumed > read_pos {
             // The decoder skipped past everything buffered (e.g. an initial --start
@@ -62,6 +51,28 @@ pub fn decode_all(
         }
         base = consumed;
     }
+}
+
+/// Decode the whole input serially. Like the multithreaded path, the input is
+/// streamed once from the stream start and the decoder skips past everything
+/// before `start_offset` itself (so this works on non-seekable inputs such as
+/// pipes); `start_offset` is taken directly rather than inferred from the
+/// reader's position.
+pub fn decode_all(
+    reader: &mut DecodeReader,
+    writer: &mut DecodeWriter,
+    spec: Arc<DecoderSpec>,
+    start_offset: u64,
+) -> Result<()> {
+    let mut decoder = Decoder::new(Arc::clone(&spec), start_offset);
+    let mut fields_written = 0usize;
+    decode_serial(reader, &mut decoder, &spec, |fields, metadata| {
+        for field in fields {
+            writer.write_writeable(field, metadata)?;
+        }
+        fields_written += fields.len();
+        Ok(true)
+    })?;
 
     if fields_written != 0 {
         tracing::info!("Completed: saving JSON and exiting.");
@@ -71,6 +82,26 @@ pub fn decode_all(
 
     writer.close(decoder.metadata())?;
     Ok(())
+}
+
+/// Calibration pass for the ME-SECAM carrier servo: decode up to `max_fields`
+/// fields from `start_offset`, discarding the pictures, and report the
+/// conversion LO trim the servo converged to (`None` without a usable carrier
+/// measurement). The reader is left where the pass stopped; the caller rewinds
+/// it before the real decode.
+pub fn calibrate_secam_lo_trim(
+    reader: &mut DecodeReader,
+    spec: Arc<DecoderSpec>,
+    start_offset: u64,
+    max_fields: usize,
+) -> Result<Option<f64>> {
+    let mut decoder = Decoder::new(Arc::clone(&spec), start_offset);
+    let mut decoded = 0usize;
+    decode_serial(reader, &mut decoder, &spec, |fields, _| {
+        decoded += fields.len();
+        Ok(decoded < max_fields)
+    })?;
+    Ok(decoder.secam_lo_trim())
 }
 
 // ============================================================================
@@ -125,8 +156,16 @@ fn luma_matches(a: &LumaOutput, b: &LumaOutput, mt: &MtParams) -> bool {
     }
 }
 
-/// Whether two fields are equal enough to stitch.
-fn fields_match(a: &WriteableField, b: &WriteableField, mt: &MtParams) -> bool {
+/// Whether two fields are equal enough to stitch. With `compare_chroma` off
+/// only the luma decides: chroma whose carrier phase continues across fields
+/// (see [`DecoderSpec::chroma_phase_continuous`]) never agrees between two
+/// decoders, so a stitch there accepts one carrier phase step in the output.
+fn fields_match(
+    a: &WriteableField,
+    b: &WriteableField,
+    mt: &MtParams,
+    compare_chroma: bool,
+) -> bool {
     if a.info.is_first_field != b.info.is_first_field {
         return false;
     }
@@ -135,6 +174,9 @@ fn fields_match(a: &WriteableField, b: &WriteableField, mt: &MtParams) -> bool {
     }
     if !luma_matches(a.luma(), b.luma(), mt) {
         return false;
+    }
+    if !compare_chroma {
+        return true;
     }
     match (a.chroma(), b.chroma()) {
         (Some(x), Some(y)) => {
@@ -759,7 +801,12 @@ impl<'a> MtOrchestrator<'a> {
                 _ => return false,
             }
         };
-        let matched = fields_match(current_field, &aligned, &self.mt);
+        let matched = fields_match(
+            current_field,
+            &aligned,
+            &self.mt,
+            !self.spec.chroma_phase_continuous(),
+        );
         if matched {
             // The aligned field is the same field, so this maps `next`'s count
             // onto the global one.

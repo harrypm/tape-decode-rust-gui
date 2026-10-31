@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context as _, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
-use crate::decode::{decode_all, decode_all_mt, MtParams};
+use crate::decode::{calibrate_secam_lo_trim, decode_all, decode_all_mt, MtParams};
 use crate::fields_match::{f32_msre, wrapped_u16_msre};
 use crate::metadata::{PcmAudioParameters, TbcMetadataFull, VideoParameters};
 use crate::os;
@@ -23,6 +23,8 @@ use tape_decode::{
 
 const DEFAULT_THRESHOLD_P_DDD: f32 = 0.18;
 const DEFAULT_HYSTERESIS: f32 = 1.25;
+/// Fields the SECAM carrier servo calibration pass decodes at most.
+const SECAM_CALIBRATION_FIELDS: usize = 60;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliFieldOrderAction {
@@ -227,8 +229,8 @@ struct DecodeArgs {
     /// Disable burst-based hsync correction.
     #[arg(long)]
     disable_burst_hsync: bool,
-    /// SECAM carrier servo mode (ME-SECAM only): 0 never measures the rest carrier pair to fine-tune the chroma up-conversion, 1 measures and adapts during the decode.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=1), default_value_t = 1)]
+    /// SECAM carrier servo mode (ME-SECAM only): 0 never measures the rest carrier pair to fine-tune the chroma up-conversion, 1 measures and adapts during the decode, 2 runs a short calibration decode first and applies its converged LO trim from the first field.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=2), default_value_t = 1)]
     secam_servo_passes: u8,
     /// Seed the SECAM chroma conversion LO trim in Hz (e.g. a converged servo value from a previous run) so it applies from the first field; with --secam-servo-passes 0 it is a fixed trim (ME-SECAM only).
     #[arg(long, value_name = "HZ")]
@@ -386,7 +388,7 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         (None, Some(path)) => load_profile_file(path)?,
         _ => bail!("exactly one of --profile or --profile-file is required"),
     };
-    let request = DecodeRequest {
+    let mut request = DecodeRequest {
         inputfreq: cli.frequency.unwrap_or(40.0),
 
         chroma_trap: cli.chroma_trap,
@@ -508,11 +510,49 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         _ => None,
     };
 
-    let spec = Arc::new(DecoderSpec::new(&request)?);
+    let mut spec = Arc::new(DecoderSpec::new(&request)?);
     let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
     let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out)?;
     let start_offset = cli.offset.unwrap_or(0);
 
+    if cli.secam_servo_passes == 2
+        && request.secam_lo_trim.is_none()
+        && spec.chroma_phase_continuous()
+    {
+        // First pass: decode a bounded stretch to converge the carrier servo,
+        // then seed the real decode with its trim so it applies from the very
+        // first field. That needs the input read twice.
+        if !reader.is_seekable() {
+            bail!("--secam-servo-passes 2 decodes the input twice, which a pipe cannot be; use a file, or seed --secam-lo-trim from a previous run");
+        }
+        tracing::info!(
+            "SECAM servo two-pass: calibration decode of up to {} fields...",
+            SECAM_CALIBRATION_FIELDS
+        );
+        let calibration = DecodeRequest {
+            do_dod: false,
+            ..request.clone()
+        };
+        let trim = calibrate_secam_lo_trim(
+            &mut reader,
+            Arc::new(DecoderSpec::new(&calibration)?),
+            start_offset,
+            SECAM_CALIBRATION_FIELDS,
+        )?;
+        reader.seek_samples(0)?;
+        match trim {
+            Some(trim) => {
+                tracing::info!(
+                    "SECAM servo two-pass: converged LO trim {trim:.0} Hz, starting decode"
+                );
+                request.secam_lo_trim = Some(trim);
+                spec = Arc::new(DecoderSpec::new(&request)?);
+            }
+            None => tracing::warn!(
+                "SECAM servo two-pass: no usable carrier measurements, starting decode without a seeded trim"
+            ),
+        }
+    }
     // Both paths stream the input once from the start (so they work on non-seekable
     // inputs) and take `start_offset` directly.
     if cli.mt_threads == 0 {

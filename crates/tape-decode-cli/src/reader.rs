@@ -129,6 +129,10 @@ impl<F: SampleEncoding> SampleSource for Source<F> {
         Ok(samples)
     }
 
+    fn is_seekable(&self) -> bool {
+        self.stream.is_seekable()
+    }
+
     fn seek_samples(&mut self, sample: u64) -> Result<()> {
         let target = sample
             .checked_mul(F::BYTES as u64)
@@ -160,6 +164,9 @@ pub trait SampleSource: Send {
     /// Read up to `out.len()` samples; a count below `out.len()` means EOF. A
     /// trailing partial sample at EOF is dropped. Sequential-only, valid on pipes.
     fn read(&mut self, out: &mut [f32]) -> Result<usize>;
+    /// Whether the input can be repositioned backward (a regular file rather
+    /// than a pipe).
+    fn is_seekable(&self) -> bool;
     /// Seek to absolute sample `sample`.
     fn seek_samples(&mut self, sample: u64) -> Result<()>;
 }
@@ -211,6 +218,10 @@ impl DecodeReader {
                 Ok(0)
             }
         }
+    }
+
+    pub fn is_seekable(&self) -> bool {
+        self.source.is_seekable()
     }
 
     pub fn seek_samples(&mut self, sample: u64) -> Result<()> {

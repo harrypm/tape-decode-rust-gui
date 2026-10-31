@@ -160,6 +160,10 @@ impl SampleSource for FlacSource {
         Ok(written)
     }
 
+    fn is_seekable(&self) -> bool {
+        self.seekable
+    }
+
     fn seek_samples(&mut self, sample: u64) -> Result<()> {
         if self.seekable {
             // Jump to the packet containing `sample` via symphonia's binary
