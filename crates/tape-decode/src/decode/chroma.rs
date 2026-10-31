@@ -1,4 +1,5 @@
 use super::*;
+use rustfft::num_complex::Complex64;
 
 const SIGNED_SAMPLE_MAX: f32 = 32767.0;
 /// Output value of zero chroma.
@@ -101,35 +102,54 @@ fn upconvert_chroma(
 
 /// Upconvert each line with its heterodyne rotated so that the line's burst
 /// lands on `target_phase` (degrees), instead of one rotation for the field.
+/// The heterodyne runs at the line's fitted subcarrier frequency and chirps
+/// towards the next line's, so a slowly drifting carrier is tracked without
+/// phase steps at the line boundaries.
 fn upconvert_chroma_phase_comp(
     chroma: &[f32],
     field: &DecodedField,
+    spec: &DecoderSpec,
     phase_sequence: &[PhaseSequenceEntry],
-    chroma_heterodyne: &[Vec<f32>],
     target_phase: f32,
 ) -> Vec<f32> {
-    let mut uphet = vec![0.0f32; chroma.len()];
-    // The heterodyne rows are -cos(a) and sin(a) of the carrier phase, and
-    // -cos(a + b) = -cos(a) cos(b) + sin(a) sin(b), so rotating a line by b is
-    // a fixed mix of the two rows with no per-sample trigonometry.
-    let (neg_cos_row, sin_row) = (&chroma_heterodyne[0], &chroma_heterodyne[1]);
+    use std::f64::consts::FRAC_PI_2;
 
-    for entry in phase_sequence {
+    let mut uphet = vec![0.0f32; chroma.len()];
+    let fsc_hz = spec.sys_fsc_mhz * 1e6;
+    let color_under = spec.decoder_color_under_carrier;
+    // Phase advance per output sample of the nominal heterodyne (the sum of
+    // the subcarrier, a quarter turn per sample, and the color-under carrier).
+    let nominal_step = FRAC_PI_2 * (1.0 + color_under / fsc_hz);
+    // Each line's carrier scaled by its measured subcarrier error.
+    let het_hz = |entry: &PhaseSequenceEntry| entry.burst.frequency / fsc_hz * color_under;
+
+    for (idx, entry) in phase_sequence.iter().enumerate() {
         let (start, end) = line_bounds(field, chroma.len(), entry.line_number);
         if start >= end {
             continue;
         }
 
-        let rotation = entry.heterodyne_phase as f32 * std::f32::consts::FRAC_PI_2
-            + (target_phase + entry.burst.phase).to_radians();
-        let (sin_b, cos_b) = rotation.sin_cos();
-        for (((out, &sample), &neg_cos), &sin) in uphet[start..end]
-            .iter_mut()
-            .zip(&chroma[start..end])
-            .zip(&neg_cos_row[start..end])
-            .zip(&sin_row[start..end])
-        {
-            *out = sample * neg_cos.mul_add(cos_b, sin * sin_b);
+        let het_hz_current = het_hz(entry);
+        let het_hz_next = phase_sequence.get(idx + 1).map_or(het_hz_current, het_hz);
+        let theta_0 = nominal_step * start as f64
+            + entry.heterodyne_phase as f64 * FRAC_PI_2
+            + f64::from(target_phase + entry.burst.phase).to_radians();
+        let step = FRAC_PI_2 * (1.0 + het_hz_current / fsc_hz);
+        // Half the per-sample step change that reaches the next line's rate by
+        // the end of the line: theta_k = theta_0 + step k + chirp k^2.
+        let chirp = 0.5 * (het_hz_next - het_hz_current) * FRAC_PI_2 / (fsc_hz * field.outlinelen as f64);
+        let dc = f64::from(entry.burst.dc);
+
+        // Walk the phasor exp(i theta_k) instead of evaluating the cosine per
+        // sample: the step between samples grows by a constant 2 chirp, so both
+        // are complex multiplications.
+        let mut phasor = Complex64::from_polar(1.0, theta_0);
+        let mut phasor_step = Complex64::from_polar(1.0, step + chirp);
+        let phasor_step_step = Complex64::from_polar(1.0, 2.0 * chirp);
+        for (out, &sample) in uphet[start..end].iter_mut().zip(&chroma[start..end]) {
+            *out = (f64::from(sample) * -phasor.re - dc) as f32;
+            phasor *= phasor_step;
+            phasor_step *= phasor_step_step;
         }
     }
 
@@ -232,8 +252,8 @@ fn process_chroma_internal(
         upconvert_chroma_phase_comp(
             &chroma,
             field,
+            spec,
             phase_sequence,
-            &spec.rf_chroma_heterodyne,
             NTSC_TARGET_BURST_PHASE,
         )
     } else {

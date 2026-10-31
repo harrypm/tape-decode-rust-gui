@@ -508,6 +508,7 @@ struct BurstMeasurement {
     magnitude: f32,
     /// Fitted subcarrier frequency in Hz.
     frequency: f64,
+    dc: f32,
     /// Burst center in output samples from the line start.
     center: f64,
     /// Correlation sums against the reference cosine and sine.

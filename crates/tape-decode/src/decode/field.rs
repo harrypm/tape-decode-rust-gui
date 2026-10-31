@@ -40,6 +40,7 @@ fn demod_burst(
         phase: (fit.phase.to_degrees().rem_euclid(360.0)) as f32,
         magnitude: (fit.amplitude * len / 2.0) as f32,
         frequency: fit.frequency,
+        dc: fit.dc as f32,
         center: (burst_start - line_start) as f64 + (len - 1.0) / 2.0 + phase_samples,
         i,
         q,
