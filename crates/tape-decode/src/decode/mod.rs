@@ -188,6 +188,18 @@ fn ifft_complex_owned_f32(
     buffer
 }
 
+/// Analytic-signal spectrum from the `n/2 + 1` unique bins: keep DC and
+/// Nyquist, double the interior bins, zero the negative frequencies.
+fn analytic_spectrum(half: &[Complex32], n: usize) -> Vec<Complex32> {
+    assert_eq!(half.len(), (n / 2) + 1);
+    let mut spectrum = Vec::with_capacity(n);
+    spectrum.push(half[0]);
+    spectrum.extend(half[1..half.len() - 1].iter().map(|&bin| bin * 2.0));
+    spectrum.push(half[half.len() - 1]);
+    spectrum.resize(n, Complex32::new(0.0, 0.0));
+    spectrum
+}
+
 fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> {
     if data.len() < 3 {
         bail!("cafc_fft_center_freq requires at least three samples");
@@ -670,9 +682,15 @@ impl<T: Float + std::iter::Sum> StackableMa<T> {
     fn pull(&mut self) -> Option<T> {
         let keep_from = self.stack.len().saturating_sub(self.window_average);
         self.stack.drain(..keep_from);
-        (!self.stack.is_empty()).then(|| {
-            let sum: T = self.stack.iter().copied().sum();
-            sum / T::from(self.stack.len()).unwrap()
+        self.window_mean()
+    }
+
+    /// Mean of the newest `window_average` values (what `pull` trims to).
+    fn window_mean(&self) -> Option<T> {
+        let window = &self.stack[self.stack.len().saturating_sub(self.window_average)..];
+        (!window.is_empty()).then(|| {
+            let sum: T = window.iter().copied().sum();
+            sum / T::from(window.len()).unwrap()
         })
     }
 
@@ -740,12 +758,11 @@ impl ChromaAfcState {
     fn gen_het_c(&mut self, config: &DecoderSpec) {
         let het_freq = config.sys_fsc_mhz + self.cc_freq_mhz;
         let het_wave_scale = het_freq / (config.sys_fsc_mhz * 4.0);
-        let field_lines = config.sys_field_lines[0].max(config.sys_field_lines[1]);
         self.chroma_heterodyne = gen_chroma_heterodyne(
             het_wave_scale,
             // This is the last cc phase measured as it comes from the tape
             self.cc_phase,
-            config.sys_outlinelen * field_lines as usize,
+            config.fieldlen(),
         );
     }
 
@@ -797,6 +814,71 @@ impl ChromaAfcState {
             FilterBandType::Bandpass,
         )?;
         Ok(narrow_sos(&sos))
+    }
+}
+
+// Mutable state of the ME-SECAM chroma up-conversion: the carrier servo's
+// smoothed rest carrier pair offset trims the conversion LO, and the
+// heterodyne carries its phase on from field to field.
+#[derive(Clone)]
+struct ConversionLoState {
+    servo_avg: StackableMa<f64>,
+    lo_trim: f64,
+    /// Output sample position of the current field's start.
+    het_sample_offset: i64,
+    chroma_heterodyne: Vec<Vec<f32>>,
+}
+
+impl ConversionLoState {
+    fn new(spec: &DecoderSpec) -> Self {
+        let mut servo_avg = StackableMa::new(2, 60);
+        if let Some(seed) = spec.secam_lo_trim {
+            // Pushed past the watermark so it applies from the first field;
+            // the servo keeps adapting from it, or holds it with the servo off.
+            for _ in 0..3 {
+                servo_avg.push(seed);
+            }
+        }
+        Self {
+            servo_avg,
+            lo_trim: 0.0,
+            het_sample_offset: 0,
+            chroma_heterodyne: Self::gen_heterodyne(spec, 0.0, 0),
+        }
+    }
+
+    fn gen_heterodyne(spec: &DecoderSpec, lo_trim: f64, het_sample_offset: i64) -> Vec<Vec<f32>> {
+        let conversion_lo = spec
+            .decoder_chroma_conversion_lo
+            .expect("conversion LO state without a conversion LO");
+        let het_wave_scale = (conversion_lo + lo_trim) / spec.tbc_sample_rate();
+        // Continue the carrier phase from where the previous fields left off,
+        // so the restored FM carrier has no phase step (a chroma click to a
+        // SECAM decoder) at field boundaries.
+        let phase_offset =
+            std::f64::consts::TAU * (het_wave_scale * het_sample_offset as f64).rem_euclid(1.0);
+        gen_chroma_heterodyne(het_wave_scale, phase_offset, spec.fieldlen())
+    }
+
+    /// The heterodyne for the field starting `het_sample_offset` output
+    /// samples into the stream, with the LO trimmed by the servo's settled
+    /// average, quantized to 10 Hz steps so measurement noise does not dither
+    /// it.
+    fn heterodyne(&mut self, spec: &DecoderSpec, het_sample_offset: i64) -> &[Vec<f32>] {
+        let lo_trim = self
+            .servo_avg
+            .has_values()
+            .then(|| self.servo_avg.pull())
+            .flatten()
+            .map_or(0.0, |avg| {
+                ((avg / 10.0).round_ties_even() * 10.0).clamp(-10e3, 10e3)
+            });
+        if lo_trim != self.lo_trim || het_sample_offset != self.het_sample_offset {
+            self.lo_trim = lo_trim;
+            self.het_sample_offset = het_sample_offset;
+            self.chroma_heterodyne = Self::gen_heterodyne(spec, lo_trim, het_sample_offset);
+        }
+        &self.chroma_heterodyne
     }
 }
 
@@ -1290,6 +1372,7 @@ pub struct Decoder {
     inter_field_state: InterFieldState,
     resync_state: ResyncState,
     chroma_afc_state: ChromaAfcState,
+    conversion_lo: Option<ConversionLoState>,
     fields: Vec<FieldInfoEntry>,
     seen_first_field: bool,
     metadata_field: Option<MetadataFieldState>,
@@ -1304,6 +1387,9 @@ impl Decoder {
         let inter_field_state = InterFieldState::new(spec.track_phase);
         let resync_state = ResyncState::new(&spec);
         let chroma_afc_state = ChromaAfcState::new(&spec);
+        let conversion_lo = spec
+            .chroma_phase_continuous()
+            .then(|| ConversionLoState::new(&spec));
         Self {
             spec,
             fdoffset,
@@ -1311,6 +1397,7 @@ impl Decoder {
             inter_field_state,
             resync_state,
             chroma_afc_state,
+            conversion_lo,
             fields: Vec::new(),
             seen_first_field: false,
             metadata_field: None,
@@ -1518,8 +1605,12 @@ impl Decoder {
                             outlinecount: field_obj.outlinecount,
                         });
 
-                        picture_chroma =
-                            decode_chroma(&mut field_obj, &self.spec, &mut self.chroma_afc_state)?;
+                        picture_chroma = decode_chroma(
+                            &mut field_obj,
+                            &self.spec,
+                            &mut self.chroma_afc_state,
+                            self.conversion_lo.as_mut(),
+                        )?;
 
                         field_done = true;
                     }
@@ -1695,6 +1786,16 @@ impl Decoder {
         }
 
         Ok((self.fdoffset, output))
+    }
+
+    /// The ME-SECAM carrier servo's current estimate of the conversion LO
+    /// trim in Hz (the unquantized average of its recent rest carrier pair
+    /// measurements), or `None` without any. A calibration decode reads this
+    /// to seed the real decode.
+    pub fn secam_lo_trim(&self) -> Option<f64> {
+        self.conversion_lo
+            .as_ref()
+            .and_then(|lo| lo.servo_avg.window_mean())
     }
 
     pub fn metadata(&self) -> Option<DecoderMetadata> {

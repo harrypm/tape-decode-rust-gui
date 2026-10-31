@@ -227,6 +227,12 @@ struct DecodeArgs {
     /// Disable burst-based hsync correction.
     #[arg(long)]
     disable_burst_hsync: bool,
+    /// SECAM carrier servo mode (ME-SECAM only): 0 never measures the rest carrier pair to fine-tune the chroma up-conversion, 1 measures and adapts during the decode.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=1), default_value_t = 1)]
+    secam_servo_passes: u8,
+    /// Seed the SECAM chroma conversion LO trim in Hz (e.g. a converged servo value from a previous run) so it applies from the first field; with --secam-servo-passes 0 it is a fixed trim (ME-SECAM only).
+    #[arg(long, value_name = "HZ")]
+    secam_lo_trim: Option<f64>,
     /// Disable chroma comb filtering.
     #[arg(long)]
     no_comb: bool,
@@ -426,6 +432,8 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_enable_color_killer: cli.enable_color_killer,
         rf_disable_burst_hsync: cli.disable_burst_hsync || !profile.decode_options.burst_hsync,
         rf_disable_phase_correction: cli.disable_phase_correction,
+        rf_secam_carrier_servo: cli.secam_servo_passes >= 1,
+        secam_lo_trim: cli.secam_lo_trim,
 
         wow_level_adjust_smoothing: cli.wow_level_adjust_smoothing,
         wow_interpolation_method: cli.wow_interpolation_method.into(),
@@ -504,6 +512,7 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
     let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
     let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out)?;
     let start_offset = cli.offset.unwrap_or(0);
+
     // Both paths stream the input once from the start (so they work on non-seekable
     // inputs) and take `start_offset` directly.
     if cli.mt_threads == 0 {

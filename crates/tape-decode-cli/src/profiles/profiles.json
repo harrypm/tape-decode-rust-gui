@@ -68,8 +68,9 @@
           "start_freq": 626953.0
         },
         "chroma_bpf_upper": 1300000.0,
+        "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732400.0,
+        "color_under_carrier": 732446.875,
         "fm_audio_channels": {
           "channel_0_freq": 1400000.0,
           "channel_1_freq": 1800000.0
@@ -104,8 +105,9 @@
           "start_freq": 626953.0
         },
         "chroma_bpf_upper": 1300000.0,
+        "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732400.0,
+        "color_under_carrier": 732446.875,
         "fm_audio_channels": {
           "channel_0_freq": 1400000.0,
           "channel_1_freq": 1800000.0
@@ -140,8 +142,9 @@
           "start_freq": 626953.0
         },
         "chroma_bpf_upper": 1300000.0,
+        "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732400.0,
+        "color_under_carrier": 732446.875,
         "fm_audio_channels": {
           "channel_0_freq": 1400000.0,
           "channel_1_freq": 1800000.0
@@ -176,8 +179,9 @@
           "start_freq": 626953.0
         },
         "chroma_bpf_upper": 1300000.0,
+        "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732400.0,
+        "color_under_carrier": 732446.875,
         "fm_audio_channels": {
           "channel_0_freq": 1400000.0,
           "channel_1_freq": 1800000.0

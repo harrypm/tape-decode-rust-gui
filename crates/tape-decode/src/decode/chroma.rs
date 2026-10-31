@@ -190,6 +190,7 @@ fn process_chroma_internal(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
+    mut conversion_lo: Option<&mut ConversionLoState>,
 ) -> Result<Vec<u16>> {
     let burst_start_line = field.burst_start_line();
     if burst_start_line == -1 {
@@ -197,6 +198,21 @@ fn process_chroma_internal(
     }
 
     let mut chroma = tracked_chroma(field, spec, chroma_afc_state)?;
+    if let Some(lo) = conversion_lo
+        .as_deref_mut()
+        .filter(|_| spec.rf_secam_carrier_servo)
+    {
+        // Measure the rest carrier pair on the late back porch, 3.7 to 0.3 us
+        // before active video starts.
+        let active_start_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as isize;
+        let porch = (active_start_px - 65, active_start_px - 5);
+        if let Some(offset) =
+            secam_under_carrier_offset(spec, &chroma, field.outlinecount, field.outlinelen, porch)
+        {
+            lo.servo_avg.push(offset);
+            tracing::debug!(offset_hz = offset, "SECAM carrier servo measurement");
+        }
+    }
     let burstarea = padded_burst_area(spec);
 
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
@@ -221,12 +237,14 @@ fn process_chroma_internal(
             NTSC_TARGET_BURST_PHASE,
         )
     } else {
-        upconvert_chroma(
-            &chroma,
-            field,
-            phase_sequence,
-            active_chroma_heterodyne(spec, chroma_afc_state),
-        )
+        let chroma_heterodyne = match conversion_lo {
+            Some(lo) => lo.heterodyne(
+                spec,
+                field.field_number * (field.outlinecount * field.outlinelen) as i64,
+            ),
+            None => active_chroma_heterodyne(spec, chroma_afc_state),
+        };
+        upconvert_chroma(&chroma, field, phase_sequence, chroma_heterodyne)
     };
 
     uphet = sosfiltfilt_f32(&spec.chroma_filter_final, &uphet);
@@ -279,6 +297,7 @@ pub(crate) fn decode_chroma(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
+    conversion_lo: Option<&mut ConversionLoState>,
 ) -> Result<Option<Vec<u16>>> {
     if spec.color_system == ColorSystem::Monochrome {
         return Ok(None);
@@ -291,6 +310,110 @@ pub(crate) fn decode_chroma(
         }
         return Ok(None);
     }
-    let upconverted = process_chroma_internal(field, spec, chroma_afc_state)?;
+    let upconverted = process_chroma_internal(field, spec, chroma_afc_state, conversion_lo)?;
     Ok(Some(upconverted))
+}
+
+/// Analytic signal of `data` (its Hilbert transform as the imaginary part)
+/// through the zero-padded transform pair.
+fn analytic_signal(
+    data: &[f32],
+    (r2c, inverse): &(Arc<dyn RealToComplex<f32>>, Arc<dyn Fft<f32>>),
+) -> Vec<Complex32> {
+    let n = r2c.len();
+    let mut padded = vec![0.0f32; n];
+    padded[..data.len()].copy_from_slice(data);
+    let mut half = r2c.make_output_vec();
+    r2c.process(&mut padded, &mut half)
+        .expect("r2c forward FFT failed");
+    let mut spectrum = analytic_spectrum(&half, n);
+    fft_in_place_f32(&mut spectrum, inverse.as_ref(), true);
+    spectrum.truncate(data.len());
+    spectrum
+}
+
+/// Phase advance from `a` to `b`, in (-pi, pi].
+fn phase_step(a: Complex32, b: Complex32) -> f64 {
+    let (ar, ai) = (f64::from(a.re), f64::from(a.im));
+    let (br, bi) = (f64::from(b.re), f64::from(b.im));
+    // arg(b * conj(a))
+    (bi * ar - br * ai).atan2(br * ar + bi * ai)
+}
+
+/// Offset in Hz of the ME-SECAM colour-under rest carrier pair from its
+/// nominal centre, measured over `porch` (output samples from each line's
+/// start) on the late back porch, where the subcarrier sits undeviated; the
+/// early porch is still sweeping from the previous line's carrier switch.
+/// The pair midpoint moves with the recording VCR's down-conversion crystal
+/// error, which otherwise offsets both restored subcarriers. Single-field
+/// accuracy is about +-100 Hz (ringing from the per-line carrier switch beats
+/// across the short window), which averaging over fields washes out; the
+/// crystal errors chased are in the kHz range. `None` without a reliable
+/// pair.
+fn secam_under_carrier_offset(
+    spec: &DecoderSpec,
+    chroma: &[f32],
+    linesout: usize,
+    outwidth: usize,
+    porch: (isize, isize),
+) -> Option<f64> {
+    // Stay clear of the vertical interval and the head switch.
+    const SKIP_LINES: usize = 20;
+    const MIN_LINES_PER_CLUSTER: usize = 8;
+    // The carriers are nominally 156.25 kHz apart; reject measurements where
+    // the two clusters land somewhere else entirely.
+    const SEPARATION_RANGE: std::ops::RangeInclusive<f64> = 90e3..=230e3;
+
+    let fft = spec.secam_servo_fft.as_ref()?;
+    let pair_center = spec.decoder_color_under_carrier;
+    let freq_scale = spec.tbc_sample_rate() / std::f64::consts::TAU;
+    // Over the whole field, so the short per-line windows are free of
+    // transform edge effects (a windowed transform of just the porch would
+    // bias the frequency estimate by hundreds of Hz).
+    let analytic = analytic_signal(chroma, fft);
+
+    let mut freqs = Vec::new();
+    let mut envs = Vec::new();
+    for line in SKIP_LINES..linesout.saturating_sub(SKIP_LINES) {
+        let line_start = (line * outwidth) as isize;
+        let (start, end) = (line_start + porch.0, line_start + porch.1);
+        if start < 0 || end > analytic.len() as isize {
+            continue;
+        }
+        let window = &analytic[start as usize..end as usize];
+        // Instantaneous frequency; the median rejects FM clicks and noise
+        // spikes.
+        let mut f_inst: Vec<f64> = window
+            .windows(2)
+            .map(|pair| phase_step(pair[0], pair[1]) * freq_scale)
+            .collect();
+        let mut env: Vec<f64> = window
+            .iter()
+            .map(|sample| f64::from(sample.norm()))
+            .collect();
+        freqs.push(median_from_values(&mut f_inst));
+        envs.push(median_from_values(&mut env));
+    }
+    if freqs.is_empty() {
+        return None;
+    }
+
+    // Ignore lines whose porch carrier is too weak to measure (dropouts,
+    // colour killed lines).
+    let env_threshold = median_from_values(&mut envs.clone()) * 0.25;
+    let (mut low, mut high): (Vec<f64>, Vec<f64>) = freqs
+        .iter()
+        .zip(&envs)
+        .filter(|&(_, &env)| env > env_threshold)
+        .map(|(&freq, _)| freq)
+        .partition(|&freq| freq < pair_center);
+    if low.len() < MIN_LINES_PER_CLUSTER || high.len() < MIN_LINES_PER_CLUSTER {
+        return None;
+    }
+    let low_carrier = median_from_values(&mut low);
+    let high_carrier = median_from_values(&mut high);
+    if !SEPARATION_RANGE.contains(&(high_carrier - low_carrier)) {
+        return None;
+    }
+    Some((low_carrier + high_carrier) / 2.0 - pair_center)
 }

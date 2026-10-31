@@ -180,6 +180,12 @@ pub struct DecoderParams {
     pub chroma_bpf_upper: f64,
     pub chroma_bpf_order: usize,
     pub chroma_bpf_lower: f64,
+    /// Explicit colour-under conversion LO in Hz (ME-SECAM). The chroma is
+    /// then upconverted against it, referenced to the true TBC output rate,
+    /// instead of against fsc plus the colour-under carrier, which only
+    /// centres the band-pass.
+    #[serde(default)]
+    pub chroma_conversion_lo: Option<f64>,
     pub chroma_rotation: Option<[i64; 2]>,
     pub chroma_audio_notch_freq: f64,
     pub chroma_offset: f64,
@@ -309,6 +315,10 @@ pub struct DecodeRequest {
     pub rf_enable_color_killer: bool,
     pub rf_disable_burst_hsync: bool,
     pub rf_disable_phase_correction: bool,
+    /// Measure the ME-SECAM rest carrier pair to trim the conversion LO.
+    pub rf_secam_carrier_servo: bool,
+    /// Conversion LO trim in Hz the ME-SECAM servo average starts from.
+    pub secam_lo_trim: Option<f64>,
 
     // Extra options.
     pub wow_level_adjust_smoothing: Option<f32>,

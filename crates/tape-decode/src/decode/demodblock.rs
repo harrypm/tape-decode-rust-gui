@@ -99,18 +99,6 @@ fn irfft_f32(input: &[Complex32], n: Option<usize>, c2r: &dyn ComplexToReal<f32>
     irfft_owned_f32(input.to_vec(), n, c2r)
 }
 
-/// Analytic-signal spectrum from the `n/2 + 1` unique bins: keep DC and
-/// Nyquist, double the interior bins, zero the negative frequencies.
-fn analytic_spectrum(half: &[Complex32], n: usize) -> Vec<Complex32> {
-    assert_eq!(half.len(), (n / 2) + 1);
-    let mut spectrum = Vec::with_capacity(n);
-    spectrum.push(half[0]);
-    spectrum.extend(half[1..half.len() - 1].iter().map(|&bin| bin * 2.0));
-    spectrum.push(half[half.len() - 1]);
-    spectrum.resize(n, Complex32::new(0.0, 0.0));
-    spectrum
-}
-
 fn sub_deemphasis(
     spec: &DecoderSpec,
     out_video: &[f32],

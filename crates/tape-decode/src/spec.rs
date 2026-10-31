@@ -64,6 +64,7 @@ pub struct DecoderSpec {
     pub(crate) decoder_chroma_bpf_upper: f64,
     pub(crate) decoder_chroma_bpf_order: usize,
     pub(crate) decoder_chroma_bpf_lower: f64,
+    pub(crate) decoder_chroma_conversion_lo: Option<f64>,
     pub(crate) decoder_chroma_rotation: Option<[i64; 2]>,
     pub(crate) decoder_chroma_offset: f64,
     pub(crate) decoder_nonlinear_highpass_limit_l: f32,
@@ -83,6 +84,10 @@ pub struct DecoderSpec {
 
     pub(crate) chroma_afc_narrowband: Vec<Vec<Sos<f32>>>,
     pub(crate) chroma_afc_fine_tune_fh_ratio: f64,
+    // Analytic-signal transform pair for the ME-SECAM carrier servo: a real
+    // forward transform and the complex inverse, at a fast length padded past
+    // the field. None unless the servo runs.
+    pub(crate) secam_servo_fft: Option<(Arc<dyn RealToComplex<f32>>, Arc<dyn Fft<f32>>)>,
 
     pub(crate) dod_threshold_p: f32,
     pub(crate) dod_threshold_a: Option<f32>,
@@ -108,6 +113,8 @@ pub struct DecoderSpec {
     pub(crate) rf_enable_color_killer: bool,
     pub(crate) rf_disable_burst_hsync: bool,
     pub(crate) rf_disable_phase_correction: bool,
+    pub(crate) rf_secam_carrier_servo: bool,
+    pub(crate) secam_lo_trim: Option<f64>,
 
     pub(crate) chroma_burst_block_fft_gain: Vec<f32>,
     pub(crate) chroma_filter_video_notch: Option<Vec<Sos<f32>>>,
@@ -166,7 +173,16 @@ impl DecoderSpec {
         } else {
             sys_params.color_system
         };
-        let do_cafc = request.cafc;
+        // cafc measures a single carrier peak, which the line-alternating
+        // two-carrier SECAM FM chroma does not have.
+        let do_cafc = if request.cafc && rf_color_system == ColorSystem::Secam {
+            tracing::warn!(
+                "cafc is not supported for SECAM systems, ignoring (for ME-SECAM, the carrier servo tunes the conversion LO instead)"
+            );
+            false
+        } else {
+            request.cafc
+        };
         // Validated and clamped once here; ResyncCore only reads the result.
         let level_detect_divisor = {
             let requested = request.level_detect_divisor;
@@ -212,7 +228,12 @@ impl DecoderSpec {
         };
         let fh = sys_params.fps * sys_params.frame_lines.line_count() as f64;
         let color_under = decoder_params.color_under_carrier;
+        let conversion_lo = decoder_params.chroma_conversion_lo;
         let out_sample_rate_mhz = sys_params.fsc_mhz * 4.0;
+        // The rate the TBC output is actually clocked at (outlinelen samples
+        // per line period), which 4 * fsc only approximates after outlinelen
+        // is rounded to whole samples.
+        let tbc_sample_rate = sys_params.outlinelen as f64 * fh;
         let fieldlen =
             sys_params.outlinelen * *sys_params.field_lines.iter().max().unwrap() as usize;
 
@@ -258,6 +279,11 @@ impl DecoderSpec {
         let chroma_output = rf_write_chroma && !request.skip_chroma;
 
         let rf_disable_comb = request.disable_comb || rf_color_system == ColorSystem::Secam;
+        // SECAM has no phase-locked burst: its "burst" is an FM carrier whose
+        // phase carries no timing, so locking hsync to it only injects
+        // sub-pixel jitter into both planes.
+        let rf_disable_burst_hsync =
+            request.rf_disable_burst_hsync || rf_color_system == ColorSystem::Secam;
         let rf_fallback_vsync = request.fallback_vsync;
         let rf_y_comb = request.y_comb * sys_params.hz_ire;
 
@@ -431,18 +457,30 @@ impl DecoderSpec {
             .map(|boost_bpf| request.high_boost.unwrap_or(boost_bpf.mult) as f32);
 
         let chroma_bandpass_final = |color_under_format: bool| -> Result<Vec<Sos<f64>>> {
-            let (lower, upper) = if color_under_format {
-                ((color_under / 1e6) * 0.9, (color_under / 1e6) * 0.75)
-            } else {
+            let (band_low, band_high) = match conversion_lo {
+                Some(conversion_lo) if color_under_format => {
+                    // Place the band around the restored SECAM chroma block
+                    // rather than around fsc. The tight top edge suppresses
+                    // high-side FM splatter from saturated transitions, which
+                    // otherwise reaches downstream discriminators with wide
+                    // take-off filters and turns into clicks and streaks at
+                    // colour edges.
+                    let center = (conversion_lo - color_under) / 1e6;
+                    (center - 0.67, center + 0.55)
+                }
+                _ if color_under_format => (
+                    sys_params.fsc_mhz - (color_under / 1e6) * 0.9,
+                    sys_params.fsc_mhz + (color_under / 1e6) * 0.75,
+                ),
                 // Using a narrow filter atm as this is just used for picking out
                 // burst signal in this case.
-                (0.1, 0.1)
+                _ => (sys_params.fsc_mhz - 0.1, sys_params.fsc_mhz + 0.1),
             };
             butter_sos(
                 4,
                 &[
-                    (sys_params.fsc_mhz - lower) / chroma_afc_out_frequency_half,
-                    (sys_params.fsc_mhz + upper) / chroma_afc_out_frequency_half,
+                    band_low / chroma_afc_out_frequency_half,
+                    band_high / chroma_afc_out_frequency_half,
                 ],
                 FilterBandType::Bandpass,
             )
@@ -533,15 +571,31 @@ impl DecoderSpec {
         // Post-TBC chroma filter at output sample rate (4fsc).
         let chroma_filter_final = chroma_bandpass_final(is_color_under)?;
         let (rf_chroma_heterodyne, rf_fsc_wave) = if is_color_under {
-            let cc_freq_mhz = color_under / 1e6;
-            let het_freq = sys_params.fsc_mhz + cc_freq_mhz;
-            let het_wave_scale = het_freq / out_sample_rate_mhz;
+            let het_wave_scale = match conversion_lo {
+                // Mix against the recorder's conversion LO directly, at the
+                // true TBC rate so the restored carriers land exactly on their
+                // studio frequencies.
+                Some(conversion_lo) => conversion_lo / tbc_sample_rate,
+                None => (sys_params.fsc_mhz + color_under / 1e6) / out_sample_rate_mhz,
+            };
             (
                 gen_chroma_heterodyne(het_wave_scale, 0.0, fieldlen),
                 fsc_wave,
             )
         } else {
             (Vec::new(), Vec::new())
+        };
+        let rf_secam_carrier_servo = request.rf_secam_carrier_servo;
+        let secam_servo_fft = if conversion_lo.is_some() && rf_secam_carrier_servo {
+            // Zero-padded past the field so the Hilbert transform runs at a
+            // fast length.
+            let n = next_fast_len(fieldlen);
+            Some((
+                fft_real_planner.plan_fft_forward(n),
+                fft_planner_f32.plan_fft_inverse(n),
+            ))
+        } else {
+            None
         };
 
         // Increase the cutoff at the end of blocks to avoid edge distortion from filters making it through.
@@ -599,6 +653,7 @@ impl DecoderSpec {
 
             chroma_afc_narrowband,
             chroma_afc_fine_tune_fh_ratio: decode_options.chroma_afc_fine_tune_fh_ratio,
+            secam_servo_fft,
 
             freq: rf_freq,
             color_system: rf_color_system,
@@ -629,6 +684,7 @@ impl DecoderSpec {
             decoder_chroma_bpf_upper: decoder_params.chroma_bpf_upper,
             decoder_chroma_bpf_order: decoder_params.chroma_bpf_order,
             decoder_chroma_bpf_lower: decoder_params.chroma_bpf_lower,
+            decoder_chroma_conversion_lo: conversion_lo,
             decoder_chroma_rotation: decoder_params.chroma_rotation,
             decoder_chroma_offset: decoder_params.chroma_offset,
             decoder_nonlinear_highpass_limit_l: decoder_params.nonlinear.highpass_limit_l,
@@ -664,8 +720,10 @@ impl DecoderSpec {
             rf_relaxed_line0: request.rf_relaxed_line0,
             rf_detect_chroma_track_phase: request.rf_detect_chroma_track_phase,
             rf_enable_color_killer: request.rf_enable_color_killer,
-            rf_disable_burst_hsync: request.rf_disable_burst_hsync,
+            rf_disable_burst_hsync,
             rf_disable_phase_correction: request.rf_disable_phase_correction,
+            rf_secam_carrier_servo,
+            secam_lo_trim: request.secam_lo_trim,
 
             chroma_burst_block_fft_gain,
             chroma_filter_video_notch: chroma_filter_video_notch.map(store_sos_filter),
@@ -766,6 +824,28 @@ impl DecoderSpec {
     #[inline]
     pub(crate) fn chroma_afc_enabled(&self) -> bool {
         !self.chroma_afc_narrowband.is_empty()
+    }
+
+    /// Output samples per second the TBC actually produces.
+    #[inline]
+    pub(crate) fn tbc_sample_rate(&self) -> f64 {
+        self.sys_outlinelen as f64 * self.chroma_afc_fh()
+    }
+
+    /// Output samples of the longest field: the length of the heterodyne
+    /// tables.
+    #[inline]
+    pub(crate) fn fieldlen(&self) -> usize {
+        self.sys_outlinelen * self.sys_field_lines[0].max(self.sys_field_lines[1]) as usize
+    }
+
+    /// Whether the chroma output carries an FM carrier whose phase continues
+    /// from one field into the next (ME-SECAM). Decoders that reach the same
+    /// field with different field counts or carrier servo histories then write
+    /// different chroma samples for it.
+    #[inline]
+    pub fn chroma_phase_continuous(&self) -> bool {
+        self.chroma_output && self.decoder_chroma_conversion_lo.is_some()
     }
 
     #[inline]
@@ -882,6 +962,22 @@ impl DecoderSpec {
 
 fn t_to_samples(samp_rate: f64, time: f64) -> f64 {
     samp_rate * time
+}
+
+/// Smallest 5-smooth length at or above `n`, which the FFT runs with only
+/// small radices.
+fn next_fast_len(n: usize) -> usize {
+    (n.max(1)..)
+        .find(|&candidate| {
+            let mut rest = candidate;
+            for radix in [2, 3, 5] {
+                while rest % radix == 0 {
+                    rest /= radix;
+                }
+            }
+            rest == 1
+        })
+        .unwrap()
 }
 
 fn gen_wave_at_frequency(
