@@ -904,8 +904,12 @@ pub(crate) fn predecode_field_from_rawdecode(
                                 pending_field.linelocs = Some(refined);
                             }
                         }
-                        let shift33 = 83.0 * (std::f64::consts::PI / 180.0);
-                        let shift = (-shift33 * (spec.freq / (4.0 * 315.0 / 88.0))) as f32;
+                        // Subcarrier phase offset that puts the downscaled image on
+                        // the I/Q colour axes (calibrated for ~147 degrees of output
+                        // burst phase).
+                        let fsc_phase_deg = 117.25;
+                        let shift =
+                            -((fsc_phase_deg / 360.0) / spec.sys_fsc_mhz * spec.freq) as f32;
                         if let Some(linelocs) = pending_field.linelocs.as_mut() {
                             for value in linelocs {
                                 *value += shift;
