@@ -836,7 +836,7 @@
     },
     "sys_params": {
       "base": "NTSC",
-      "burst_abs_ref": 2500.0,
+      "burst_abs_ref": 3760.0,
       "hz_ire": 11428.57142857143,
       "ire0": 4257143.0
     },
@@ -1026,7 +1026,7 @@
     },
     "sys_params": {
       "base": "NTSC",
-      "burst_abs_ref": 2208.0
+      "burst_abs_ref": 2865.0
     }
   },
   "NTSC_VHSHQ_VP": {
@@ -1156,7 +1156,7 @@
     },
     "sys_params": {
       "base": "NTSC",
-      "burst_abs_ref": 2208.0
+      "burst_abs_ref": 2865.0
     }
   },
   "NTSC_VHS_VP": {

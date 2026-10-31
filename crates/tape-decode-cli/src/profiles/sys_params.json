@@ -208,7 +208,7 @@
   "NTSC": {
     "base": "Base525",
     "color_system": "NTSC",
-    "burst_abs_ref": 4416.0,
+    "burst_abs_ref": 5730.0,
     "fsc_mhz": 3.5795454545454546,
     "hz_ire": 7142.857142857143,
     "ire0": 3685714.2857142854,
