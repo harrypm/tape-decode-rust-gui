@@ -195,40 +195,36 @@ fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> 
     }
 
     let sig_fft = fft_real_f32(data, spec.fft_field_forward_f32.as_ref());
-    // The squared-magnitude spectrum is a field-sized buffer; store it as f32
-    // (each magnitude is still computed in f64) — it only feeds the local-peak
-    // search for the cafc carrier bin, which compares well-separated spectral
-    // lines.
-    let power: Vec<f32> = sig_fft
+    // Real input, so only the DC..Nyquist half of the spectrum is searched.
+    // The squared magnitudes stay f32: they only feed a local-peak search over
+    // well-separated spectral lines.
+    let half_bins = data.len() / 2 + 1;
+    let power: Vec<f32> = sig_fft[..half_bins]
         .iter()
         .map(|sample| sample.re.mul_add(sample.re, sample.im * sample.im))
         .collect();
     let max_power = power.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let clip_min = (f64::from(max_power) * DecoderSpec::CHROMA_AFC_POWER_THRESHOLD) as f32;
+    // Flattening everything below the threshold leaves only peaks above it as
+    // local maxima.
+    let clipped_power: Vec<f32> = power
+        .iter()
+        .map(|&value| value.clamp(clip_min, max_power))
+        .collect();
 
     let time_step = 1.0 / (spec.sys_fsc_mhz * 4.0 * 1e6);
     let scale = 1.0 / (data.len() as f64 * time_step);
-    let positive_end = data.len().div_ceil(2);
-    if positive_end <= 2 {
-        bail!("cafc_fft_center_freq has no interior positive-frequency bins");
-    }
-
-    let clipped_power: Vec<f32> = (1..positive_end)
-        .map(|index| power[index].clamp(clip_min, max_power))
-        .collect();
 
     let mut peak_index = None;
     let mut peak_delta = f64::INFINITY;
-    for local_index in 1..clipped_power.len().saturating_sub(1) {
-        if clipped_power[local_index] > clipped_power[local_index - 1]
-            && clipped_power[local_index] > clipped_power[local_index + 1]
+    for index in 1..half_bins - 1 {
+        if clipped_power[index] > clipped_power[index - 1]
+            && clipped_power[index] > clipped_power[index + 1]
         {
-            let fft_index = local_index + 1;
-            let frequency = fft_index as f64 * scale;
-            let delta = (frequency - spec.decoder_color_under_carrier).abs();
+            let delta = (index as f64 * scale - spec.decoder_color_under_carrier).abs();
             if delta < peak_delta {
                 peak_delta = delta;
-                peak_index = Some(fft_index);
+                peak_index = Some(index);
             }
         }
     }
@@ -244,18 +240,12 @@ fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> 
         fine_tune_threshold,
     );
 
-    let mut cc_phase = 0.0;
-    for (index, sample) in sig_fft.iter().enumerate() {
-        let sample_freq = if index < positive_end {
-            index as f64 * scale
-        } else {
-            (index as isize - data.len() as isize) as f64 * scale
-        };
-        if sample_freq == carrier_freq {
-            cc_phase = f64::from(sample.im).atan2(f64::from(sample.re));
-            break;
-        }
-    }
+    // The phase is only known when the tuned carrier lands exactly on a bin.
+    let cc_phase = (0..half_bins)
+        .find(|&index| index as f64 * scale == carrier_freq)
+        .map_or(0.0, |index| {
+            f64::from(sig_fft[index].im).atan2(f64::from(sig_fft[index].re))
+        });
 
     Ok((carrier_freq, cc_phase))
 }
