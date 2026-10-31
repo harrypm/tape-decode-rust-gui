@@ -211,7 +211,7 @@ pub(crate) fn decode_chroma(
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
 ) -> Result<Option<Vec<u16>>> {
-    if !spec.rf_write_chroma || spec.color_system == ColorSystem::Monochrome {
+    if !spec.chroma_output || spec.color_system == ColorSystem::Monochrome {
         return Ok(None);
     }
     let upconverted = process_chroma_internal(field, spec, chroma_afc_state)?;

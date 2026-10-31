@@ -99,6 +99,7 @@ pub struct DecoderSpec {
     pub(crate) rf_saved_levels: bool,
     pub(crate) rf_y_comb: f32,
     pub(crate) rf_write_chroma: bool,
+    pub(crate) chroma_output: bool,
     pub(crate) rf_skip_hsync_refine: bool,
     pub(crate) rf_export_raw_tbc: bool,
     pub(crate) rf_ire0_adjust: bool,
@@ -250,7 +251,10 @@ impl DecoderSpec {
             decoder_params.nonlinear.use_sub_deemphasis || request.subdeemp;
         let chroma_deemphasis_enabled = decoder_params.chroma_deemphasis_enabled;
         let fm_audio_notch = request.fm_audio_notch;
-        let rf_write_chroma = is_color_under && !request.rf_export_raw_tbc && !request.skip_chroma;
+        // Chroma processing, which also locks hsync to the burst, runs for every
+        // color-under format; only producing the chroma output is optional.
+        let rf_write_chroma = is_color_under && !request.rf_export_raw_tbc;
+        let chroma_output = rf_write_chroma && !request.skip_chroma;
 
         let rf_disable_comb = request.disable_comb || rf_color_system == ColorSystem::Secam;
         let rf_fallback_vsync = request.fallback_vsync;
@@ -652,6 +656,7 @@ impl DecoderSpec {
             rf_saved_levels: request.rf_saved_levels,
             rf_y_comb,
             rf_write_chroma,
+            chroma_output,
             rf_skip_hsync_refine: request.rf_skip_hsync_refine,
             rf_export_raw_tbc: request.rf_export_raw_tbc,
             rf_ire0_adjust: request.rf_ire0_adjust,
