@@ -6,7 +6,6 @@ use crate::optimized::{
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
-use crate::DeterministicHashMap;
 use anyhow::{bail, Context as _, Result};
 use num_traits::Float;
 use realfft::{ComplexToReal, RealToComplex};
@@ -842,7 +841,6 @@ struct FieldData {
 struct PrevFieldState {
     readloc: u64,
     field_number: i64,
-    phase_adjust_median: f64,
     burst_start_line: i64,
 }
 
@@ -893,7 +891,6 @@ struct DecodedField {
     linecount: Option<usize>,
     out_scale: Option<f64>,
     field_phase_id: Option<i64>,
-    phase_adjust_median: f64,
     valid: bool,
     sync_confidence: i64,
     burst_lock: Option<BurstLock>,
@@ -1368,7 +1365,6 @@ impl Decoder {
                     .map(|field_obj| PrevFieldState {
                         readloc: field_obj.readloc,
                         field_number: field_obj.field_number,
-                        phase_adjust_median: field_obj.phase_adjust_median,
                         burst_start_line: field_obj.burst_start_line(),
                     });
                 let pending_frac = self.fdoffset_frac + decoded_offset.unwrap_or(0.0);

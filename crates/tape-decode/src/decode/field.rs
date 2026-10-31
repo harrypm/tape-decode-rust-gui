@@ -36,20 +36,6 @@ fn demod_burst(
     })
 }
 
-fn nb_absmax(values: &[f32]) -> f32 {
-    let mut max_value = 0.0;
-    for &value in values {
-        let abs_value = value.abs();
-        if abs_value.is_nan() {
-            return f32::NAN;
-        }
-        if abs_value > max_value {
-            max_value = abs_value;
-        }
-    }
-    max_value
-}
-
 fn resolve_signed_index(len: usize, index: isize) -> Option<usize> {
     if index >= 0 {
         usize::try_from(index).ok().filter(|&index| index < len)
@@ -338,93 +324,6 @@ fn valid_pulses_to_linelocs(
     }
 
     (line_locations, line_location_errs)
-}
-
-fn clb_findbursts(
-    burstarea: &[f32],
-    start: usize,
-    endburstarea: usize,
-    threshold: f32,
-    bstart: f64,
-    s_rem: f64,
-    zcburstdiv: f64,
-    mut phase_adjust: f64,
-    zc_capacity: usize,
-) -> (usize, f64, usize) {
-    if burstarea.is_empty() || zc_capacity == 0 {
-        return (0, phase_adjust, 0);
-    }
-
-    fn clb_calczc_do(
-        data: &[f32],
-        start_offset: usize,
-        target: f32,
-        edge: i64,
-        count: usize,
-    ) -> Option<f64> {
-        let edge = if edge == 0 {
-            if data[start_offset] < target {
-                1
-            } else {
-                -1
-            }
-        } else {
-            edge
-        };
-
-        let search_end = data.len().min(start_offset + count + 1);
-        let loc = data[start_offset..search_end]
-            .windows(2)
-            .position(|window| {
-                if edge == 1 {
-                    window[0] < target && window[1] >= target
-                } else {
-                    window[0] > target && window[1] <= target
-                }
-            })?
-            + 1;
-        let x = start_offset + loc;
-        let a = data[x - 1] - target;
-        let b = data[x] - target;
-        let y = if b - a != 0.0 { -a / (-a + b) } else { 0.0 };
-
-        Some(x as f64 - 1.0 + f64::from(y))
-    }
-
-    let mut zc_count = 0usize;
-    let mut rising_count = 0usize;
-    let mut j = start;
-    let mut isrising = vec![false; zc_capacity];
-    let mut zcs = vec![0.0f64; zc_capacity];
-
-    while j < endburstarea && zc_count < zc_capacity {
-        if burstarea[j].abs() > threshold {
-            let Some(zc) = clb_calczc_do(burstarea, j, 0.0, 0, 16) else {
-                break;
-            };
-
-            isrising[zc_count] = burstarea[j] < 0.0;
-            zcs[zc_count] = zc;
-            zc_count += 1;
-            j = zc as usize + 1;
-        } else {
-            j += 1;
-        }
-    }
-
-    if zc_count != 0 {
-        let mut phase_deltas = Vec::with_capacity(zc_capacity);
-        for i in 0..zc_count {
-            let zc_cycle = ((bstart + zcs[i] - s_rem) / zcburstdiv) + phase_adjust;
-            let zc_round = (zc_cycle + 0.5) as i32;
-            phase_deltas.push(zc_round as f64 - zc_cycle);
-            rising_count += usize::from(isrising[i] ^ (zc_round.rem_euclid(2) != 0));
-        }
-
-        phase_adjust += median_from_values(&mut phase_deltas);
-    }
-
-    (zc_count, phase_adjust, rising_count)
 }
 
 fn rotated_phase(current_phase: usize, track_rotation: i64) -> usize {
@@ -776,23 +675,6 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     Some(linelocs)
 }
 
-fn slice_subtract_mean(data: &[f32], start: isize, end: isize) -> Option<Vec<f32>> {
-    let slice = signed_bounds_slice(data, start, end);
-    if slice.is_empty() {
-        return None;
-    }
-    // The mean (and the centering subtraction) stay at double precision so the
-    // pedestal is removed exactly; the centered burst signal itself is then
-    // carried in f32.
-    let mean = mean_slice(slice);
-    Some(
-        slice
-            .iter()
-            .map(|&value| (f64::from(value) - mean) as f32)
-            .collect(),
-    )
-}
-
 fn apply_burst_lock(
     field: &mut DecodedField,
     spec: &DecoderSpec,
@@ -861,7 +743,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         linecount: None,
         out_scale: None,
         field_phase_id: None,
-        phase_adjust_median: 0.0,
         valid: false,
         sync_confidence: 100,
         burst_lock: None,
@@ -1008,159 +889,28 @@ pub(crate) fn predecode_field_from_rawdecode(
                         pending_field.field_phase_id = Some(1);
                     }
                 } else {
-                    pending_field.linelocs = Some(linelocs2_vec.clone());
+                    pending_field.linelocs = Some(linelocs2_vec);
                     pending_field.out_scale =
                         Some(f64::from(0xC800 - 0x0400) / (100.0 - f64::from(spec.sys_vsync_ire)));
                     if pending_field.valid {
-                        let mut refined_linelocs = linelocs2_vec.clone();
-                        if spec.color_system != ColorSystem::Monochrome {
-                            if spec.rf_write_chroma {
-                                apply_burst_lock(
-                                    &mut pending_field,
-                                    spec,
-                                    inter_field_state,
-                                    chroma_afc_state,
-                                )?;
-                                if let Some(refined) = burst_refined_linelocs(&pending_field, spec)
-                                {
-                                    refined_linelocs = refined;
-                                }
+                        if spec.rf_write_chroma {
+                            apply_burst_lock(
+                                &mut pending_field,
+                                spec,
+                                inter_field_state,
+                                chroma_afc_state,
+                            )?;
+                            if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
+                                pending_field.linelocs = Some(refined);
                             }
-                        } else {
-                            let mut rising_sum = 0usize;
-                            let mut adjs_new = DeterministicHashMap::<usize, f64>::default();
-                            let demod_burst = pending_field.data.video.demod_burst.as_slice();
-                            let demod = &pending_field.data.video.demod;
-                            let fsc_mhz_inv = 1.0 / spec.sys_fsc_mhz;
-                            for line in 0usize..266 {
-                                let mut prev_phaseadjust = pending_field.phase_adjust_median;
-                                if prev_phaseadjust == 0.0 {
-                                    if let Some(prevfield) = &pending_field.prevfield {
-                                        prev_phaseadjust = prevfield.phase_adjust_median;
-                                    }
-                                }
-                                let burst_line = line + pending_field.lineoffset;
-                                if burst_line >= refined_linelocs.len() {
-                                    continue;
-                                }
-                                let s = refined_linelocs[burst_line] as isize;
-                                let s_rem = f64::from(refined_linelocs[burst_line]) - s as f64;
-                                let lfreq = get_linefreq(
-                                    spec.linelen() as f64,
-                                    spec.samplesperline(),
-                                    pending_field.linecount,
-                                    pending_field.lineoffset,
-                                    Some(burst_line),
-                                    Some(&refined_linelocs),
-                                );
-                                let bstart = (21.0 * fsc_mhz_inv * lfreq) as isize;
-                                let bend = (28.0 * fsc_mhz_inv * lfreq) as isize;
-                                let Some(burstarea) =
-                                    slice_subtract_mean(demod_burst, s + bstart, s + bend)
-                                else {
-                                    continue;
-                                };
-                                let threshold = rms(&burstarea) as f32;
-                                let Some(burstarea_demod) =
-                                    slice_subtract_mean(demod, s + bstart, s + bend)
-                                else {
-                                    continue;
-                                };
-                                if nb_absmax(&burstarea_demod) > 30.0 * spec.sys_hz_ire {
-                                    continue;
-                                }
-                                let zcburstdiv = (lfreq * fsc_mhz_inv) / 2.0;
-                                let mut phase_adjust = -prev_phaseadjust;
-                                let mut zc_count = 0usize;
-                                let mut rising_count = 0usize;
-                                for _ in 0..2 {
-                                    let result = clb_findbursts(
-                                        &burstarea,
-                                        0,
-                                        burstarea.len() - 1,
-                                        threshold,
-                                        bstart as f64,
-                                        s_rem,
-                                        zcburstdiv,
-                                        phase_adjust,
-                                        16,
-                                    );
-                                    zc_count = result.0;
-                                    phase_adjust = result.1;
-                                    rising_count = result.2;
-                                }
-                                let rising = rising_count > (zc_count / 2);
-                                phase_adjust = -phase_adjust;
-                                adjs_new.insert(line, phase_adjust / 2.0);
-                                if line % 2 == 0 && rising {
-                                    rising_sum += 1;
-                                }
-                            }
-                            let field14 = rising_sum > (adjs_new.len() / 4);
-                            let mut phase_values = adjs_new.values().copied().collect::<Vec<_>>();
-                            pending_field.phase_adjust_median =
-                                median_from_values(&mut phase_values) * 2.0;
-                            for line in 1usize..266 {
-                                if !adjs_new.contains_key(&line) && line < linebad_vec.len() {
-                                    linebad_vec[line] = 1;
-                                }
-                            }
-                            // compute the adjustments for each line but *do not* apply, so outliers can be bypassed
-                            let mut adjs = DeterministicHashMap::<usize, f64>::default();
-                            for line in 0usize..266 {
-                                if line < refined_linelocs.len()
-                                    && line < linebad_vec.len()
-                                    && !refined_linelocs[line].is_nan()
-                                    && linebad_vec[line] == 0
-                                {
-                                    if let Some(adjustment) = adjs_new.get(&line) {
-                                        let lfreq = get_linefreq(
-                                            spec.linelen() as f64,
-                                            spec.samplesperline(),
-                                            pending_field.linecount,
-                                            pending_field.lineoffset,
-                                            Some(line),
-                                            Some(&linelocs2_vec),
-                                        );
-                                        adjs.insert(line, adjustment * lfreq * fsc_mhz_inv);
-                                    }
-                                }
-                            }
-                            let field_phase_id = if !adjs.is_empty() {
-                                let mut adj_values = adjs.values().copied().collect::<Vec<_>>();
-                                let adjs_median = median_from_values(&mut adj_values);
-                                let mut lastvalid_adj = adjs_median;
-                                for line in 0usize..266 {
-                                    if line >= refined_linelocs.len() {
-                                        break;
-                                    }
-                                    if let Some(adjustment) = adjs.get(&line) {
-                                        if inrange(adjustment - adjs_median, -2.0, 2.0) {
-                                            refined_linelocs[line] += *adjustment as f32;
-                                            lastvalid_adj = *adjustment;
-                                        } else {
-                                            refined_linelocs[line] += lastvalid_adj as f32;
-                                        }
-                                    } else {
-                                        refined_linelocs[line] += lastvalid_adj as f32;
-                                    }
-                                }
-                                field_phase_id(
-                                    pending_field.is_first_field.unwrap_or(false),
-                                    field14,
-                                )
-                            } else {
-                                1
-                            };
-                            pending_field.field_phase_id = Some(field_phase_id);
-                            pending_field.linebad = Some(linebad_vec.clone());
                         }
                         let shift33 = 83.0 * (std::f64::consts::PI / 180.0);
                         let shift = (-shift33 * (spec.freq / (4.0 * 315.0 / 88.0))) as f32;
-                        for value in &mut refined_linelocs {
-                            *value += shift;
+                        if let Some(linelocs) = pending_field.linelocs.as_mut() {
+                            for value in linelocs {
+                                *value += shift;
+                            }
                         }
-                        pending_field.linelocs = Some(refined_linelocs);
                     }
                 }
             }
