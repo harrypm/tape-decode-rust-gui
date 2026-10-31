@@ -17,8 +17,8 @@ use crate::profiles::{flatten_profile, load_profile, load_profile_file, profile_
 use crate::reader::{open_source, DecodeReader, SampleFormat};
 use crate::writer::DecodeWriter;
 use tape_decode::{
-    DecodeRequest, DecoderSpec, DropOuts, FieldInfoEntry, FieldOrderAction, NotchFilter,
-    WowInterpolation,
+    DecodeRequest, DecoderSpec, DropOuts, FieldInfoEntry, FieldOrderAction, Ire0Adjust,
+    NotchFilter, WowInterpolation,
 };
 
 const DEFAULT_THRESHOLD_P_DDD: f32 = 0.18;
@@ -58,6 +58,14 @@ impl From<CliWowInterpolation> for WowInterpolation {
             CliWowInterpolation::Cubic => WowInterpolation::Cubic,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliIre0AdjustMode {
+    /// Set the black level from each field's back porch level.
+    Backporch,
+    /// Scale the levels from each field's sync tip to back porch distance, which corrects AGC errors on second-generation tapes.
+    Hsync,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -177,9 +185,9 @@ struct DecodeArgs {
     /// MAD multiplier used when suppressing wow level-adjustment outliers.
     #[arg(long, default_value_t = 0.1)]
     level_adjust: f32,
-    /// Adjust RF IRE0 from measured picture content.
-    #[arg(long)]
-    ire0_adjust: bool,
+    /// Adjust the video levels from each field's sync and blanking; a bare flag selects backporch.
+    #[arg(long, value_enum, ignore_case = true, value_delimiter = ',', num_args = 0..=1, default_missing_value = "backporch")]
+    ire0_adjust: Option<Vec<CliIre0AdjustMode>>,
     /// Override the profile's RF high-boost multiplier.
     #[arg(long)]
     high_boost: Option<f64>,
@@ -407,7 +415,13 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         rf_saved_levels: cli.use_saved_levels,
         rf_skip_hsync_refine: cli.skip_hsync_refine,
         rf_export_raw_tbc: cli.export_raw_tbc,
-        rf_ire0_adjust: cli.ire0_adjust,
+        rf_ire0_adjust: {
+            let modes = cli.ire0_adjust.as_deref().unwrap_or_default();
+            Ire0Adjust {
+                backporch: modes.contains(&CliIre0AdjustMode::Backporch),
+                hsync: modes.contains(&CliIre0AdjustMode::Hsync),
+            }
+        },
         rf_detect_chroma_track_phase: cli.detect_chroma_track_phase,
         rf_enable_color_killer: cli.enable_color_killer,
         rf_disable_burst_hsync: cli.disable_burst_hsync || !profile.decode_options.burst_hsync,

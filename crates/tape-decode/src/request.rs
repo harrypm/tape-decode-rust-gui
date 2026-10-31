@@ -62,6 +62,16 @@ impl WowInterpolation {
     }
 }
 
+/// Per-field level corrections measured on the TBC output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Ire0Adjust {
+    /// Take ire0 from the back porch level.
+    pub backporch: bool,
+    /// Scale hz_ire from the distance between the sync tip and ire0.
+    pub hsync: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct DecodeProfile {
     pub sys_params: SysParams,
@@ -294,7 +304,7 @@ pub struct DecodeRequest {
     pub rf_saved_levels: bool,
     pub rf_skip_hsync_refine: bool,
     pub rf_export_raw_tbc: bool,
-    pub rf_ire0_adjust: bool,
+    pub rf_ire0_adjust: Ire0Adjust,
     pub rf_detect_chroma_track_phase: bool,
     pub rf_enable_color_killer: bool,
     pub rf_disable_burst_hsync: bool,

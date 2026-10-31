@@ -42,9 +42,15 @@ fn inrange<T: PartialOrd>(a: T, mi: T, ma: T) -> bool {
     a >= mi && a <= ma
 }
 
-fn hz_to_output_array(spec: &DecoderSpec, input: &[f32], ire0: f64, out_scale: f64) -> Vec<u16> {
+fn hz_to_output_array(
+    spec: &DecoderSpec,
+    input: &[f32],
+    ire0: f64,
+    hz_ire: f64,
+    out_scale: f64,
+) -> Vec<u16> {
     let out_scale = out_scale as f32;
-    let scale = out_scale / spec.sys_hz_ire;
+    let scale = out_scale / hz_ire as f32;
     let offset =
         spec.sys_output_zero as f32 - spec.sys_vsync_ire * out_scale - (ire0 as f32) * scale;
     input
@@ -446,21 +452,20 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
     Ok(field.sync_confidence.min(newconf))
 }
 
-fn ire0_adjust_from_picture(picture_luma: &[f32], field: &DecodedField) -> f64 {
-    let ire0_adjust_padding = 4usize;
-    let hsync_start = field.ire0_backporch.0 + ire0_adjust_padding;
-    let hsync_end = field.ire0_backporch.1 - ire0_adjust_padding;
-    if field.outlinecount == 0 || field.outlinelen == 0 || hsync_start >= hsync_end {
+// Level of samples `[start, end)` of each output line: the mean of the middle
+// third of the sorted per-line medians, which rejects lines hit by dropouts.
+fn picture_line_level(picture_luma: &[f32], field: &DecodedField, start: usize, end: usize) -> f64 {
+    if field.outlinecount == 0 || field.outlinelen == 0 || start >= end {
         return f64::NAN;
     }
 
-    let mut blank_levels = Vec::with_capacity(field.outlinecount);
+    let mut levels = Vec::with_capacity(field.outlinecount);
     for line in 0..field.outlinecount {
         let line_start = line * field.outlinelen;
-        let start = line_start + hsync_start;
-        let end = line_start + hsync_end;
-        if end > picture_luma.len() || start >= end {
-            blank_levels.push(f64::NAN);
+        let start = line_start + start;
+        let end = line_start + end;
+        if end > picture_luma.len() {
+            levels.push(f64::NAN);
             continue;
         }
 
@@ -468,13 +473,13 @@ fn ire0_adjust_from_picture(picture_luma: &[f32], field: &DecodedField) -> f64 {
             .iter()
             .map(|&value| f64::from(value))
             .collect::<Vec<_>>();
-        blank_levels.push(median_from_values(&mut values));
+        levels.push(median_from_values(&mut values));
     }
 
-    blank_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let start = field.outlinecount / 3;
     let end = (field.outlinecount * 2) / 3;
-    mean_slice(&blank_levels[start..end])
+    mean_slice(&levels[start..end])
 }
 
 fn demod_slice_bounds(len: usize, start: i64, end: i64) -> Option<(usize, usize)> {
@@ -1482,11 +1487,35 @@ impl Decoder {
                             picture_luma = Some(LumaOutput::Raw(luma));
                         } else {
                             let mut ire0 = f64::from(self.spec.sys_ire0);
-                            if self.spec.rf_ire0_adjust
-                                && luma.len() == field_obj.outlinecount * field_obj.outlinelen
-                            {
-                                ire0 = ire0_adjust_from_picture(&luma, &field_obj);
-                                tracing::debug!(ire0, "calculated ire0");
+                            let mut hz_ire = f64::from(self.spec.sys_hz_ire);
+                            let adjust = self.spec.rf_ire0_adjust;
+                            if luma.len() == field_obj.outlinecount * field_obj.outlinelen {
+                                // Keep clear of the sync edges, whose ringing
+                                // would skew the medians.
+                                const PADDING: usize = 4;
+                                let (backporch_start, backporch_end) = field_obj.ire0_backporch;
+                                if adjust.backporch {
+                                    ire0 = picture_line_level(
+                                        &luma,
+                                        &field_obj,
+                                        backporch_start + PADDING,
+                                        backporch_end - PADDING,
+                                    );
+                                    tracing::debug!(ire0, "calculated ire0");
+                                }
+                                if adjust.hsync {
+                                    // The sync tip sits vsync_ire below ire0, so
+                                    // its measured distance rescales hz_ire.
+                                    let hsync_level = picture_line_level(
+                                        &luma,
+                                        &field_obj,
+                                        PADDING,
+                                        backporch_start - PADDING,
+                                    );
+                                    hz_ire =
+                                        (ire0 - hsync_level) / -f64::from(self.spec.sys_vsync_ire);
+                                    tracing::debug!(hz_ire, "calculated hz_ire");
+                                }
                             }
                             if let Some(track_phase) = self.inter_field_state.track_phase {
                                 let idx = (track_phase ^ (field_obj.field_number % 2)) as usize;
@@ -1496,6 +1525,7 @@ impl Decoder {
                                 &self.spec,
                                 &luma,
                                 ire0,
+                                hz_ire,
                                 field_obj.out_scale.unwrap(),
                             )));
                         }

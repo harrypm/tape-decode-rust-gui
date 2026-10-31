@@ -10,8 +10,8 @@ use crate::decode::{
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
-    BoostRampFilter, ColorSystem, DecodeRequest, DeemphasisParams, FieldOrderAction, LineSystem,
-    NonlinearParams, ShelfKind, VideoLumaFilter, WowInterpolation,
+    BoostRampFilter, ColorSystem, DecodeRequest, DeemphasisParams, FieldOrderAction, Ire0Adjust,
+    LineSystem, NonlinearParams, ShelfKind, VideoLumaFilter, WowInterpolation,
 };
 use crate::vec_utils::convert_vec_in_place;
 
@@ -102,7 +102,7 @@ pub struct DecoderSpec {
     pub(crate) chroma_output: bool,
     pub(crate) rf_skip_hsync_refine: bool,
     pub(crate) rf_export_raw_tbc: bool,
-    pub(crate) rf_ire0_adjust: bool,
+    pub(crate) rf_ire0_adjust: Ire0Adjust,
     pub(crate) rf_relaxed_line0: bool,
     pub(crate) rf_detect_chroma_track_phase: bool,
     pub(crate) rf_enable_color_killer: bool,

@@ -16,9 +16,9 @@ pub use decode::{
 };
 pub use request::{
     BoostBpf, BoostRampFilter, ColorSystem, DecodeOptions, DecodeProfile, DecodeRequest,
-    DecoderParams, DeemphasisParams, FieldOrderAction, FmAudioChannels, LineSystem, LogisticParams,
-    NonlinearParams, NotchFilter, RfPeaking, ShelfKind, SysParams, VideoBpf, VideoEqBand,
-    VideoEqParams, VideoLumaFilter, WowInterpolation,
+    DecoderParams, DeemphasisParams, FieldOrderAction, FmAudioChannels, Ire0Adjust, LineSystem,
+    LogisticParams, NonlinearParams, NotchFilter, RfPeaking, ShelfKind, SysParams, VideoBpf,
+    VideoEqBand, VideoEqParams, VideoLumaFilter, WowInterpolation,
 };
 pub use spec::DecoderSpec;
 
