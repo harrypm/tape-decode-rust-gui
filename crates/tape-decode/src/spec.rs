@@ -6,7 +6,8 @@ use sci_rs::signal::filter::design::{FilterBandType, Sos};
 use std::sync::Arc;
 
 use crate::decode::{
-    butter_sos, gen_chroma_heterodyne, ChromaSepClass, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
+    butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, BLOCKCUT, BLOCKCUT_END,
+    BLOCKSIZE,
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
@@ -122,6 +123,9 @@ pub struct DecoderSpec {
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_final: Vec<Sos<f32>>,
+    // Field-wide band-pass of the upconverted chroma of the heterodyne
+    // formats; SECAM method 1 keeps `chroma_filter_final`.
+    pub(crate) chroma_fft_filter: Option<ChromaFftFilter>,
     // Post-TBC band-pass around the SECAM method 1 under carriers, ahead of
     // the phase multiplication.
     pub(crate) secam_under_filter: Option<Vec<Sos<f32>>>,
@@ -561,6 +565,10 @@ impl DecoderSpec {
 
         // Post-TBC chroma filter at output sample rate (4fsc).
         let chroma_filter_final = chroma_bandpass_final(is_color_under)?;
+        let chroma_fft_filter = (is_color_under && carrier_mult.is_none()).then(|| {
+            let chroma_len = sys_params.outlinelen * (sys_params.frame_lines.line_count() / 2 + 1);
+            ChromaFftFilter::new(chroma_len, sys_params.fsc_mhz * 1e6, color_under)
+        });
         let (rf_chroma_heterodyne, rf_fsc_wave) = if is_color_under {
             let het_wave_scale = match conversion_lo {
                 // Mix against the recorder's conversion LO directly, at the
@@ -710,6 +718,7 @@ impl DecoderSpec {
             chroma_filter_deemphasis: chroma_filter_deemphasis.map(store_sos_filter),
             chroma_filter_audio_notch: chroma_filter_audio_notch.map(store_sos_filter),
             chroma_filter_final: store_sos_filter(chroma_filter_final),
+            chroma_fft_filter,
             secam_under_filter: secam_under_filter.map(store_sos_filter),
 
             video_rf_filter: store_real_filter(video_rf_filter),
@@ -866,7 +875,7 @@ impl DecoderSpec {
 
 /// Smallest 5-smooth length at or above `n`, which the FFT runs with only
 /// small radices.
-fn next_fast_len(n: usize) -> usize {
+pub(crate) fn next_fast_len(n: usize) -> usize {
     (n.max(1)..)
         .find(|&candidate| {
             let mut rest = candidate;

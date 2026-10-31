@@ -24,6 +24,7 @@ mod sync;
 mod vits;
 
 use chroma::{color_framed, decode_chroma};
+pub(crate) use chroma::ChromaFftFilter;
 use demodblock::decode_video_block;
 use dropouts::detect_dropouts_rf;
 use field::predecode_field_from_rawdecode;

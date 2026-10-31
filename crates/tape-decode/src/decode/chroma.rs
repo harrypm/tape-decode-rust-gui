@@ -1,4 +1,6 @@
 use super::*;
+use crate::spec::next_fast_len;
+use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex64;
 
 const SIGNED_SAMPLE_MAX: f32 = 32767.0;
@@ -209,6 +211,92 @@ fn burst_deemphasis(chroma: &mut [f32], field: &DecodedField, burstarea_end: usi
     }
 }
 
+/// Zero-phase band-pass of the upconverted chroma around the subcarrier, as
+/// a super-Gaussian spectrum mask `exp(-((f - fsc) / bw)^4)` over the whole
+/// field: 1.3 MHz wide below fsc for the chroma band, and above it as wide
+/// as puts the heterodyne sum product, two color-under carriers up, 80 dB
+/// down. The field is reflect-padded to a fast transform length so the
+/// mask's ringing settles outside the picture.
+pub(crate) struct ChromaFftFilter {
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+    /// Gain per unique bin.
+    mask: Vec<f32>,
+}
+
+impl ChromaFftFilter {
+    const LOWER_BANDWIDTH_HZ: f64 = 1.3e6;
+    const SUM_PRODUCT_ATTENUATION_DB: f64 = 80.0;
+    const ORDER: i32 = 2;
+    /// Least reflect padding on each side.
+    const PAD: usize = 256;
+
+    /// For fields of `len` samples at four samples per subcarrier cycle.
+    pub(crate) fn new(len: usize, fsc_hz: f64, color_under_hz: f64) -> Self {
+        let n = next_fast_len(len + 2 * Self::PAD);
+        let exponent = 2 * Self::ORDER;
+        // The upper width that puts the sum product at the attenuation:
+        // exp(-(2 color_under / bw)^exponent) = 10^(-dB / 20).
+        let attenuation = 10f64.powf(-Self::SUM_PRODUCT_ATTENUATION_DB / 20.0);
+        let upper_bandwidth =
+            2.0 * color_under_hz / (-attenuation.ln()).powf(1.0 / f64::from(exponent));
+        let bin_hz = 4.0 * fsc_hz / n as f64;
+        let mask = (0..=n / 2)
+            .map(|bin| {
+                let delta = bin as f64 * bin_hz - fsc_hz;
+                let bandwidth = if delta <= 0.0 {
+                    Self::LOWER_BANDWIDTH_HZ
+                } else {
+                    upper_bandwidth
+                };
+                (-(delta / bandwidth).powi(exponent)).exp() as f32
+            })
+            .collect();
+        let mut planner = RealFftPlanner::<f32>::new();
+        Self {
+            r2c: planner.plan_fft_forward(n),
+            c2r: planner.plan_fft_inverse(n),
+            mask,
+        }
+    }
+
+    fn apply(&self, chroma: &[f32]) -> Result<Vec<f32>> {
+        let n = self.r2c.len();
+        let len = chroma.len();
+        let pad_left = n.saturating_sub(len) / 2;
+        let pad_right = n.saturating_sub(len) - pad_left;
+        if len + 2 * Self::PAD > n || pad_right >= len {
+            bail!("chroma of {len} samples does not fit the {n}-sample filter");
+        }
+        let mut padded = Vec::with_capacity(n);
+        padded.extend((1..=pad_left).rev().map(|i| chroma[i]));
+        padded.extend_from_slice(chroma);
+        padded.extend((0..pad_right).map(|i| chroma[len - 2 - i]));
+
+        let mut spectrum = self.r2c.make_output_vec();
+        self.r2c
+            .process(&mut padded, &mut spectrum)
+            .expect("r2c forward FFT failed");
+        for (bin, &gain) in spectrum.iter_mut().zip(&self.mask) {
+            *bin *= gain;
+        }
+        // The c2r transform rejects imaginary residue on the DC and Nyquist
+        // bins.
+        spectrum[0].im = 0.0;
+        if n.is_multiple_of(2) {
+            spectrum[n / 2].im = 0.0;
+        }
+        self.c2r
+            .process(&mut spectrum, &mut padded)
+            .expect("c2r inverse FFT failed");
+        let scale = 1.0 / n as f32;
+        Ok(padded[pad_left..pad_left + len]
+            .iter()
+            .map(|&sample| sample * scale)
+            .collect())
+    }
+}
+
 fn comb_c(data: &mut [f32], line_len: usize, line_distance: usize) {
     let numlines = data.len() / line_len;
     if numlines <= 2 {
@@ -314,7 +402,13 @@ fn process_chroma_internal(
         upconvert_chroma(&chroma, field, phase_sequence, chroma_heterodyne)
     };
 
-    uphet = sosfiltfilt_f32(&spec.chroma_filter_final, &uphet);
+    // Keeps the difference product of the mix, at the subcarrier, and
+    // rejects the sum product.
+    uphet = spec
+        .chroma_fft_filter
+        .as_ref()
+        .context("missing chroma FFT filter")?
+        .apply(&uphet)?;
 
     if let Some(sos) = spec.chroma_filter_deemphasis.as_ref() {
         uphet = sosfilt_f32(sos, &uphet);
