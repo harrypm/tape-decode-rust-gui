@@ -196,22 +196,7 @@ fn process_chroma_internal(
         return Ok(vec![ZERO_LEVEL; field.outlinecount * field.outlinelen]);
     }
 
-    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true)?;
-    let mut chroma: Vec<f32> = if spec.chroma_afc_enabled() {
-        let bandpass = chroma_afc_state.get_chroma_bandpass(spec)?;
-        let chroma_len = chroma_downscaled.len();
-        let chroma = demod_chroma_filt_array(
-            &chroma_downscaled,
-            spec,
-            &bandpass,
-            chroma_len,
-            Some((10.0 * (spec.sys_outfreq / 40.0)) as isize),
-        );
-        chroma_afc_state.freq_offset(spec, &chroma, true)?;
-        chroma
-    } else {
-        chroma_downscaled
-    };
+    let mut chroma = tracked_chroma(field, spec, chroma_afc_state)?;
     let burstarea = padded_burst_area(spec);
 
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
@@ -267,12 +252,43 @@ fn process_chroma_internal(
     ))
 }
 
+// The TBC'd chroma, with the carrier re-measured from it under chroma AFC.
+fn tracked_chroma(
+    field: &mut DecodedField,
+    spec: &DecoderSpec,
+    chroma_afc_state: &mut ChromaAfcState,
+) -> Result<Vec<f32>> {
+    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true)?;
+    if !spec.chroma_afc_enabled() {
+        return Ok(chroma_downscaled);
+    }
+    let bandpass = chroma_afc_state.get_chroma_bandpass(spec)?;
+    let chroma_len = chroma_downscaled.len();
+    let chroma = demod_chroma_filt_array(
+        &chroma_downscaled,
+        spec,
+        &bandpass,
+        chroma_len,
+        Some((10.0 * (spec.sys_outfreq / 40.0)) as isize),
+    );
+    chroma_afc_state.freq_offset(spec, &chroma, true)?;
+    Ok(chroma)
+}
+
 pub(crate) fn decode_chroma(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
 ) -> Result<Option<Vec<u16>>> {
-    if !spec.chroma_output || spec.color_system == ColorSystem::Monochrome {
+    if spec.color_system == ColorSystem::Monochrome {
+        return Ok(None);
+    }
+    if !spec.chroma_output {
+        // The burst lock of the following fields heterodynes with the tracked
+        // carrier, so luma must not depend on whether chroma is written.
+        if spec.chroma_afc_enabled() && field.burst_start_line() != -1 {
+            tracked_chroma(field, spec, chroma_afc_state)?;
+        }
         return Ok(None);
     }
     let upconverted = process_chroma_internal(field, spec, chroma_afc_state)?;
