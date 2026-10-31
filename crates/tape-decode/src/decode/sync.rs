@@ -1760,20 +1760,14 @@ fn median_slice(values: &[f32]) -> f32 {
     median_from_values(&mut values)
 }
 
-fn argrelmin(data: &[f32]) -> Vec<i64> {
-    let n = data.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for i in 0..n {
-        let plus = data[(i + 1).min(n - 1)];
-        let minus = data[i.saturating_sub(1)];
-        if data[i] < plus && data[i] < minus {
-            out.push(i as i64);
-        }
-    }
-    out
+// Local minima: strictly below the left neighbour but only at or below the
+// right one, so a flat valley floor is reported once, at its first sample.
+fn local_minima(data: &[f32]) -> Vec<i64> {
+    data.windows(3)
+        .enumerate()
+        .filter(|(_, w)| w[1] < w[0] && w[1] <= w[2])
+        .map(|(i, _)| (i + 1) as i64)
+        .collect()
 }
 fn zero_cross_det(data: &[f32]) -> Vec<i64> {
     let mut crossings = Vec::new();
@@ -2005,7 +1999,7 @@ fn vsync_power_ratio_search(config: &DecoderSpec, data: &[f32]) -> Vec<i64> {
         *v *= *v;
     }
     let env = sosfiltfilt_f32(&config.resync_serration_filter_envelope, &first_harmonic);
-    argrelmin(&env)
+    local_minima(&env)
 }
 
 fn resync_pulses_blacklevel(
@@ -2202,9 +2196,9 @@ impl VsyncSerrationState {
         let (forward0, forward1) = vsync_envelope_double(config, &padded);
         self.sync_level_bias = forward1;
         let start = padding.min(forward0.len());
-        // argrelmin only compares neighbours, so subtracting the constant
+        // local_minima only compares neighbours, so subtracting the constant
         // sync_level_bias would not move any minima; run it on forward0 directly.
-        let where_allmin = argrelmin(&forward0[start..]);
+        let where_allmin = local_minima(&forward0[start..]);
         if !where_allmin.is_empty() {
             let serrations = vsync_power_ratio_search(config, &padded);
             let where_min = vsync_arbitrage(
