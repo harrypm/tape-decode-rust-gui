@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::optimized::{
     exp_fast, narrow_sos, powf_fast_nonneg, scale_field, sosfilt_f32, sosfiltfilt_f32,
-    sum_algebraic, unwrap_angles, ScaleFieldParams,
+    sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
@@ -1218,6 +1218,7 @@ fn sample_clamped(data: &[f32], idx: isize) -> f32 {
 
 fn downscale_raw_vec(
     field: &mut DecodedField,
+    lut: &SincLut,
     lineinfo: Option<&[f32]>,
     linesout: Option<usize>,
     outwidth: Option<usize>,
@@ -1251,6 +1252,7 @@ fn downscale_raw_vec(
         };
         scale_field(
             channel,
+            lut,
             out_len,
             &expected_linelocs,
             actual_linelocs,
@@ -1466,6 +1468,7 @@ impl Decoder {
                         field_obj.wow_analysis = None;
                         let mut luma = downscale_raw_vec(
                             &mut field_obj,
+                            &self.spec.sinc_lut,
                             None,
                             Some(output_lines),
                             None,

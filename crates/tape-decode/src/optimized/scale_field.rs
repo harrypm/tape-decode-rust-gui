@@ -30,6 +30,7 @@ pub(crate) struct ScaleFieldParams {
 
 pub(crate) fn scale_field(
     buf: &[f32],
+    lut: &SincLut,
     out_len: usize,
     expected_linelocs: &[f64],
     actual_linelocs: &[f64],
@@ -39,9 +40,9 @@ pub(crate) fn scale_field(
     let (interp_t, interp_c) = make_interp_spline_scaled(expected_linelocs, actual_linelocs, k)?;
     let spline = (interp_t.as_slice(), interp_c.as_slice());
     Ok(match k {
-        1 => scale_field_linear(buf, out_len, spline, &params),
-        2 => scale_field_k::<2>(buf, out_len, spline, &params),
-        3 => scale_field_k::<3>(buf, out_len, spline, &params),
+        1 => scale_field_linear(buf, lut, out_len, spline, &params),
+        2 => scale_field_k::<2>(buf, lut, out_len, spline, &params),
+        3 => scale_field_k::<3>(buf, lut, out_len, spline, &params),
         _ => unreachable!("unsupported spline degree"),
     })
 }
@@ -62,14 +63,177 @@ fn level_adjusted(packed: i32, median: f64, threshold: f64) -> f64 {
     }
 }
 
-#[inline]
-fn catmull_rom4(p0: f32, p1: f32, p2: f32, p3: f32, x: f32) -> f32 {
-    let a = p2 - p0;
-    let b = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
-    let c = 3.0 * (p1 - p2) + p3 - p0;
-    // Horner form via fused multiply-add: p1 + 0.5*x*(a + x*(b + x*c)).
-    let poly = c.mul_add(x, b).mul_add(x, a);
-    (0.5 * x).mul_add(poly, p1)
+// Kaiser beta trades sharpness for ringing: a smaller value narrows the main
+// lobe but attenuates the side lobes less.
+const KAISER_BETA: f64 = 5.0;
+const SINC_TAPS: usize = 16;
+// Taps before and from the integer part of the source coordinate.
+const SINC_TAPS_BEFORE: usize = SINC_TAPS / 2 - 1;
+const SINC_TAPS_AFTER: usize = SINC_TAPS - SINC_TAPS_BEFORE;
+// Enough phases for the interpolation between adjacent rows to be exact at f32
+// resolution while the table stays cache resident.
+const SINC_PHASES: usize = 1 << 12;
+
+// One phase's weights; 64-byte aligned so a row is exactly one cache line.
+#[repr(align(64))]
+#[derive(Clone, Copy)]
+struct SincRow([f32; SINC_TAPS]);
+
+/// Windowed-sinc resampling weights tabulated per sub-sample phase, each row
+/// normalized to unit sum. The extra row for phase 1.0 lets the lerp between
+/// adjacent rows run without a bounds check on the upper row.
+pub(crate) struct SincLut {
+    rows: Vec<SincRow>,
+}
+
+impl SincLut {
+    pub(crate) fn new() -> Self {
+        let i0_beta = bessel_i0(KAISER_BETA);
+        let half_width = (SINC_TAPS / 2) as f64;
+        let row = |phase: f64| {
+            let mut weights = [0.0f64; SINC_TAPS];
+            for (tap, weight) in weights.iter_mut().enumerate() {
+                // Signed distance from the output position to this tap.
+                let x = tap as f64 - SINC_TAPS_BEFORE as f64 - phase;
+                *weight = sinc(x) * kaiser(x, half_width, KAISER_BETA, i0_beta);
+            }
+            let sum: f64 = weights.iter().sum();
+            SincRow(weights.map(|weight| (weight / sum) as f32))
+        };
+        // The kernel is even, so phase 1 - p is phase p with the taps reversed.
+        let mut rows = vec![SincRow([0.0; SINC_TAPS]); SINC_PHASES + 1];
+        for index in 0..=SINC_PHASES / 2 {
+            let lower = row(index as f64 / SINC_PHASES as f64);
+            let mut upper = lower.0;
+            upper.reverse();
+            rows[index] = lower;
+            rows[SINC_PHASES - index] = SincRow(upper);
+        }
+        Self { rows }
+    }
+
+    /// Source coordinate range whose tap window stays inside a buffer of
+    /// `len` samples.
+    fn coord_bounds(len: usize) -> (f64, f64) {
+        assert!(len >= SINC_TAPS);
+        (SINC_TAPS_BEFORE as f64, (len - SINC_TAPS_AFTER) as f64)
+    }
+
+    /// Resample `buf` at `coord`, which must lie within `coord_bounds`.
+    #[inline(always)]
+    fn resample(&self, buf: &[f32], coord: f64) -> f32 {
+        let coord_int = coord as usize;
+        // The phase is split in f64 so the lower row index stays below
+        // SINC_PHASES even when the fraction is within an f32 ulp of 1.
+        let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
+        let phase = phase_pos as usize;
+        let alpha = (phase_pos - phase as f64) as f32;
+        let start = coord_int - SINC_TAPS_BEFORE;
+        let window = buf[start..start + SINC_TAPS].try_into().unwrap();
+        sinc_dot(window, &self.rows[phase].0, &self.rows[phase + 1].0, alpha)
+    }
+}
+
+/// `sum(window[t] * lerp(w0[t], w1[t], alpha))` over the taps. Explicit SIMD
+/// where the build has it: the compiler bundles the equivalent array code only
+/// two lanes wide, as the final add's two operands fix its vector width.
+#[inline(always)]
+fn sinc_dot(
+    window: &[f32; SINC_TAPS],
+    w0: &[f32; SINC_TAPS],
+    w1: &[f32; SINC_TAPS],
+    alpha: f32,
+) -> f32 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        use std::arch::x86_64::*;
+        // SAFETY: each load reads 16 floats from an array of that length.
+        unsafe {
+            let x = _mm512_loadu_ps(window.as_ptr());
+            let a = _mm512_loadu_ps(w0.as_ptr());
+            let b = _mm512_loadu_ps(w1.as_ptr());
+            let w = _mm512_fmadd_ps(_mm512_sub_ps(b, a), _mm512_set1_ps(alpha), a);
+            _mm512_reduce_add_ps(_mm512_mul_ps(x, w))
+        }
+    }
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma",
+        not(target_feature = "avx512f")
+    ))]
+    {
+        use std::arch::x86_64::*;
+        // SAFETY: each load reads 8 floats at offset 0 or 8 of a 16-float array.
+        unsafe {
+            let alpha = _mm256_set1_ps(alpha);
+            let mut acc = _mm256_setzero_ps();
+            for offset in [0, 8] {
+                let x = _mm256_loadu_ps(window.as_ptr().add(offset));
+                let a = _mm256_loadu_ps(w0.as_ptr().add(offset));
+                let b = _mm256_loadu_ps(w1.as_ptr().add(offset));
+                let w = _mm256_fmadd_ps(_mm256_sub_ps(b, a), alpha, a);
+                acc = _mm256_add_ps(acc, _mm256_mul_ps(x, w));
+            }
+            let quad = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+            let pair = _mm_add_ps(quad, _mm_movehl_ps(quad, quad));
+            _mm_cvtss_f32(_mm_add_ss(pair, _mm_shuffle_ps(pair, pair, 1)))
+        }
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx512f"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )
+    )))]
+    {
+        let mut acc = [0.0f32; SINC_TAPS];
+        for t in 0..SINC_TAPS {
+            acc[t] = window[t] * (w1[t] - w0[t]).mul_add(alpha, w0[t]);
+        }
+        for t in 0..8 {
+            acc[t] += acc[t + 8];
+        }
+        for t in 0..4 {
+            acc[t] += acc[t + 4];
+        }
+        for t in 0..2 {
+            acc[t] += acc[t + 2];
+        }
+        acc[0] + acc[1]
+    }
+}
+
+fn sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0;
+    }
+    let x_pi = std::f64::consts::PI * x;
+    x_pi.sin() / x_pi
+}
+
+fn kaiser(x: f64, half_width: f64, beta: f64, i0_beta: f64) -> f64 {
+    let r = x / half_width;
+    if r.abs() > 1.0 {
+        return 0.0;
+    }
+    bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta
+}
+
+// Modified Bessel function of the first kind, order zero, by its power series.
+fn bessel_i0(x: f64) -> f64 {
+    let quarter_sq = x * x / 4.0;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    while term > sum * f64::EPSILON {
+        term *= quarter_sq / (k * k);
+        sum += term;
+        k += 1.0;
+    }
+    sum
 }
 
 /// One knot span of the degree-1 spline, with everything that is constant
@@ -154,11 +318,13 @@ fn weighted_median<T: Copy + Ord>(
 /// `(value, count)` run per span fed to an exact weighted median.
 fn scale_field_linear(
     buf: &[f32],
+    lut: &SincLut,
     out_len: usize,
     spline: (&[f64], &[f64]),
     params: &ScaleFieldParams,
 ) -> (Vec<f32>, f64, f64) {
     const K: usize = 1;
+    let (coord_lo, coord_hi) = SincLut::coord_bounds(buf.len());
     let ScaleFieldParams {
         eval_scale,
         eval_count,
@@ -266,28 +432,7 @@ fn scale_field_linear(
         };
         let raw_adjust = level_adjusted(pack_wow_factor(sp.deriv), median, threshold);
         let alpha_raw = alpha * raw_adjust;
-        let tail_start = {
-            #[cfg(nightly_portable_simd)]
-            {
-                scale_span_simd(
-                    buf,
-                    &mut dsout,
-                    &sp,
-                    idx,
-                    run_end,
-                    eval_scale,
-                    raw_adjust,
-                    &mut smoothed_adjust,
-                    smoothing_enabled,
-                    one_minus_alpha,
-                )
-            }
-            #[cfg(not(nightly_portable_simd))]
-            {
-                idx
-            }
-        };
-        for eval_index in tail_start..run_end {
+        for eval_index in idx..run_end {
             let x = eval_index as f64 * eval_scale;
             let b0 = (sp.t1 - x) * sp.inv_h;
             let b1 = (x - sp.t0) * sp.inv_h;
@@ -298,125 +443,27 @@ fn scale_field_linear(
             } else {
                 raw_adjust
             };
-            // Clamp the source position into the interior so the 4-tap window
+            // Clamp the source position into the interior so the tap window
             // stays in bounds. Valid fields never reach the edge, so this is a
-            // no-op for normal output; it only catches degenerate line locations
-            // that would otherwise underflow `coord_int - 1`. `.max().min()`
-            // (not `clamp`) also folds a NaN coordinate to the low edge.
-            let coord = coord.max(1.0).min((buf.len() - 3) as f64);
-            let coord_int = coord as usize;
-            let w = &buf[coord_int - 1..coord_int + 3];
-            let x = (coord - coord_int as f64) as f32;
-            dsout.push(level_adjust as f32 * catmull_rom4(w[0], w[1], w[2], w[3], x));
+            // no-op for normal output; it only catches degenerate line locations.
+            // `.max().min()` (not `clamp`) also folds a NaN coordinate to the
+            // low edge.
+            let coord = coord.max(coord_lo).min(coord_hi);
+            dsout.push(level_adjust as f32 * lut.resample(buf, coord));
         }
         idx = run_end;
     }
     (dsout, median, mad)
 }
 
-/// Vector body of one degree-1 knot-span run: evaluates `[start, end)` in
-/// 8-wide chunks and returns the first index left for the scalar tail. The
-/// only loop-carried state, the level-adjust EWMA, decays toward the
-/// span-constant raw adjust, so each chunk applies the closed form
-/// `s[j] = raw + (s_prev - raw) * q^j` and the lanes are independent.
-#[cfg(nightly_portable_simd)]
-#[allow(clippy::too_many_arguments)]
-fn scale_span_simd(
-    buf: &[f32],
-    dsout: &mut Vec<f32>,
-    sp: &LinSpan,
-    start: usize,
-    end: usize,
-    eval_scale: f64,
-    raw_adjust: f64,
-    smoothed_adjust: &mut f64,
-    smoothing_enabled: bool,
-    one_minus_alpha: f64,
-) -> usize {
-    use std::simd::prelude::*;
-    use std::simd::StdFloat;
-
-    const LANES: usize = 8;
-    if end - start < LANES {
-        return start;
-    }
-    // The eval_index == 0 reset cannot occur here: the main walk starts at
-    // lineoffset_out_samples, which is at least one output line.
-    debug_assert!(start > 0);
-
-    let iota = Simd::from_array([0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-    let mut qpow = [0.0f64; LANES];
-    if smoothing_enabled {
-        let mut q = 1.0;
-        for entry in &mut qpow {
-            q *= one_minus_alpha;
-            *entry = q;
-        }
-    }
-    let qpow = Simd::from_array(qpow);
-    let t1 = Simd::splat(sp.t1);
-    let t0 = Simd::splat(sp.t0);
-    let inv_h = Simd::splat(sp.inv_h);
-    let c0 = Simd::splat(sp.c0);
-    let c1 = Simd::splat(sp.c1);
-    let scale = Simd::splat(eval_scale);
-    let raw = Simd::splat(raw_adjust);
-    let one = Simd::splat(1usize);
-
-    let mut eval = start;
-    while eval + LANES <= end {
-        let x = (Simd::splat(eval as f64) + iota) * scale;
-        let b0 = (t1 - x) * inv_h;
-        let b1 = (x - t0) * inv_h;
-        let coord = b0.mul_add(c0, b1 * c1);
-        let level_adjust: Simd<f32, LANES> = if smoothing_enabled {
-            let s = raw + Simd::splat(*smoothed_adjust - raw_adjust) * qpow;
-            *smoothed_adjust = s[LANES - 1];
-            s.cast()
-        } else {
-            raw.cast()
-        };
-        // Clamp the tap window bounds into the interior in the float domain,
-        // mirroring the scalar paths: valid fields never reach the edge, so this
-        // is a no-op for normal output and only catches degenerate line
-        // locations. `simd_max`/`simd_min` (IEEE maxnum/minnum) also fold a NaN
-        // coordinate to the low edge. This establishes the [1.0, buf.len() - 3.0]
-        // range by construction, which licenses the direct truncating conversion
-        // and the unchecked gathers below.
-        let coord = coord
-            .simd_max(Simd::splat(1.0))
-            .simd_min(Simd::splat((buf.len() - 3) as f64));
-        // SAFETY: every lane is within [1.0, buf.len() - 3.0] per the clamp above.
-        let ci: Simd<usize, LANES> = unsafe { coord.to_int_unchecked::<isize>() }.cast();
-        let frac: Simd<f32, LANES> = (coord - ci.cast::<f64>()).cast();
-        let yes = Mask::splat(true);
-        let zero = Simd::splat(0.0f32);
-        // SAFETY: indices ci - 1 ..= ci + 2 are in bounds per the assert above.
-        let (p0, p1, p2, p3) = unsafe {
-            (
-                Simd::gather_select_unchecked(buf, yes, ci - one, zero),
-                Simd::gather_select_unchecked(buf, yes, ci, zero),
-                Simd::gather_select_unchecked(buf, yes, ci + one, zero),
-                Simd::gather_select_unchecked(buf, yes, ci + one + one, zero),
-            )
-        };
-        let a = p2 - p0;
-        let b = Simd::splat(2.0f32) * p0 - Simd::splat(5.0f32) * p1 + Simd::splat(4.0f32) * p2 - p3;
-        let c = Simd::splat(3.0f32) * (p1 - p2) + p3 - p0;
-        let poly = c.mul_add(frac, b).mul_add(frac, a);
-        let value = (Simd::splat(0.5f32) * frac).mul_add(poly, p1);
-        dsout.extend_from_slice(&(level_adjust * value).to_array());
-        eval += LANES;
-    }
-    eval
-}
-
 fn scale_field_k<const K: usize>(
     buf: &[f32],
+    lut: &SincLut,
     out_len: usize,
     spline: (&[f64], &[f64]),
     params: &ScaleFieldParams,
 ) -> (Vec<f32>, f64, f64) {
+    let (coord_lo, coord_hi) = SincLut::coord_bounds(buf.len());
     let ScaleFieldParams {
         eval_scale,
         eval_count,
@@ -506,20 +553,12 @@ fn scale_field_k<const K: usize>(
         } else {
             raw_adjust
         };
-        // Clamp the source position into the interior so the 4-tap window stays
-        // in bounds. Valid fields never reach the edge, so this is a no-op for
-        // normal output; it only catches degenerate line locations that would
-        // otherwise underflow `coord_int - 1`. `.max().min()` (not `clamp`) also
-        // folds a NaN coordinate to the low edge.
-        let coord = coord.max(1.0).min((buf.len() - 3) as f64);
-        let coord_int = coord as usize;
-
-        let w = &buf[coord_int - 1..coord_int + 3];
-        // `coord` carries the full sample position (up to the field length), so the
-        // fractional offset is taken in f64; the Catmull-Rom cubic itself then
-        // evaluates in f32 over the already-f32 luma samples.
-        let x = (coord - coord_int as f64) as f32;
-        dsout.push(level_adjust as f32 * catmull_rom4(w[0], w[1], w[2], w[3], x));
+        // Clamp the source position into the interior so the tap window stays in
+        // bounds. Valid fields never reach the edge, so this is a no-op for
+        // normal output; it only catches degenerate line locations. `.max().min()`
+        // (not `clamp`) also folds a NaN coordinate to the low edge.
+        let coord = coord.max(coord_lo).min(coord_hi);
+        dsout.push(level_adjust as f32 * lut.resample(buf, coord));
     }
     (dsout, median, mad)
 }

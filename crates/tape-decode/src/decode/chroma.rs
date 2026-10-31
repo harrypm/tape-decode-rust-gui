@@ -196,7 +196,7 @@ fn process_chroma_internal(
         return Ok(vec![ZERO_LEVEL; field.outlinecount * field.outlinelen]);
     }
 
-    let chroma_downscaled = downscale_raw_vec(field, None, None, None, true)?;
+    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true)?;
     let mut chroma: Vec<f32> = if spec.chroma_afc_enabled() {
         let bandpass = chroma_afc_state.get_chroma_bandpass(spec)?;
         let chroma_len = chroma_downscaled.len();

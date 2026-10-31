@@ -806,7 +806,7 @@ fn apply_burst_lock(
         .as_ref()
         .map_or(0, |prev| prev.burst_start_line);
 
-    let burst_downscaled = downscale_raw_vec(field, None, None, None, true)?;
+    let burst_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true)?;
     let (track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
         field,

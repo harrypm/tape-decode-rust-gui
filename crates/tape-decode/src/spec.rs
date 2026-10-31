@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::decode::{
     butter_sos, gen_chroma_heterodyne, ChromaSepClass, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
 };
-use crate::optimized::narrow_sos;
+use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
     BoostRampFilter, ColorSystem, DecodeRequest, DeemphasisParams, FieldOrderAction, LineSystem,
     NonlinearParams, ShelfKind, VideoLumaFilter, WowInterpolation,
@@ -145,6 +145,8 @@ pub struct DecoderSpec {
     pub(crate) track_phase: Option<i64>,
     pub(crate) wow_level_adjust_smoothing: f32,
     pub(crate) wow_interpolation_method: WowInterpolation,
+    // TBC resampling weights, built once and shared by every field.
+    pub(crate) sinc_lut: SincLut,
     pub(crate) do_dod: bool,
     pub(crate) level_adjust: f32,
     _private: (),
@@ -701,6 +703,7 @@ impl DecoderSpec {
             track_phase,
             wow_level_adjust_smoothing,
             wow_interpolation_method: request.wow_interpolation_method,
+            sinc_lut: SincLut::new(),
             do_dod: request.do_dod,
             level_adjust: request.level_adjust,
             _private: (),
