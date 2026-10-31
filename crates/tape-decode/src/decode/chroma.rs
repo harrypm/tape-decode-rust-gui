@@ -341,7 +341,14 @@ fn tracked_chroma(
     spec: &DecoderSpec,
     chroma_afc_state: &mut ChromaAfcState,
 ) -> Result<Vec<f32>> {
-    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true)?;
+    // Color-framed chroma is resampled fsc / (2 pi color_under) * 4 samples
+    // late to undo the group delay of the color-under heterodyne filtering.
+    let shift = if color_framed(spec, field) {
+        spec.sys_fsc_mhz * 1e6 / (std::f64::consts::TAU * spec.decoder_color_under_carrier) * 4.0
+    } else {
+        0.0
+    };
+    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true, shift)?;
     if !spec.chroma_afc_enabled() {
         return Ok(chroma_downscaled);
     }

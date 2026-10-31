@@ -26,6 +26,9 @@ pub(crate) struct ScaleFieldParams {
     pub wow_level_adjust_smoothing: f32,
     pub level_adjust_threshold: f64,
     pub cached_median_mad: Option<(f64, f64)>,
+    /// Source samples added to every output sample's position: a positive
+    /// shift resamples the channel that much later.
+    pub shift: f64,
 }
 
 pub(crate) fn scale_field(
@@ -333,6 +336,7 @@ fn scale_field_linear(
         wow_level_adjust_smoothing,
         level_adjust_threshold,
         cached_median_mad,
+        shift,
     } = *params;
     let lineoffset_out_samples = outwidth * (lineoffset + 1);
     let required_eval_count = lineoffset_out_samples + out_len;
@@ -436,7 +440,7 @@ fn scale_field_linear(
             let x = eval_index as f64 * eval_scale;
             let b0 = (sp.t1 - x) * sp.inv_h;
             let b1 = (x - sp.t0) * sp.inv_h;
-            let coord = b0.mul_add(sp.c0, b1 * sp.c1);
+            let coord = b0.mul_add(sp.c0, b1 * sp.c1) + shift;
             let level_adjust = if smoothing_enabled {
                 smoothed_adjust = one_minus_alpha.mul_add(smoothed_adjust, alpha_raw);
                 smoothed_adjust
@@ -472,6 +476,7 @@ fn scale_field_k<const K: usize>(
         wow_level_adjust_smoothing,
         level_adjust_threshold,
         cached_median_mad,
+        shift,
     } = *params;
     let lineoffset_out_samples = outwidth * (lineoffset + 1);
     let required_eval_count = lineoffset_out_samples + out_len;
@@ -557,7 +562,7 @@ fn scale_field_k<const K: usize>(
         // bounds. Valid fields never reach the edge, so this is a no-op for
         // normal output; it only catches degenerate line locations. `.max().min()`
         // (not `clamp`) also folds a NaN coordinate to the low edge.
-        let coord = coord.max(coord_lo).min(coord_hi);
+        let coord = (coord + shift).max(coord_lo).min(coord_hi);
         dsout.push(level_adjust as f32 * lut.resample(buf, coord));
     }
     (dsout, median, mad)

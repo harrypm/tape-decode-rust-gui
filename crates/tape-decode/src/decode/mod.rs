@@ -1253,6 +1253,8 @@ fn sample_clamped(data: &[f32], idx: isize) -> f32 {
     data[idx.clamp(0, data.len() as isize - 1) as usize]
 }
 
+/// TBC of one channel of the field onto the output grid, resampled `shift`
+/// input samples late.
 fn downscale_raw_vec(
     field: &mut DecodedField,
     lut: &SincLut,
@@ -1260,6 +1262,7 @@ fn downscale_raw_vec(
     linesout: Option<usize>,
     outwidth: Option<usize>,
     use_burst_channel: bool,
+    shift: f64,
 ) -> Result<Vec<f32>> {
     let actual_linelocs = lineinfo
         .or(field.linelocs.as_deref())
@@ -1302,6 +1305,7 @@ fn downscale_raw_vec(
                 wow_level_adjust_smoothing: field.wow_level_adjust_smoothing,
                 level_adjust_threshold: 15.0,
                 cached_median_mad: field.wow_analysis,
+                shift,
             },
         )?
     };
@@ -1511,6 +1515,7 @@ impl Decoder {
                             Some(output_lines),
                             None,
                             false,
+                            0.0,
                         )?;
                         if self.spec.rf_y_comb != 0.0 {
                             luma = y_comb(&luma, field_obj.outlinelen, self.spec.rf_y_comb);
