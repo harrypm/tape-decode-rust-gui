@@ -22,38 +22,80 @@ pub(super) fn color_framed(spec: &DecoderSpec, field: &DecodedField) -> bool {
         && field.burst_start_line() != -1
 }
 
-fn acc(
+/// Burst-normalizes the chroma and encodes it straight to the u16 output.
+/// Each line's gain is `burst_abs_ref` over its fitted burst amplitude,
+/// capped at the field's median plus two MADs (so a line that lost its burst
+/// to a dropout is not blown up), smoothed over the neighbouring lines and
+/// ramped linearly across the line into the next line's gain. Lines the
+/// color killer blanks stay at the zero level.
+fn chroma_automatic_gain(
     chroma: &[f32],
     burst_abs_ref: f32,
-    burststart: usize,
-    burstend: usize,
-    linelength: usize,
-    lines: usize,
+    field: &DecodedField,
+    phase_sequence: &[PhaseSequenceEntry],
     burst_start_line: i64,
 ) -> Vec<u16> {
-    const STARTING_LINE: usize = 16;
-    assert!(lines > STARTING_LINE);
+    const SMOOTHING_HALF_WINDOW: usize = 4;
+    const CAP_MADS: f64 = 2.0;
 
-    // Burst-normalize each line and encode it straight to the u16 output.
-    // Lines without chroma (the lead-in below STARTING_LINE, lines the color
-    // killer blanks, any tail past `lines`) stay at the zero level.
+    let burst_abs_ref = f64::from(burst_abs_ref);
+    let has_color = |entry: &PhaseSequenceEntry| entry.line_number as i64 >= burst_start_line;
+    let raw_gains: Vec<f64> = phase_sequence
+        .iter()
+        .map(|entry| {
+            let amplitude = f64::from(entry.burst.amplitude);
+            burst_abs_ref / if amplitude != 0.0 { amplitude } else { 1e-8 }
+        })
+        .collect();
+
+    let mut valid_gains: Vec<f64> = phase_sequence
+        .iter()
+        .zip(&raw_gains)
+        .filter(|(entry, _)| has_color(entry))
+        .map(|(_, &gain)| gain)
+        .collect();
+    let gain_cap = if valid_gains.is_empty() {
+        1.0
+    } else {
+        let median = median_from_values(&mut valid_gains);
+        let mut deviations: Vec<f64> = valid_gains
+            .iter()
+            .map(|gain| (gain - median).abs())
+            .collect();
+        median + CAP_MADS * median_from_values(&mut deviations)
+    };
+
+    let smoothed_gains: Vec<f64> = (0..raw_gains.len())
+        .map(|i| {
+            let window = &raw_gains[i.saturating_sub(SMOOTHING_HALF_WINDOW)
+                ..raw_gains.len().min(i + SMOOTHING_HALF_WINDOW + 1)];
+            window.iter().map(|&gain| gain.min(gain_cap)).sum::<f64>() / window.len() as f64
+        })
+        .collect();
+
     let mut output = vec![ZERO_LEVEL; chroma.len()];
-
-    for linenumber in STARTING_LINE..lines {
-        if (linenumber as i64) < burst_start_line {
+    let line_start = |entry: &PhaseSequenceEntry| line_bounds(field, chroma.len(), entry.line_number).0;
+    for (i, entry) in phase_sequence.iter().enumerate() {
+        if !has_color(entry) {
             continue;
         }
-        let linestart = linelength * linenumber;
-        let lineend = linestart + linelength;
-        let line = &chroma[linestart..lineend];
-        let burst_abs_mean = rms(&line[burststart..burstend]);
-        let scale = if burst_abs_mean != 0.0 {
-            burst_abs_ref / burst_abs_mean as f32
-        } else {
-            1.0
+        let start = line_start(entry);
+        let (end, gain_end) = match phase_sequence.get(i + 1) {
+            Some(next) => (line_start(next), smoothed_gains[i + 1]),
+            None => (chroma.len(), smoothed_gains[i]),
         };
-        for (out, &sample) in output[linestart..lineend].iter_mut().zip(line.iter()) {
-            *out = (sample.mul_add(scale, SIGNED_SAMPLE_MAX) as i64) as u16;
+        if start >= end {
+            continue;
+        }
+        let gain_start = smoothed_gains[i];
+        let gain_step = (gain_end - gain_start) / (end - start) as f64;
+        for (j, (out, &sample)) in output[start..end]
+            .iter_mut()
+            .zip(&chroma[start..end])
+            .enumerate()
+        {
+            let gain = (gain_start + j as f64 * gain_step) as f32;
+            *out = (sample.mul_add(gain, SIGNED_SAMPLE_MAX) as i64) as u16;
         }
     }
 
@@ -233,11 +275,9 @@ fn process_chroma_internal(
             tracing::debug!(offset_hz = offset, "SECAM carrier servo measurement");
         }
     }
-    let burstarea = burst_area(spec);
-
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
-        burst_deemphasis(&mut chroma, field, burstarea.1)
+        burst_deemphasis(&mut chroma, field, burst_area(spec).1)
     }
 
     let phase_sequence = &field
@@ -279,13 +319,11 @@ fn process_chroma_internal(
     }
 
     let burst_abs_ref = spec.sys_burst_abs_ref.context("missing burst_abs_ref")?;
-    Ok(acc(
+    Ok(chroma_automatic_gain(
         &uphet,
         burst_abs_ref,
-        burstarea.0,
-        burstarea.1,
-        field.outlinelen,
-        field.outlinecount,
+        field,
+        phase_sequence,
         burst_start_line,
     ))
 }

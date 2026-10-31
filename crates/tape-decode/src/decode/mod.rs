@@ -502,6 +502,7 @@ fn demod_mean(data: &[f32], start: i64, end: i64) -> f32 {
 struct BurstMeasurement {
     /// Burst phase in degrees, [0, 360).
     phase: f32,
+    amplitude: f32,
     /// Amplitude on the scale of the correlation sums below (half the burst
     /// length times the amplitude), which the color killer threshold and the
     /// phase averages are set against.

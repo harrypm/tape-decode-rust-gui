@@ -38,6 +38,7 @@ fn demod_burst(
     let phase_samples = fit.phase.rem_euclid(TAU) * (2.0 / PI);
     Ok(BurstMeasurement {
         phase: (fit.phase.to_degrees().rem_euclid(360.0)) as f32,
+        amplitude: fit.amplitude as f32,
         magnitude: (fit.amplitude * len / 2.0) as f32,
         frequency: fit.frequency,
         dc: fit.dc as f32,
