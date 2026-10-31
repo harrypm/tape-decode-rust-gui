@@ -125,8 +125,9 @@ pub struct DecoderSpec {
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_final: Vec<Sos<f32>>,
-    // Field-wide band-pass of the upconverted chroma of the heterodyne
-    // formats; SECAM method 1 keeps `chroma_filter_final`.
+    // fsc-anchored field-wide band-pass of the upconverted chroma; the SECAM
+    // variants restore their block elsewhere and keep the block-anchored
+    // `chroma_filter_final`.
     pub(crate) chroma_fft_filter: Option<ChromaFftFilter>,
     // Post-TBC band-pass around the SECAM method 1 under carriers, ahead of
     // the phase multiplication.
@@ -567,7 +568,7 @@ impl DecoderSpec {
 
         // Post-TBC chroma filter at output sample rate (4fsc).
         let chroma_filter_final = chroma_bandpass_final(is_color_under)?;
-        let chroma_fft_filter = (is_color_under && carrier_mult.is_none()).then(|| {
+        let chroma_fft_filter = (is_color_under && secam_block_center_mhz.is_none()).then(|| {
             let chroma_len = sys_params.outlinelen * (sys_params.frame_lines.line_count() / 2 + 1);
             ChromaFftFilter::new(chroma_len, sys_params.fsc_mhz * 1e6, color_under)
         });

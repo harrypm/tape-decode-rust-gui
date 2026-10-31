@@ -19,6 +19,11 @@ use super::*;
 /// Subcarrier rest frequencies (ITU-R BT.470).
 const FOR_HZ: f64 = 4_406_250.0;
 const FOB_HZ: f64 = 4_250_000.0;
+/// Largest legal deviation below foB and above foR (BT.470-6 table 2 item
+/// 2.12): the per-component maxima (D'B -350/+506 kHz, D'R -506/+350 kHz)
+/// mirror across the carrier pair, so both components share the one
+/// corridor foB - 350 kHz to foR + 350 kHz.
+const MAX_DEVIATION_HZ: f64 = 350e3;
 /// Centre of the HF pre-emphasis bell.
 const BELL_F0_HZ: f64 = 4_286_000.0;
 /// Legal subcarrier excursion; the bell gain is looked up inside it so that
@@ -69,6 +74,21 @@ fn wrap_phase(phase: f64) -> f64 {
     phase.sin().atan2(phase.cos())
 }
 
+/// Central differences, one-sided at the ends.
+fn gradient(values: &[f64]) -> Vec<f64> {
+    let last = values.len().saturating_sub(1);
+    (0..values.len())
+        .map(|i| {
+            let (lo, hi) = (i.saturating_sub(1), (i + 1).min(last));
+            if hi == lo {
+                0.0
+            } else {
+                (values[hi] - values[lo]) / (hi - lo) as f64
+            }
+        })
+        .collect()
+}
+
 /// One restoration pass over a field.
 struct Upconverted {
     /// The restored chroma block.
@@ -103,26 +123,41 @@ fn upconvert(
     // phase.
     let analytic = analytic_signal(&filtered, fft);
     let envelope: Vec<f32> = analytic.iter().map(|z| z.norm()).collect();
+    let samp_rate = spec.tbc_sample_rate();
 
-    // Restored-domain instantaneous frequency: central differences of the
-    // phase (one-sided at the ends), smoothed, bounded to the legal
-    // excursion.
-    let freq_scale = f64::from(mult) * spec.tbc_sample_rate() / TAU;
-    let steps: Vec<f64> = analytic
-        .windows(2)
-        .map(|pair| phase_step(pair[0], pair[1]))
-        .collect();
-    let raw_freq: Vec<f64> = (0..analytic.len())
-        .map(|i| {
-            let back = i.checked_sub(1).map(|j| steps[j]);
-            let ahead = steps.get(i).copied();
-            let step = match (back, ahead) {
-                (Some(back), Some(ahead)) => (back + ahead) / 2.0,
-                (Some(step), None) | (None, Some(step)) => step,
-                (None, None) => 0.0,
-            };
-            step * freq_scale
+    // Under-carrier phase relative to the first sample, unwrapped from the
+    // steps between samples.
+    let mut phase = vec![0.0f64; analytic.len()];
+    for i in 1..analytic.len() {
+        phase[i] = phase[i - 1] + phase_step(analytic[i - 1], analytic[i]);
+    }
+    // Clamp the under-carrier deviation to the legal corridor ahead of the
+    // multiplication: the studio limiter clipped the colour difference to
+    // these bounds, so anything outside is noise or a tape channel
+    // truncation transient, which the multiplication would scale up and the
+    // downstream de-emphasis smear into streaks at saturated transitions.
+    // Clipping the instantaneous frequency and re-integrating keeps the
+    // carrier smooth, with the clipped spans as constant-frequency
+    // stretches; the absolute phase is lost, which the FM decoders
+    // downstream do not care about.
+    let corridor = (FOB_HZ - MAX_DEVIATION_HZ) / f64::from(mult)
+        ..=(FOR_HZ + MAX_DEVIATION_HZ) / f64::from(mult);
+    let mut integral = 0.0;
+    let phase: Vec<f64> = gradient(&phase)
+        .into_iter()
+        .map(|step| {
+            let freq = (step * samp_rate / TAU).clamp(*corridor.start(), *corridor.end());
+            integral += TAU * freq / samp_rate;
+            integral
         })
+        .collect();
+
+    // Restored-domain instantaneous frequency for the bell: central
+    // differences of the phase, smoothed, bounded to the legal excursion.
+    let freq_scale = f64::from(mult) * samp_rate / TAU;
+    let raw_freq: Vec<f64> = gradient(&phase)
+        .into_iter()
+        .map(|step| step * freq_scale)
         .collect();
     let mut inst_freq = moving_average(&raw_freq, INST_FREQ_SMOOTHING);
     for freq in &mut inst_freq {
@@ -139,16 +174,14 @@ fn upconvert(
     let signal: Vec<f32> = analytic
         .iter()
         .zip(&inst_freq)
-        .map(|(z, &freq)| {
-            let (re, im) = (f64::from(z.re), f64::from(z.im));
-            let amplitude = re.hypot(im);
-            if env_median <= 0.0 || amplitude == 0.0 {
+        .zip(&phase)
+        .map(|((z, &freq), &phase)| {
+            if env_median <= 0.0 {
                 return 0.0;
             }
+            let amplitude = f64::from(z.re).hypot(f64::from(z.im));
             let limited = (amplitude / env_median).min(ENVELOPE_CAP);
-            // cos(mult * phase) as the unit phasor raised to mult.
-            let unit = Complex64::new(re / amplitude, im / amplitude);
-            (rest_amplitude * bell_gain(freq) * limited * unit.powu(mult).re) as f32
+            (rest_amplitude * bell_gain(freq) * limited * (f64::from(mult) * phase).cos()) as f32
         })
         .collect();
     Ok(Upconverted {

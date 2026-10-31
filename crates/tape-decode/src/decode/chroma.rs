@@ -480,12 +480,15 @@ fn process_chroma_internal(
     };
 
     // Keeps the difference product of the mix, at the subcarrier, and
-    // rejects the sum product.
-    uphet = spec
-        .chroma_fft_filter
-        .as_ref()
-        .context("missing chroma FFT filter")?
-        .apply(&uphet)?;
+    // rejects the sum product. ME-SECAM has no FFT mask: its restored block
+    // sits at the conversion LO minus the colour-under carrier rather than
+    // at fsc, so the fsc-anchored mask would ride ~106 kHz high on it and
+    // lose the tight top edge that suppresses high-side FM splatter from
+    // saturated transitions.
+    uphet = match &spec.chroma_fft_filter {
+        Some(filter) => filter.apply(&uphet)?,
+        None => sosfiltfilt_f32(&spec.chroma_filter_final, &uphet),
+    };
 
     if let Some(sos) = spec.chroma_filter_deemphasis.as_ref() {
         uphet = sosfilt_f32(sos, &uphet);
