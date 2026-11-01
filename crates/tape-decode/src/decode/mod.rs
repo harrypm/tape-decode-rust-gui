@@ -63,14 +63,13 @@ fn inrange<T: PartialOrd>(a: T, mi: T, ma: T) -> bool {
 fn hz_to_output_array(
     spec: &DecoderSpec,
     input: &[f32],
-    ire0: f64,
-    hz_ire: f64,
+    ire0: f32,
+    hz_ire: f32,
     out_scale: f64,
 ) -> Vec<u16> {
     let out_scale = out_scale as f32;
-    let scale = out_scale / hz_ire as f32;
-    let offset =
-        spec.sys_output_zero as f32 - spec.sys_vsync_ire * out_scale - (ire0 as f32) * scale;
+    let scale = out_scale / hz_ire;
+    let offset = spec.sys_output_zero as f32 - spec.sys_vsync_ire * out_scale - ire0 * scale;
     input
         .iter()
         .map(|&sample| (sample * scale + offset + 0.5).clamp(0.0, 65535.0) as u16)
@@ -471,9 +470,9 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
 
 // Level of samples `[start, end)` of each output line: the mean of the middle
 // third of the sorted per-line medians, which rejects lines hit by dropouts.
-fn picture_line_level(picture_luma: &[f32], field: &DecodedField, start: usize, end: usize) -> f64 {
+fn picture_line_level(picture_luma: &[f32], field: &DecodedField, start: usize, end: usize) -> f32 {
     if field.outlinecount == 0 || field.outlinelen == 0 || start >= end {
-        return f64::NAN;
+        return f32::NAN;
     }
 
     let mut levels = Vec::with_capacity(field.outlinecount);
@@ -482,21 +481,16 @@ fn picture_line_level(picture_luma: &[f32], field: &DecodedField, start: usize, 
         let start = line_start + start;
         let end = line_start + end;
         if end > picture_luma.len() {
-            levels.push(f64::NAN);
+            levels.push(f32::NAN);
             continue;
         }
-
-        let mut values = picture_luma[start..end]
-            .iter()
-            .map(|&value| f64::from(value))
-            .collect::<Vec<_>>();
-        levels.push(median_from_values(&mut values));
+        levels.push(median_from_values(&mut picture_luma[start..end].to_vec()));
     }
 
     levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let start = field.outlinecount / 3;
     let end = (field.outlinecount * 2) / 3;
-    mean_slice(&levels[start..end])
+    mean_slice(&levels[start..end]) as f32
 }
 
 fn demod_slice_bounds(len: usize, start: i64, end: i64) -> Option<(usize, usize)> {
@@ -1525,8 +1519,8 @@ impl Decoder {
                         if self.spec.rf_export_raw_tbc {
                             picture_luma = Some(LumaOutput::Raw(luma));
                         } else {
-                            let mut ire0 = f64::from(self.spec.sys_ire0);
-                            let mut hz_ire = f64::from(self.spec.sys_hz_ire);
+                            let mut ire0 = self.spec.sys_ire0;
+                            let mut hz_ire = self.spec.sys_hz_ire;
                             let adjust = self.spec.rf_ire0_adjust;
                             if luma.len() == field_obj.outlinecount * field_obj.outlinelen {
                                 // Keep clear of the sync edges, whose ringing
@@ -1551,8 +1545,7 @@ impl Decoder {
                                         PADDING,
                                         backporch_start - PADDING,
                                     );
-                                    hz_ire =
-                                        (ire0 - hsync_level) / -f64::from(self.spec.sys_vsync_ire);
+                                    hz_ire = (ire0 - hsync_level) / -self.spec.sys_vsync_ire;
                                     tracing::debug!(hz_ire, "calculated hz_ire");
                                     // A dropout or sync loss can put the same
                                     // level in both windows.
@@ -1562,7 +1555,7 @@ impl Decoder {
                                             hsync_level,
                                             "degenerate hz_ire from the hsync level, keeping the working one"
                                         );
-                                        hz_ire = f64::from(self.inter_field_state.levels.hz_ire);
+                                        hz_ire = self.inter_field_state.levels.hz_ire;
                                     }
                                 }
                             }

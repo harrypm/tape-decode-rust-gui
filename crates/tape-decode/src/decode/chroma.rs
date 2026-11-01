@@ -49,22 +49,21 @@ fn chroma_automatic_gain(
     sync_tip_len: usize,
 ) -> f32 {
     const SMOOTHING_HALF_WINDOW: usize = 4;
-    const CAP_MADS: f64 = 2.0;
+    const CAP_MADS: f32 = 2.0;
     // Standard deviation of a normal distribution per MAD.
-    const MAD_TO_SIGMA: f64 = 1.4826;
+    const MAD_TO_SIGMA: f32 = 1.4826;
     const EDGE: usize = 4;
 
-    let burst_abs_ref = f64::from(burst_abs_ref);
     let has_color = |entry: &PhaseSequenceEntry| entry.line_number as i64 >= burst_start_line;
-    let raw_gains: Vec<f64> = phase_sequence
+    let raw_gains: Vec<f32> = phase_sequence
         .iter()
         .map(|entry| {
-            let amplitude = f64::from(entry.burst.amplitude);
+            let amplitude = entry.burst.amplitude;
             burst_abs_ref / if amplitude != 0.0 { amplitude } else { 1e-8 }
         })
         .collect();
 
-    let mut valid_gains: Vec<f64> = phase_sequence
+    let mut valid_gains: Vec<f32> = phase_sequence
         .iter()
         .zip(&raw_gains)
         .filter(|(entry, _)| has_color(entry))
@@ -74,24 +73,24 @@ fn chroma_automatic_gain(
         1.0
     } else {
         let median = median_from_values(&mut valid_gains);
-        let mut deviations: Vec<f64> = valid_gains
+        let mut deviations: Vec<f32> = valid_gains
             .iter()
             .map(|gain| (gain - median).abs())
             .collect();
         median + CAP_MADS * median_from_values(&mut deviations)
     };
 
-    let smoothed_gains: Vec<f64> = (0..raw_gains.len())
+    let smoothed_gains: Vec<f32> = (0..raw_gains.len())
         .map(|i| {
             let window = &raw_gains[i.saturating_sub(SMOOTHING_HALF_WINDOW)
                 ..raw_gains.len().min(i + SMOOTHING_HALF_WINDOW + 1)];
-            window.iter().map(|&gain| gain.min(gain_cap)).sum::<f64>() / window.len() as f64
+            window.iter().map(|&gain| gain.min(gain_cap)).sum::<f32>() / window.len() as f32
         })
         .collect();
 
     let len = chroma.len();
     let line_start = |entry: &PhaseSequenceEntry| line_bounds(field, len, entry.line_number).0;
-    let mut noise_sum = 0.0f64;
+    let mut noise_sum = 0.0f32;
     let mut noise_lines = 0usize;
     for (i, entry) in phase_sequence.iter().enumerate() {
         let start = line_start(entry);
@@ -107,9 +106,9 @@ fn chroma_automatic_gain(
             continue;
         }
         let gain_start = smoothed_gains[i];
-        let gain_step = (gain_end - gain_start) / (end - start) as f64;
+        let gain_step = (gain_end - gain_start) / (end - start) as f32;
         for (j, sample) in chroma[start..end].iter_mut().enumerate() {
-            *sample *= (gain_start + j as f64 * gain_step) as f32;
+            *sample *= gain_start + j as f32 * gain_step;
         }
 
         let window_end = end.saturating_sub(EDGE);
@@ -120,14 +119,14 @@ fn chroma_automatic_gain(
         }
         let median = median_from_values(&mut window.to_vec());
         let mut deviations: Vec<f32> = window.iter().map(|&v| (v - median).abs()).collect();
-        noise_sum += f64::from(median_from_values(&mut deviations)) * MAD_TO_SIGMA;
+        noise_sum += median_from_values(&mut deviations) * MAD_TO_SIGMA;
         noise_lines += 1;
     }
 
     if noise_lines == 0 {
         0.0
     } else {
-        (noise_sum / noise_lines as f64) as f32
+        noise_sum / noise_lines as f32
     }
 }
 
@@ -599,11 +598,8 @@ pub(super) fn analytic_signal(
 }
 
 /// Phase advance from `a` to `b`, in (-pi, pi].
-pub(super) fn phase_step(a: Complex32, b: Complex32) -> f64 {
-    let (ar, ai) = (f64::from(a.re), f64::from(a.im));
-    let (br, bi) = (f64::from(b.re), f64::from(b.im));
-    // arg(b * conj(a))
-    (bi * ar - br * ai).atan2(br * ar + bi * ai)
+pub(super) fn phase_step(a: Complex32, b: Complex32) -> f32 {
+    (b * a.conj()).arg()
 }
 
 /// Offset in Hz of the ME-SECAM colour-under rest carrier pair from its
@@ -628,11 +624,11 @@ fn secam_under_carrier_offset(
     const MIN_LINES_PER_CLUSTER: usize = 8;
     // The carriers are nominally 156.25 kHz apart; reject measurements where
     // the two clusters land somewhere else entirely.
-    const SEPARATION_RANGE: std::ops::RangeInclusive<f64> = 90e3..=230e3;
+    const SEPARATION_RANGE: std::ops::RangeInclusive<f32> = 90e3..=230e3;
 
     let fft = spec.secam_analytic_fft.as_ref()?;
-    let pair_center = spec.decoder_color_under_carrier;
-    let freq_scale = spec.tbc_sample_rate() / std::f64::consts::TAU;
+    let pair_center = spec.decoder_color_under_carrier as f32;
+    let freq_scale = (spec.tbc_sample_rate() / std::f64::consts::TAU) as f32;
     // Over the whole field, so the short per-line windows are free of
     // transform edge effects (a windowed transform of just the porch would
     // bias the frequency estimate by hundreds of Hz).
@@ -649,14 +645,11 @@ fn secam_under_carrier_offset(
         let window = &analytic[start as usize..end as usize];
         // Instantaneous frequency; the median rejects FM clicks and noise
         // spikes.
-        let mut f_inst: Vec<f64> = window
+        let mut f_inst: Vec<f32> = window
             .windows(2)
             .map(|pair| phase_step(pair[0], pair[1]) * freq_scale)
             .collect();
-        let mut env: Vec<f64> = window
-            .iter()
-            .map(|sample| f64::from(sample.norm()))
-            .collect();
+        let mut env: Vec<f32> = window.iter().map(|sample| sample.norm()).collect();
         freqs.push(median_from_values(&mut f_inst));
         envs.push(median_from_values(&mut env));
     }
@@ -667,7 +660,7 @@ fn secam_under_carrier_offset(
     // Ignore lines whose porch carrier is too weak to measure (dropouts,
     // colour killed lines).
     let env_threshold = median_from_values(&mut envs.clone()) * 0.25;
-    let (mut low, mut high): (Vec<f64>, Vec<f64>) = freqs
+    let (mut low, mut high): (Vec<f32>, Vec<f32>) = freqs
         .iter()
         .zip(&envs)
         .filter(|&(_, &env)| env > env_threshold)
@@ -681,5 +674,5 @@ fn secam_under_carrier_offset(
     if !SEPARATION_RANGE.contains(&(high_carrier - low_carrier)) {
         return None;
     }
-    Some((low_carrier + high_carrier) / 2.0 - pair_center)
+    Some(f64::from((low_carrier + high_carrier) / 2.0 - pair_center))
 }

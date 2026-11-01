@@ -58,7 +58,7 @@ pub struct DecoderSpec {
     pub(crate) sys_outfreq: f64,
     pub(crate) sys_ld_vits_whitelocs: Vec<[usize; 3]>,
     pub(crate) sys_burst_abs_ref: Option<f32>,
-    pub(crate) sys_track_ire0_offset: [f64; 2],
+    pub(crate) sys_track_ire0_offset: [f32; 2],
     pub(crate) sys_nonlinear_deviation: Option<f32>,
 
     pub(crate) decoder_color_under_carrier: f64,

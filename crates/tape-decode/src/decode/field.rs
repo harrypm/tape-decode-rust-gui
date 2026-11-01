@@ -662,7 +662,7 @@ fn get_phase_rotation_sequence(
     let mut even = (0.0f32, 0.0f32);
     let mut odd = (0.0f32, 0.0f32);
     let mut count = 0usize;
-    let mut magnitude_sum = 0.0f64;
+    let mut magnitude_sum = 0.0f32;
     let mut burst_start_line = 0i64;
     for entry in &phase_sequence {
         let line_number = entry.line_number as isize;
@@ -674,7 +674,7 @@ fn get_phase_rotation_sequence(
             continue;
         }
         count += 1;
-        magnitude_sum += f64::from(burst.magnitude);
+        magnitude_sum += burst.magnitude;
         // After a blanked field, color resumes at the first line whose burst
         // clears the threshold: broadcasts could switch the burst on
         // mid-field.
@@ -696,7 +696,7 @@ fn get_phase_rotation_sequence(
     let magnitude_avg = if count == 0 {
         0.0
     } else {
-        (magnitude_sum / count as f64) as f32
+        magnitude_sum / count as f32
     };
     if spec.rf_enable_color_killer && magnitude_avg < BURST_MAGNITUDE_THRESHOLD {
         burst_start_line = -1;

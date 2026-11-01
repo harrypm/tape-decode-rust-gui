@@ -149,7 +149,7 @@ pub struct SysParams {
     pub outfreq: f64,
     pub ld_vits_whitelocs: Vec<[usize; 3]>,
     pub burst_abs_ref: Option<f32>,
-    pub track_ire0_offset: [f64; 2],
+    pub track_ire0_offset: [f32; 2],
     pub nonlinear_deviation: Option<f32>,
 }
 

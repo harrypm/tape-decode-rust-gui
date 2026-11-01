@@ -1916,16 +1916,16 @@ pub(crate) fn refine_levels_from_vsync(
     blank_level: f32,
 ) -> (f32, f32) {
     const WINDOW_LINES: f32 = 8.5;
-    const MIN_YIELD_FRACTION: f64 = 0.15;
+    const MIN_YIELD_FRACTION: f32 = 0.15;
     const MIN_YIELD_SAMPLES: usize = 5;
-    const OUTLIER_MADS: f64 = 3.5;
-    const MAD_FLOOR: f64 = 1e-5;
-    const SEPARATION_RANGE: (f64, f64) = (0.5, 1.5);
-    const SIGNAL_POWER_FLOOR: f64 = 1e-5;
-    const VARIANCE_FLOOR: f64 = 1e-6;
-    const MIN_SNR: f64 = 9.0;
+    const OUTLIER_MADS: f32 = 3.5;
+    const MAD_FLOOR: f32 = 1e-5;
+    const SEPARATION_RANGE: (f32, f32) = (0.5, 1.5);
+    const SIGNAL_POWER_FLOOR: f32 = 1e-5;
+    const VARIANCE_FLOOR: f32 = 1e-6;
+    const MIN_SNR: f32 = 9.0;
     // The SNR at which a level is blended halfway to its cluster mean.
-    const HALF_WEIGHT_SNR: f64 = 20.0;
+    const HALF_WEIGHT_SNR: f32 = 20.0;
 
     let start = (line0loc + meanlinelen).round_ties_even();
     let end = (start + meanlinelen * WINDOW_LINES).round_ties_even();
@@ -1933,19 +1933,17 @@ pub(crate) fn refine_levels_from_vsync(
         return (sync_level, blank_level);
     };
     let window = &demod[start..end];
-    let min_yield = ((window.len() as f64 * MIN_YIELD_FRACTION) as usize).max(MIN_YIELD_SAMPLES);
+    let min_yield = ((window.len() as f32 * MIN_YIELD_FRACTION) as usize).max(MIN_YIELD_SAMPLES);
 
-    let (sync_orig, blank_orig) = (f64::from(sync_level), f64::from(blank_level));
-    let (mut sync, mut blank): (Vec<f64>, Vec<f64>) = window
+    let (mut sync, mut blank): (Vec<f32>, Vec<f32>) = window
         .iter()
-        .map(|&v| f64::from(v))
-        .partition(|&v| (v - sync_orig).abs() < (v - blank_orig).abs());
-    let drop_outliers = |samples: &mut Vec<f64>| {
+        .partition(|&&v| (v - sync_level).abs() < (v - blank_level).abs());
+    let drop_outliers = |samples: &mut Vec<f32>| {
         if samples.len() <= MIN_YIELD_SAMPLES {
             return;
         }
         let median = median_from_values(&mut samples.clone());
-        let mut deviations: Vec<f64> = samples.iter().map(|v| (v - median).abs()).collect();
+        let mut deviations: Vec<f32> = samples.iter().map(|v| (v - median).abs()).collect();
         let mad = median_from_values(&mut deviations).max(MAD_FLOOR);
         samples.retain(|v| (v - median).abs() < OUTLIER_MADS * mad);
     };
@@ -1955,28 +1953,28 @@ pub(crate) fn refine_levels_from_vsync(
         return (sync_level, blank_level);
     }
 
-    let (sync_mean, blank_mean) = (mean(&sync), mean(&blank));
+    let (sync_mean, blank_mean) = (mean_slice(&sync) as f32, mean_slice(&blank) as f32);
     let measured = blank_mean - sync_mean;
-    let expected = blank_orig - sync_orig;
+    let expected = blank_level - sync_level;
     if !(SEPARATION_RANGE.0 * expected < measured && measured < SEPARATION_RANGE.1 * expected) {
         return (sync_level, blank_level);
     }
     let signal_power = (measured * measured).max(SIGNAL_POWER_FLOOR);
-    let refine = |orig: f64, samples: &[f64], cluster_mean: f64| {
+    let refine = |orig: f32, samples: &[f32], cluster_mean: f32| {
         let variance = samples
             .iter()
             .map(|v| (v - cluster_mean).powi(2))
-            .sum::<f64>()
-            / samples.len() as f64;
+            .sum::<f32>()
+            / samples.len() as f32;
         let snr = signal_power / variance.max(VARIANCE_FLOOR);
         if snr < MIN_SNR {
-            return orig as f32;
+            return orig;
         }
         let weight = snr / (HALF_WEIGHT_SNR + snr);
-        ((1.0 - weight) * orig + weight * cluster_mean) as f32
+        (1.0 - weight) * orig + weight * cluster_mean
     };
     (
-        refine(sync_orig, &sync, sync_mean),
-        refine(blank_orig, &blank, blank_mean),
+        refine(sync_level, &sync, sync_mean),
+        refine(blank_level, &blank, blank_mean),
     )
 }

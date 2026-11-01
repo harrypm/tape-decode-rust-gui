@@ -17,34 +17,34 @@ use super::chroma::{analytic_signal, phase_step};
 use super::*;
 
 /// Subcarrier rest frequencies (ITU-R BT.470).
-const FOR_HZ: f64 = 4_406_250.0;
-const FOB_HZ: f64 = 4_250_000.0;
+const FOR_HZ: f32 = 4_406_250.0;
+const FOB_HZ: f32 = 4_250_000.0;
 /// Largest legal deviation below foB and above foR (BT.470-6 table 2 item
 /// 2.12): the per-component maxima (D'B -350/+506 kHz, D'R -506/+350 kHz)
 /// mirror across the carrier pair, so both components share the one
 /// corridor foB - 350 kHz to foR + 350 kHz.
-const MAX_DEVIATION_HZ: f64 = 350e3;
+const MAX_DEVIATION_HZ: f32 = 350e3;
 /// Centre of the HF pre-emphasis bell.
-const BELL_F0_HZ: f64 = 4_286_000.0;
+const BELL_F0_HZ: f32 = 4_286_000.0;
 /// Legal subcarrier excursion; the bell gain is looked up inside it so that
 /// noise and carrier switch transients are not boosted by the bell skirts.
-const CARRIER_RANGE_HZ: RangeInclusive<f64> = 3.9e6..=4.756e6;
+const CARRIER_RANGE_HZ: RangeInclusive<f32> = 3.9e6..=4.756e6;
 /// Taps of the moving average over the instantaneous frequency, so that
 /// sample-level phase noise does not end up as amplitude noise through the
 /// bell (which is smooth enough not to be blunted by it).
 const INST_FREQ_SMOOTHING: usize = 9;
 /// Envelope ceiling relative to the field median.
-const ENVELOPE_CAP: f64 = 1.25;
+const ENVELOPE_CAP: f32 = 1.25;
 /// First line with chroma output.
 const STARTING_LINE: usize = 16;
 /// Lines needed to fit the line alternation, and the fraction of them that
 /// must agree with the fit before the blanking is regenerated from it.
 const IDENT_MIN_LINES: usize = 32;
-const IDENT_MIN_CONFIDENCE: f64 = 0.7;
+const IDENT_MIN_CONFIDENCE: f32 = 0.7;
 
 /// Relative subcarrier HF pre-emphasis (bell) gain at `freq_hz`, unity at
 /// the bell centre: |1 + j16F| / |1 + j1.26F| with F = f/f0 - f0/f.
-fn bell_gain(freq_hz: f64) -> f64 {
+fn bell_gain(freq_hz: f32) -> f32 {
     let f = freq_hz / BELL_F0_HZ;
     let bell_f = f - 1.0 / f;
     ((1.0 + (16.0 * bell_f).powi(2)) / (1.0 + (1.26 * bell_f).powi(2))).sqrt()
@@ -52,19 +52,14 @@ fn bell_gain(freq_hz: f64) -> f64 {
 
 /// Moving average of `len` (odd) taps centred on each sample, zero-padded at
 /// the ends.
-fn moving_average(values: &[f64], len: usize) -> Vec<f64> {
+fn moving_average(values: &[f32], len: usize) -> Vec<f32> {
     debug_assert!(len % 2 == 1);
     let half = len / 2;
-    let mut prefix = Vec::with_capacity(values.len() + 1);
-    prefix.push(0.0);
-    for &value in values {
-        prefix.push(prefix.last().unwrap() + value);
-    }
     (0..values.len())
         .map(|i| {
             let lo = i.saturating_sub(half);
             let hi = (i + half + 1).min(values.len());
-            (prefix[hi] - prefix[lo]) / len as f64
+            values[lo..hi].iter().sum::<f32>() / len as f32
         })
         .collect()
 }
@@ -74,19 +69,19 @@ fn wrap_phase(phase: f64) -> f64 {
     phase.sin().atan2(phase.cos())
 }
 
-/// Central differences, one-sided at the ends.
-fn gradient(values: &[f64]) -> Vec<f64> {
-    let last = values.len().saturating_sub(1);
-    (0..values.len())
-        .map(|i| {
-            let (lo, hi) = (i.saturating_sub(1), (i + 1).min(last));
-            if hi == lo {
-                0.0
-            } else {
-                (values[hi] - values[lo]) / (hi - lo) as f64
-            }
-        })
-        .collect()
+/// Central differences of a sequence given the differences `steps` between
+/// its consecutive values, one-sided at the ends; empty for fewer than two
+/// values.
+fn central_differences<T: Float>(steps: &[T]) -> Vec<T> {
+    let Some((&first, &last)) = steps.first().zip(steps.last()) else {
+        return Vec::new();
+    };
+    let two = T::one() + T::one();
+    let mut out = Vec::with_capacity(steps.len() + 1);
+    out.push(first);
+    out.extend(steps.windows(2).map(|pair| (pair[0] + pair[1]) / two));
+    out.push(last);
+    out
 }
 
 /// One restoration pass over a field.
@@ -95,7 +90,7 @@ struct Upconverted {
     signal: Vec<f32>,
     /// Smoothed restored-domain instantaneous frequency in Hz the bell was
     /// shaped with; reused for the line identification.
-    inst_freq: Vec<f64>,
+    inst_freq: Vec<f32>,
     /// Band-passed under-carrier envelope.
     envelope: Vec<f32>,
 }
@@ -104,7 +99,7 @@ struct Upconverted {
 /// the under carrier's phase by `mult`, with the bell amplitude regenerated
 /// from the restored instantaneous frequency. `rest_amplitude` is the peak
 /// amplitude of the undeviated carrier.
-fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64) -> Upconverted {
+fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32) -> Upconverted {
     let under_filter = spec
         .secam_under_filter
         .as_ref()
@@ -120,13 +115,8 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64)
     let envelope: Vec<f32> = analytic.iter().map(|z| z.norm()).collect();
     let samp_rate = spec.tbc_sample_rate();
 
-    // Under-carrier phase relative to the first sample, unwrapped from the
-    // steps between samples.
-    let mut phase = vec![0.0f64; analytic.len()];
-    for i in 1..analytic.len() {
-        phase[i] = phase[i - 1] + phase_step(analytic[i - 1], analytic[i]);
-    }
-    // Clamp the under-carrier deviation to the legal corridor ahead of the
+    // Under-carrier phase advance per sample, as the central difference of
+    // the unwrapped phase, clamped to the legal corridor ahead of the
     // multiplication: the studio limiter clipped the colour difference to
     // these bounds, so anything outside is noise or a tape channel
     // truncation transient, which the multiplication would scale up and the
@@ -134,25 +124,36 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64)
     // Clipping the instantaneous frequency and re-integrating keeps the
     // carrier smooth, with the clipped spans as constant-frequency
     // stretches; the absolute phase is lost, which the FM decoders
-    // downstream do not care about.
-    let corridor = (FOB_HZ - MAX_DEVIATION_HZ) / f64::from(mult)
-        ..=(FOR_HZ + MAX_DEVIATION_HZ) / f64::from(mult);
-    let mut integral = 0.0;
-    let phase: Vec<f64> = gradient(&phase)
+    // downstream do not care about. The clamped steps are f64: the corridor
+    // edge rounded to f32 would bias the thousands of clamped samples of a
+    // field alike, and their integral runs to ~1e5 rad.
+    let step_per_hz = TAU / samp_rate;
+    let corridor = f64::from(FOB_HZ - MAX_DEVIATION_HZ) / f64::from(mult) * step_per_hz
+        ..=f64::from(FOR_HZ + MAX_DEVIATION_HZ) / f64::from(mult) * step_per_hz;
+    let steps: Vec<f32> = analytic
+        .windows(2)
+        .map(|pair| phase_step(pair[0], pair[1]))
+        .collect();
+    let steps: Vec<f64> = central_differences(&steps)
         .into_iter()
-        .map(|step| {
-            let freq = (step * samp_rate / TAU).clamp(*corridor.start(), *corridor.end());
-            integral += TAU * freq / samp_rate;
-            integral
+        .map(|step| f64::from(step).clamp(*corridor.start(), *corridor.end()))
+        .collect();
+    let mut integral = 0.0f64;
+    let phase: Vec<f32> = steps
+        .iter()
+        .map(|&step| {
+            integral += f64::from(mult) * step;
+            integral.rem_euclid(TAU) as f32
         })
         .collect();
 
     // Restored-domain instantaneous frequency for the bell: central
-    // differences of the phase, smoothed, bounded to the legal excursion.
-    let freq_scale = f64::from(mult) * samp_rate / TAU;
-    let raw_freq: Vec<f64> = gradient(&phase)
+    // differences of the re-integrated phase (whose consecutive samples
+    // differ by `steps[1..]`), smoothed, bounded to the legal excursion.
+    let freq_scale = f64::from(mult) / step_per_hz;
+    let raw_freq: Vec<f32> = central_differences(&steps[1..])
         .into_iter()
-        .map(|step| step * freq_scale)
+        .map(|step| (step * freq_scale) as f32)
         .collect();
     let mut inst_freq = moving_average(&raw_freq, INST_FREQ_SMOOTHING);
     for freq in &mut inst_freq {
@@ -165,18 +166,17 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64)
     // dip passes through to the output instead of being limited away, since
     // downstream SECAM decoders key their concealment off exactly those
     // collapses, and carrier-free noise does not become full-scale splatter.
-    let env_median = f64::from(median_from_values(&mut envelope.clone()));
-    let signal: Vec<f32> = analytic
+    let env_median = median_from_values(&mut envelope.clone());
+    let signal: Vec<f32> = envelope
         .iter()
         .zip(&inst_freq)
         .zip(&phase)
-        .map(|((z, &freq), &phase)| {
+        .map(|((&amplitude, &freq), &phase)| {
             if env_median <= 0.0 {
                 return 0.0;
             }
-            let amplitude = f64::from(z.re).hypot(f64::from(z.im));
             let limited = (amplitude / env_median).min(ENVELOPE_CAP);
-            (rest_amplitude * bell_gain(freq) * limited * (f64::from(mult) * phase).cos()) as f32
+            rest_amplitude * bell_gain(freq) * limited * phase.cos()
         })
         .collect();
     Upconverted {
@@ -189,7 +189,7 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f64)
 struct LineAlternation {
     dr_on_even: bool,
     /// Fraction of lines agreeing with the fit.
-    confidence: f64,
+    confidence: f32,
 }
 
 /// Fit the field's D'R/D'B line alternation from each line's median restored
@@ -199,7 +199,7 @@ struct LineAlternation {
 /// land on the wrong side, the majority never does. `None` with too few
 /// lines to fit.
 fn fit_line_alternation(
-    inst_freq: &[f64],
+    inst_freq: &[f32],
     outwidth: usize,
     first_line: usize,
     porch_end_px: usize,
@@ -219,7 +219,7 @@ fn fit_line_alternation(
     let odd_is_dr = n_lines - even_is_dr;
     Some(LineAlternation {
         dr_on_even: even_is_dr >= odd_is_dr,
-        confidence: even_is_dr.max(odd_is_dr) as f64 / n_lines as f64,
+        confidence: even_is_dr.max(odd_is_dr) as f32 / n_lines as f32,
     })
 }
 
@@ -403,7 +403,7 @@ fn regenerate_blanking(
     mult: u32,
 ) -> Vec<f32> {
     let linesout = chroma.len() / outwidth;
-    let rest_hz = |is_dr: bool| if is_dr { FOR_HZ } else { FOB_HZ } / f64::from(mult);
+    let rest_hz = |is_dr: bool| f64::from(if is_dr { FOR_HZ } else { FOB_HZ }) / f64::from(mult);
     let fade = raised_cosine(FADE_LEN);
     let ramp = raised_cosine(RAMP_LEN);
     let step = raised_cosine(layout.step.len());
@@ -513,7 +513,7 @@ pub(super) fn process_chroma(
     let burst_abs_ref = spec
         .sys_burst_abs_ref
         .expect("chroma output without burst_abs_ref");
-    let rest_amplitude = f64::from(burst_abs_ref) * 2f64.sqrt();
+    let rest_amplitude = burst_abs_ref * 2f32.sqrt();
     let first_line = STARTING_LINE.max(field.burst_start_line().max(0) as usize);
     let porch_end_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as usize;
     // The record chain's blanking-edge transient sets in slightly before the
