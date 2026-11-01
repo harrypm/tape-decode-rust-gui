@@ -141,13 +141,15 @@ impl SincLut {
     /// split exactly as `resample` splits one.
     #[inline(always)]
     fn decompose(coords: &[f64; RESAMPLE_BATCH]) -> [(usize, usize, f32); RESAMPLE_BATCH] {
-        coords.map(|coord| {
+        let mut taps = [(0, 0, 0.0); RESAMPLE_BATCH];
+        for (tap, &coord) in taps.iter_mut().zip(coords) {
             let coord_int = coord as usize;
             let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
             let phase = phase_pos as usize;
             let alpha = (phase_pos - phase as f64) as f32;
-            (coord_int - SINC_TAPS_BEFORE, phase, alpha)
-        })
+            *tap = (coord_int - SINC_TAPS_BEFORE, phase, alpha);
+        }
+        taps
     }
 
     /// Resample `buf` at each coordinate, all within `coord_bounds`. With SIMD
@@ -604,9 +606,12 @@ fn scale_field_linear(
         };
         let mut eval_index = idx;
         while run_end - eval_index >= RESAMPLE_BATCH {
-            let coords: [f64; RESAMPLE_BATCH] = std::array::from_fn(|j| coord_at(eval_index + j));
-            let adjusts: [f32; RESAMPLE_BATCH] =
-                std::array::from_fn(|_| next_adjust(&mut smoothed_adjust) as f32);
+            let mut coords = [0.0f64; RESAMPLE_BATCH];
+            let mut adjusts = [0.0f32; RESAMPLE_BATCH];
+            for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
+                *coord = coord_at(eval_index + j);
+                *adjust = next_adjust(&mut smoothed_adjust) as f32;
+            }
             let mut samples = [0.0f32; RESAMPLE_BATCH];
             lut.resample_batch(buf, &coords, &mut samples);
             dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
