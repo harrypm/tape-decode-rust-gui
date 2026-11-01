@@ -1678,8 +1678,8 @@ fn level_estimates(smoothed: &[f32]) -> (f32, f32) {
 /// `data[fall] >= level > data[fall + 1]` and `data[rise] < level <= data[rise + 1]`.
 fn sliced_pulses(data: &[f32], level: f32) -> Vec<(usize, usize)> {
     // Crossings are a few per line, so a chunk of sample pairs whose samples
-    // all lie on one side of the level is skipped on a vectorizable min/max
-    // scan, and only the rest is walked pair by pair.
+    // all lie on one side of the level is skipped on a vectorizable count,
+    // and only the rest is walked pair by pair.
     const CHUNK: usize = 64;
     let mut pulses = Vec::new();
     let mut fall = None;
@@ -1688,9 +1688,8 @@ fn sliced_pulses(data: &[f32], level: f32) -> Vec<(usize, usize)> {
     while first < last_pair {
         let end = (first + CHUNK).min(last_pair);
         let samples = &data[first..=end];
-        let min = samples.iter().fold(f32::INFINITY, |acc, &v| acc.min(v));
-        let max = samples.iter().fold(f32::NEG_INFINITY, |acc, &v| acc.max(v));
-        if min < level && max >= level {
+        let below = samples.iter().filter(|&&v| v < level).count();
+        if below != 0 && below != samples.len() {
             for (i, pair) in samples.windows(2).enumerate() {
                 let (a, b) = (pair[0], pair[1]);
                 if a >= level && b < level {
