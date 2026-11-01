@@ -326,33 +326,55 @@ pub(crate) fn gen_chroma_heterodyne(
     field_len: usize,
 ) -> Vec<Vec<f32>> {
     use std::f64::consts::TAU;
-    // The carrier is walked as rotating phasors: LANES of them per chunk,
-    // each advancing LANES samples per rotation so the rotations do not form
-    // one dependency chain, re-seeded from an exact sine and cosine of the
-    // reduced angle every CHUNK samples so the f64 rounding of the rotations
+    // The carrier is walked as LANES rotating phasors a sample apart, each
+    // advancing LANES samples per rotation, so the rotations vectorize
+    // instead of forming one dependency chain. Every CHUNK samples the first
+    // phasor is re-seeded from an exact sine and cosine of the reduced angle
+    // (the others follow by rotation), so the f64 rounding of the rotations
     // never accumulates past that.
-    const CHUNK: usize = 256;
+    const CHUNK: usize = 1024;
     const LANES: usize = 8;
     let angle_step = TAU * het_wave_scale;
-    let angle_at = |i: usize| angle_step.mul_add(i as f64, phase_drift).rem_euclid(TAU);
-    let (lane_sin, lane_cos) = (angle_step * LANES as f64).sin_cos();
+    let rotation = |steps: usize| {
+        let (sin, cos) = (angle_step * steps as f64).sin_cos();
+        (cos, sin)
+    };
+    let rotate = |(cos, sin): (f64, f64), (rot_cos, rot_sin): (f64, f64)| {
+        (
+            cos.mul_add(rot_cos, -(sin * rot_sin)),
+            sin.mul_add(rot_cos, cos * rot_sin),
+        )
+    };
+    let lane_rotation = rotation(LANES);
+    let one_rotation = rotation(1);
 
     let mut phases: [Vec<f32>; 4] = std::array::from_fn(|_| Vec::with_capacity(field_len));
-    for chunk_start in (0..field_len).step_by(CHUNK) {
-        let len = CHUNK.min(field_len - chunk_start);
-        let mut phasors: [(f64, f64); LANES] =
-            std::array::from_fn(|lane| angle_at(chunk_start + lane).sin_cos());
-        for k in 0..len {
-            let (sin, cos) = phasors[k % LANES];
-            let (sin32, cos32) = (sin as f32, cos as f32);
-            phases[0].push(-cos32);
-            phases[1].push(sin32);
-            phases[2].push(cos32);
-            phases[3].push(-sin32);
-            phasors[k % LANES] = (
-                sin.mul_add(lane_cos, cos * lane_sin),
-                cos.mul_add(lane_cos, -(sin * lane_sin)),
-            );
+    let mut index = 0;
+    while index < field_len {
+        let (sin, cos) = angle_step
+            .mul_add(index as f64, phase_drift)
+            .rem_euclid(TAU)
+            .sin_cos();
+        let mut cosines = [0.0f64; LANES];
+        let mut sines = [0.0f64; LANES];
+        let mut phasor = (cos, sin);
+        for lane in 0..LANES {
+            (cosines[lane], sines[lane]) = phasor;
+            phasor = rotate(phasor, one_rotation);
+        }
+        let chunk_end = field_len.min(index + CHUNK);
+        while index < chunk_end {
+            let count = LANES.min(chunk_end - index);
+            let cos32 = cosines.map(|c| c as f32);
+            let sin32 = sines.map(|s| s as f32);
+            phases[0].extend(cos32[..count].iter().map(|c| -c));
+            phases[1].extend_from_slice(&sin32[..count]);
+            phases[2].extend_from_slice(&cos32[..count]);
+            phases[3].extend(sin32[..count].iter().map(|s| -s));
+            for lane in 0..LANES {
+                (cosines[lane], sines[lane]) = rotate((cosines[lane], sines[lane]), lane_rotation);
+            }
+            index += count;
         }
     }
     phases.into()
