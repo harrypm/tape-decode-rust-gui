@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::optimized::{
-    boxcar_same, exp_fast, narrow_sos, powf_fast_nonneg, scale_field, sosfilt_f32,
-    sosfiltfilt_f32, sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
+    boxcar_same, exp_fast, f32_from_total_order_key, f32_total_order_key, narrow_sos,
+    powf_fast_nonneg, scale_field, select_ranks_by_key, sosfilt_f32, sosfiltfilt_f32,
+    sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;

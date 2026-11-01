@@ -1,3 +1,4 @@
+use super::select_ranks_by_key;
 use anyhow::{bail, Result};
 
 // Full-field wow factors are large; fixed-point keeps the buffer at 4 bytes per
@@ -654,50 +655,11 @@ fn scale_field_k<const K: usize>(
     (dsout, median, mad)
 }
 
-const WOW_FACTOR_RADIX_BITS: u32 = 16;
-const WOW_FACTOR_RADIX_SIZE: usize = 1 << WOW_FACTOR_RADIX_BITS;
-const WOW_FACTOR_RADIX_MASK: u32 = (WOW_FACTOR_RADIX_SIZE as u32) - 1;
 const WOW_FACTOR_I32_ORDER_BIAS: u32 = 0x8000_0000;
-
-fn select_count_bucket(counts: &[u32], target_index: usize) -> (usize, usize) {
-    let mut before = 0usize;
-    for (bucket, &count) in counts.iter().enumerate() {
-        let next = before + count as usize;
-        if next > target_index {
-            return (bucket, before);
-        }
-        before = next;
-    }
-    unreachable!("target index outside histogram count")
-}
-
-/// Low-radix histogram for the values of `packed` (keyed by `key`) that fall in
-/// the given high-radix `high` bucket.
-fn low_radix_histogram<F>(packed: &[i32], key: F, high: usize) -> Vec<u32>
-where
-    F: Fn(i32) -> u32 + Copy,
-{
-    let mut low_counts = vec![0u32; WOW_FACTOR_RADIX_SIZE];
-    for &value in packed {
-        let ordered = key(value);
-        if (ordered >> WOW_FACTOR_RADIX_BITS) as usize == high {
-            low_counts[(ordered & WOW_FACTOR_RADIX_MASK) as usize] += 1;
-        }
-    }
-    low_counts
-}
-
-#[inline]
-fn radix_value(high: usize, low_counts: &[u32], rank_in_high: usize) -> u32 {
-    let (low, _) = select_count_bucket(low_counts, rank_in_high);
-    ((high as u32) << WOW_FACTOR_RADIX_BITS) | low as u32
-}
 
 /// Median (mean of the two middle order statistics for an even count) of
 /// `packed` under the order-preserving `key`, with `decode` mapping an ordered
-/// `u32` back to its real value. The high-radix histogram is built once and the
-/// low-radix histogram is reused whenever both middle ranks share a bucket, so
-/// the buffer is scanned twice (the common case) instead of once per `select`.
+/// `u32` back to its real value.
 fn radix_median_by_key<K, D>(packed: &[i32], key: K, decode: D) -> f64
 where
     K: Fn(i32) -> u32 + Copy,
@@ -706,28 +668,11 @@ where
     let count = packed.len();
     assert!(count > 0);
     let upper_index = count / 2;
-
-    let mut high_counts = vec![0u32; WOW_FACTOR_RADIX_SIZE];
-    for &value in packed {
-        high_counts[(key(value) >> WOW_FACTOR_RADIX_BITS) as usize] += 1;
-    }
-
-    let (high_u, before_u) = select_count_bucket(&high_counts, upper_index);
-    let low_u = low_radix_histogram(packed, key, high_u);
-    let upper = radix_value(high_u, &low_u, upper_index - before_u);
-
     if !count.is_multiple_of(2) {
+        let [upper] = select_ranks_by_key(packed, key, [upper_index]);
         return decode(upper);
     }
-
-    let lower_index = upper_index - 1;
-    let (high_l, before_l) = select_count_bucket(&high_counts, lower_index);
-    let lower = if high_l == high_u {
-        radix_value(high_l, &low_u, lower_index - before_l)
-    } else {
-        let low_l = low_radix_histogram(packed, key, high_l);
-        radix_value(high_l, &low_l, lower_index - before_l)
-    };
+    let [lower, upper] = select_ranks_by_key(packed, key, [upper_index - 1, upper_index]);
     (decode(lower) + decode(upper)) / 2.0
 }
 

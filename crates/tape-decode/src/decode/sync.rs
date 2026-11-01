@@ -1665,14 +1665,13 @@ fn window_median(data: &[f32], center: usize) -> Option<f32> {
 /// the field: the sync tips are its lowest few percent and the blanking
 /// intervals the band just above them.
 fn level_estimates(smoothed: &[f32]) -> (f32, f32) {
-    let mut sorted = smoothed.to_vec();
-    let n = sorted.len();
-    let mut percentile = |fraction: f64| {
-        *sorted
-            .select_nth_unstable_by((n as f64 * fraction) as usize, f32::total_cmp)
-            .1
-    };
-    (percentile(0.05), percentile(0.25))
+    let rank = |fraction: f64| (smoothed.len() as f64 * fraction) as usize;
+    let [sync, blank] =
+        select_ranks_by_key(smoothed, f32_total_order_key, [rank(0.05), rank(0.25)]);
+    (
+        f32_from_total_order_key(sync),
+        f32_from_total_order_key(blank),
+    )
 }
 
 /// Pulses of `data` sliced at `level`, as `(fall, rise)` sample pairs with
