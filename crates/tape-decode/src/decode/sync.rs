@@ -1643,30 +1643,6 @@ struct HsyncCandidate {
     porch_level: f32,
 }
 
-/// Boxcar average of `window` (odd) samples centred on each sample, with the
-/// ends zero-padded.
-fn boxcar_same(data: &[f32], window: usize) -> Vec<f32> {
-    let half = window / 2;
-    let scale = 1.0 / window as f64;
-    // The running sum accumulates in f64 so its rounding stays far below the
-    // resolution of the f32 output.
-    let mut sum = data[..half.min(data.len())]
-        .iter()
-        .map(|&v| f64::from(v))
-        .sum::<f64>();
-    (0..data.len())
-        .map(|i| {
-            if let Some(&v) = data.get(i + half) {
-                sum += f64::from(v);
-            }
-            if i > half {
-                sum -= f64::from(data[i - half - 1]);
-            }
-            (sum * scale) as f32
-        })
-        .collect()
-}
-
 /// The element at the middle index of the sorted values (the larger of the
 /// two middle ones for an even count).
 fn upper_median(values: impl Iterator<Item = f32>) -> Option<f32> {
