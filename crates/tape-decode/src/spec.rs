@@ -856,11 +856,6 @@ impl DecoderSpec {
     }
 
     #[inline]
-    pub(crate) fn output_lines(&self) -> usize {
-        (self.sys_frame_lines.line_count() / 2) + 1
-    }
-
-    #[inline]
     pub(crate) fn bytes_per_field(&self) -> u64 {
         (self.freq_hz() / (self.sys_fps * 2.0)) as u64 + 1
     }

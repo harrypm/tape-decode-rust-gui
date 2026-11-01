@@ -541,7 +541,7 @@ fn tracked_chroma(
     } else {
         0.0
     };
-    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, None, None, None, true, shift)?;
+    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, true, shift)?;
     if !spec.chroma_afc_enabled() {
         return Ok(chroma_downscaled);
     }

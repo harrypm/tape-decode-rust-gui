@@ -1302,19 +1302,13 @@ fn sample_clamped(data: &[f32], idx: isize) -> f32 {
 fn downscale_raw_vec(
     field: &mut DecodedField,
     lut: &SincLut,
-    lineinfo: Option<&[f32]>,
-    linesout: Option<usize>,
-    outwidth: Option<usize>,
     use_burst_channel: bool,
     shift: f64,
 ) -> Result<Vec<f32>> {
-    let actual_linelocs = lineinfo
-        .or(field.linelocs.as_deref())
-        .context("missing linelocs")?;
-    let outwidth = outwidth.unwrap_or(field.outlinelen);
-    let linesout = linesout.unwrap_or(field.outlinecount);
+    let actual_linelocs = field.linelocs.as_deref().context("missing linelocs")?;
+    let outwidth = field.outlinelen;
     let k = field.wow_interpolation_method.spline_degree();
-    let out_len = linesout * outwidth;
+    let out_len = field.outlinecount * outwidth;
     // The line-location spline is solved in f64; widen the f32 sync output here.
     let actual_linelocs = actual_linelocs
         .iter()
@@ -1436,7 +1430,6 @@ impl Decoder {
         let readlen = self.spec.readlen();
         let blocksize = BLOCKSIZE;
         let usable_blocksize = self.spec.usable_blocksize();
-        let output_lines = self.spec.output_lines();
         let bytes_per_field = self.spec.bytes_per_field();
 
         let mut output: Vec<WriteableField> = Vec::new();
@@ -1552,15 +1545,8 @@ impl Decoder {
                         // Drop it; the luma pass below recomputes with the final
                         // geometry and the chroma pass then reuses that.
                         field_obj.wow_analysis = None;
-                        let mut luma = downscale_raw_vec(
-                            &mut field_obj,
-                            &self.spec.sinc_lut,
-                            None,
-                            Some(output_lines),
-                            None,
-                            false,
-                            0.0,
-                        )?;
+                        let mut luma =
+                            downscale_raw_vec(&mut field_obj, &self.spec.sinc_lut, false, 0.0)?;
                         if self.spec.rf_y_comb != 0.0 {
                             luma = y_comb(&luma, field_obj.outlinelen, self.spec.rf_y_comb);
                         }
