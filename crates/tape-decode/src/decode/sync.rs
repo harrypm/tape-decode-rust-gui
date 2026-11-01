@@ -1678,17 +1678,32 @@ fn level_estimates(smoothed: &[f32]) -> (f32, f32) {
 /// Pulses of `data` sliced at `level`, as `(fall, rise)` sample pairs with
 /// `data[fall] >= level > data[fall + 1]` and `data[rise] < level <= data[rise + 1]`.
 fn sliced_pulses(data: &[f32], level: f32) -> Vec<(usize, usize)> {
+    // Crossings are a few per line, so a chunk of sample pairs whose samples
+    // all lie on one side of the level is skipped on a vectorizable min/max
+    // scan, and only the rest is walked pair by pair.
+    const CHUNK: usize = 64;
     let mut pulses = Vec::new();
     let mut fall = None;
-    for (i, pair) in data.windows(2).enumerate() {
-        let (a, b) = (pair[0], pair[1]);
-        if a >= level && b < level {
-            fall = Some(i);
-        } else if a < level && b >= level {
-            if let Some(fall) = fall.take() {
-                pulses.push((fall, i));
+    let last_pair = data.len().saturating_sub(1);
+    let mut first = 0;
+    while first < last_pair {
+        let end = (first + CHUNK).min(last_pair);
+        let samples = &data[first..=end];
+        let min = samples.iter().fold(f32::INFINITY, |acc, &v| acc.min(v));
+        let max = samples.iter().fold(f32::NEG_INFINITY, |acc, &v| acc.max(v));
+        if min < level && max >= level {
+            for (i, pair) in samples.windows(2).enumerate() {
+                let (a, b) = (pair[0], pair[1]);
+                if a >= level && b < level {
+                    fall = Some(first + i);
+                } else if a < level && b >= level {
+                    if let Some(fall) = fall.take() {
+                        pulses.push((fall, first + i));
+                    }
+                }
             }
         }
+        first = end;
     }
     pulses
 }
@@ -1771,9 +1786,11 @@ fn find_sync_pulses(
     // Two falling edges fit when their distance, modulo the stretched line
     // length, lands within the jitter window at either end.
     let eff_line_len = line_len * (1.0 + SYNC_SPACING_TOLERANCE);
+    let inv_eff_line_len = 1.0 / eff_line_len;
     let jitter = line_len * 0.1;
     let on_grid = |a: usize, b: usize| {
-        let rem = (a.abs_diff(b) as f64) % eff_line_len;
+        let distance = a.abs_diff(b) as f64;
+        let rem = distance - (distance * inv_eff_line_len).floor() * eff_line_len;
         rem < jitter || rem > eff_line_len - jitter
     };
     let mut support = vec![1usize; candidates.len()];
