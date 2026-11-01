@@ -388,18 +388,12 @@ fn scale_field_linear(
     // Warmup smoothing over the lead-in samples. This walk is a tiny fraction
     // of the field, so it keeps the straightforward per-sample evaluation.
     let mut warmup_span = K;
-    let initial = eval_spline_value_deriv_k::<K>(t, c, nt, &mut warmup_span, 0.0).1;
+    let initial = eval_spline_value_deriv_1(t, c, nt, &mut warmup_span, 0.0).1;
     let mut smoothed_adjust = level_adjusted(pack_wow_factor(initial), median, threshold);
     if smoothing_enabled && lineoffset_out_samples > 1 {
         for index in 1..lineoffset_out_samples {
-            let deriv = eval_spline_value_deriv_k::<K>(
-                t,
-                c,
-                nt,
-                &mut warmup_span,
-                index as f64 * eval_scale,
-            )
-            .1;
+            let deriv =
+                eval_spline_value_deriv_1(t, c, nt, &mut warmup_span, index as f64 * eval_scale).1;
             smoothed_adjust = alpha.mul_add(
                 level_adjusted(pack_wow_factor(deriv), median, threshold),
                 one_minus_alpha * smoothed_adjust,
@@ -460,6 +454,101 @@ fn scale_field_linear(
     (dsout, median, mad)
 }
 
+/// One knot span of a degree-`K` spline as the polynomial of `u = x - t0`
+/// that the spline reduces to inside it: `value[j]` and `deriv[j]` are the
+/// coefficients of `u^j`. Taylor expanding the span's basis functions at its
+/// start is exact, as they are polynomials there, and leaves each output
+/// sample a short Horner evaluation instead of the basis recurrence.
+#[derive(Clone, Copy)]
+struct SpanPoly {
+    t0: f64,
+    t1: f64,
+    value: [f64; 4],
+    deriv: [f64; 4],
+}
+
+impl SpanPoly {
+    fn new<const K: usize>(t: &[f64], c: &[f64], span: usize) -> Self {
+        let t0 = t[span];
+        let ders = bspline_ders_basis::<K>(t, span, t0, K);
+        let cofs = &c[span - K..=span];
+        let mut value = [0.0; 4];
+        let mut deriv = [0.0; 4];
+        let mut factorial = 1.0;
+        for order in 0..=K {
+            let d: f64 = ders[order].iter().zip(cofs).map(|(b, cj)| b * cj).sum();
+            value[order] = d / factorial;
+            if order > 0 {
+                deriv[order - 1] = d / factorial * order as f64;
+            }
+            factorial *= (order + 1) as f64;
+        }
+        Self {
+            t0,
+            t1: t[span + 1],
+            value,
+            deriv,
+        }
+    }
+
+    #[inline(always)]
+    fn eval<const K: usize>(&self, x: f64) -> (f64, f64) {
+        let u = x - self.t0;
+        let mut value = self.value[K];
+        let mut deriv = self.deriv[K - 1];
+        let mut order = K;
+        while order > 0 {
+            order -= 1;
+            value = value.mul_add(u, self.value[order]);
+            if order > 0 {
+                deriv = deriv.mul_add(u, self.deriv[order - 1]);
+            }
+        }
+        (value, deriv)
+    }
+}
+
+/// The knot span `x` evaluates in, continuing from `span`: the spline's edge
+/// pieces extend past the first and last knots.
+#[inline(always)]
+fn advance_span<const K: usize>(t: &[f64], nt: usize, span: &mut usize, x: f64) {
+    if x <= t[K] {
+        *span = K;
+    } else if x >= t[nt] {
+        *span = nt - 1;
+    } else {
+        while *span + 1 < nt && x >= t[*span + 1] {
+            *span += 1;
+        }
+    }
+}
+
+/// Walks the eval indices `[start, end)` span by span, handing each run of
+/// consecutive indices inside one span to `run` with the span's polynomial.
+fn for_each_span_run<const K: usize>(
+    t: &[f64],
+    c: &[f64],
+    eval_scale: f64,
+    start: usize,
+    end: usize,
+    mut run: impl FnMut(&SpanPoly, std::ops::Range<usize>),
+) {
+    let nt = t.len() - K - 1;
+    let mut span = K;
+    let mut idx = start;
+    while idx < end {
+        advance_span::<K>(t, nt, &mut span, idx as f64 * eval_scale);
+        let poly = SpanPoly::new::<K>(t, c, span);
+        let run_end = if span + 1 < nt {
+            first_index_reaching(poly.t1, eval_scale, idx + 1, end)
+        } else {
+            end
+        };
+        run(&poly, idx..run_end);
+        idx = run_end;
+    }
+}
+
 fn scale_field_k<const K: usize>(
     buf: &[f32],
     lut: &SincLut,
@@ -483,23 +572,18 @@ fn scale_field_k<const K: usize>(
     assert!(required_eval_count <= eval_count);
 
     let (t, c) = spline;
-    let nt = t.len() - K - 1;
 
     // The wow-factor median/MAD depend only on the line-location spline, so the
     // caller caches them across a field's channels. When not cached, evaluate
     // the spline derivative once per index to gather the distribution and take
     // the median and MAD.
     let (median, mad) = cached_median_mad.unwrap_or_else(|| {
-        // Collect straight from the spline walk so the buffer is written once,
-        // skipping the zero-init pass of `vec![0; eval_count]`.
-        let mut span = K;
-        let wow_packed: Vec<i32> = (0..eval_count)
-            .map(|index| {
-                let (_, deriv) =
-                    eval_spline_value_deriv_k::<K>(t, c, nt, &mut span, index as f64 * eval_scale);
-                pack_wow_factor(deriv)
-            })
-            .collect();
+        let mut wow_packed: Vec<i32> = Vec::with_capacity(eval_count);
+        for_each_span_run::<K>(t, c, eval_scale, 0, eval_count, |poly, range| {
+            wow_packed.extend(
+                range.map(|index| pack_wow_factor(poly.eval::<K>(index as f64 * eval_scale).1)),
+            );
+        });
         let median = median_wow_factors(&wow_packed);
         (median, median_wow_factor_abs_diff(&wow_packed, median))
     });
@@ -514,57 +598,59 @@ fn scale_field_k<const K: usize>(
         (0.0, 0.0)
     };
 
-    // Warmup smoothing over the lead-in samples. Walk the spline derivative
-    // directly so this does not depend on the (cached-away) packed buffer.
-    let mut warmup_span = K;
-    let initial = eval_spline_value_deriv_k::<K>(t, c, nt, &mut warmup_span, 0.0).1;
-    let mut smoothed_adjust = adjusted(pack_wow_factor(initial));
-    if smoothing_enabled && lineoffset_out_samples > 1 {
-        for index in 1..lineoffset_out_samples {
-            let deriv = eval_spline_value_deriv_k::<K>(
-                t,
-                c,
-                nt,
-                &mut warmup_span,
-                index as f64 * eval_scale,
-            )
-            .1;
-            smoothed_adjust = alpha.mul_add(
-                adjusted(pack_wow_factor(deriv)),
-                one_minus_alpha * smoothed_adjust,
-            );
-        }
+    // Warmup smoothing over the lead-in samples.
+    let mut smoothed_adjust = adjusted(pack_wow_factor(
+        SpanPoly::new::<K>(t, c, K).eval::<K>(0.0).1,
+    ));
+    if smoothing_enabled {
+        for_each_span_run::<K>(
+            t,
+            c,
+            eval_scale,
+            1,
+            lineoffset_out_samples,
+            |poly, range| {
+                for index in range {
+                    let raw_adjust =
+                        adjusted(pack_wow_factor(poly.eval::<K>(index as f64 * eval_scale).1));
+                    smoothed_adjust = alpha.mul_add(raw_adjust, one_minus_alpha * smoothed_adjust);
+                }
+            },
+        );
     }
 
-    let mut span = K;
     if outwidth == 0 {
         return (Vec::new(), median, mad);
     }
 
-    // Build the output directly instead of zero-initializing a buffer and
-    // overwriting every element: every index is written exactly once here, so
-    // the `vec![0.0; ...]` memset was pure wasted bandwidth in the MT path.
-    // `eval_index`/`smoothed_adjust` advance continuously across the whole
-    // field, so a flat walk is identical to the previous per-line chunking.
     let mut dsout = Vec::with_capacity(out_len);
-    for output_index in 0..out_len {
-        let eval_index = lineoffset_out_samples + output_index;
-        let (coord, deriv) =
-            eval_spline_value_deriv_k::<K>(t, c, nt, &mut span, eval_index as f64 * eval_scale);
-        let raw_adjust = adjusted(pack_wow_factor(deriv));
-        let level_adjust = if smoothing_enabled {
-            smoothed_adjust = alpha.mul_add(raw_adjust, one_minus_alpha * smoothed_adjust);
-            smoothed_adjust
-        } else {
-            raw_adjust
-        };
-        // Clamp the source position into the interior so the tap window stays in
-        // bounds. Valid fields never reach the edge, so this is a no-op for
-        // normal output; it only catches degenerate line locations. `.max().min()`
-        // (not `clamp`) also folds a NaN coordinate to the low edge.
-        let coord = (coord + shift).max(coord_lo).min(coord_hi);
-        dsout.push(level_adjust as f32 * lut.resample(buf, coord));
-    }
+    let end_eval = lineoffset_out_samples + out_len;
+    for_each_span_run::<K>(
+        t,
+        c,
+        eval_scale,
+        lineoffset_out_samples,
+        end_eval,
+        |poly, range| {
+            for eval_index in range {
+                let (coord, deriv) = poly.eval::<K>(eval_index as f64 * eval_scale);
+                let raw_adjust = adjusted(pack_wow_factor(deriv));
+                let level_adjust = if smoothing_enabled {
+                    smoothed_adjust = alpha.mul_add(raw_adjust, one_minus_alpha * smoothed_adjust);
+                    smoothed_adjust
+                } else {
+                    raw_adjust
+                };
+                // Clamp the source position into the interior so the tap window
+                // stays in bounds. Valid fields never reach the edge, so this is a
+                // no-op for normal output; it only catches degenerate line
+                // locations. `.max().min()` (not `clamp`) also folds a NaN
+                // coordinate to the low edge.
+                let coord = (coord + shift).max(coord_lo).min(coord_hi);
+                dsout.push(level_adjust as f32 * lut.resample(buf, coord));
+            }
+        },
+    );
     (dsout, median, mad)
 }
 
@@ -665,47 +751,23 @@ fn median_wow_factor_abs_diff(packed: &[i32], median: f64) -> f64 {
     )
 }
 
-fn eval_spline_value_deriv_k<const K: usize>(
+/// Value and derivative of the degree-1 spline at `x`, continuing from
+/// `span`. Its two basis functions are straight lines, so this is a lerp.
+fn eval_spline_value_deriv_1(
     t: &[f64],
     c: &[f64],
     nt: usize,
     span: &mut usize,
     x: f64,
 ) -> (f64, f64) {
-    if x <= t[K] {
-        *span = K;
-    } else if x >= t[nt] {
-        *span = nt - 1;
-    } else {
-        while *span + 1 < nt && x >= t[*span + 1] {
-            *span += 1;
-        }
-    }
-    // The degree-1 (linear) spline is the default wow-interpolation mode and the
-    // hot caller here. Its two basis functions are straight lines, so evaluate
-    // them and their derivatives in closed form rather than running the general
-    // `bspline_ders_basis` recurrence (with its 4x4 scratch arrays and factor
-    // passes) for what reduces to a lerp. `K` is a const generic, so the branch
-    // is resolved at compile time.
-    if K == 1 {
-        let s = *span;
-        let inv_h = 1.0 / (t[s + 1] - t[s]);
-        let b0 = (t[s + 1] - x) * inv_h;
-        let b1 = (x - t[s]) * inv_h;
-        let c0 = c[s - 1];
-        let c1 = c[s];
-        return (b0 * c0 + b1 * c1, (c1 - c0) * inv_h);
-    }
-    let ders = bspline_ders_basis::<K>(t, *span, x, 1);
-    let cofs = &c[*span - K..=*span];
-    let mut value = 0.0;
-    let mut deriv = 0.0;
-    for j in 0..=K {
-        let cj = cofs[j];
-        value += ders[0][j] * cj;
-        deriv += ders[1][j] * cj;
-    }
-    (value, deriv)
+    advance_span::<1>(t, nt, span, x);
+    let s = *span;
+    let inv_h = 1.0 / (t[s + 1] - t[s]);
+    let b0 = (t[s + 1] - x) * inv_h;
+    let b1 = (x - t[s]) * inv_h;
+    let c0 = c[s - 1];
+    let c1 = c[s];
+    (b0 * c0 + b1 * c1, (c1 - c0) * inv_h)
 }
 
 /// Build an interpolating spline of degree `k` over (x, y) for the wow
@@ -835,10 +897,10 @@ fn make_interp_spline<const K: usize>(
 /// the basis functions B_{span-k+j}. Algorithm A2.3 from "The NURBS Book".
 ///
 /// Degree `k` is bounded by 3 (cubic) in this codebase, so all scratch storage uses
-/// fixed-size stack arrays of width 4 to avoid per-call heap allocation in the hot path.
-fn bspline_ders_basis<const K: usize>(t: &[f64], span: usize, x: f64, d: usize) -> [[f64; 4]; 3] {
+/// fixed-size stack arrays of width 4.
+fn bspline_ders_basis<const K: usize>(t: &[f64], span: usize, x: f64, d: usize) -> [[f64; 4]; 4] {
     let p = K;
-    debug_assert!(p <= 3 && d <= 2);
+    debug_assert!(p <= 3 && d <= p);
     let mut ndu = [[0.0f64; 4]; 4];
     let mut left = [0.0f64; 4];
     let mut right = [0.0f64; 4];
@@ -856,7 +918,7 @@ fn bspline_ders_basis<const K: usize>(t: &[f64], span: usize, x: f64, d: usize) 
         ndu[j][j] = saved;
     }
 
-    let mut ders = [[0.0f64; 4]; 3];
+    let mut ders = [[0.0f64; 4]; 4];
     for j in 0..=p {
         ders[0][j] = ndu[j][p];
     }
