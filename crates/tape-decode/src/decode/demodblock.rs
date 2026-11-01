@@ -127,31 +127,25 @@ fn sub_deemphasis(
 
     // Get the instantaneous amplitude of the signal using the hilbert transform
     // and divide by the formats specified deviation so we get a amplitude compared to the specifications references.
-    // The forward transform of `hf_part` is `high_pass_fft` itself (the c2r
-    // inverse below is its exact counterpart), so build the analytic spectrum
-    // straight from it instead of running a redundant r2c. The round trip
-    // would drop the DC and Nyquist imaginary parts; match that here.
-    let analytic = {
-        let n = out_video.len();
-        let mut spectrum = analytic_spectrum(&high_pass_fft, n);
-        spectrum[0].im = 0.0;
-        spectrum[n / 2].im = 0.0;
-        ifft_complex_owned_f32(spectrum, spec.fft_block_inverse_f32.as_ref())
-    };
-    let hf_part = irfft_owned_f32(
-        high_pass_fft,
-        Some(out_video.len()),
-        spec.fft_block_c2r_f32.as_ref(),
-    );
-    // `Complex::norm` calls libm `hypot`, whose overflow-safe scaling is wasted
-    // on these bounded analytic samples. Computing the magnitude directly is far
-    // cheaper (and matches the `re*re + im*im` idiom used elsewhere).
-    let inv_deviation = 1.0 / deviation;
-    // The amplitude buffer is block-sized; the analytic samples are already f32,
-    // so compute each magnitude directly in f32 and store it as f32.
-    let mut amplitude: Vec<f32> = analytic
+    // The analytic signal's real part is the high-passed signal itself and
+    // its imaginary part the Hilbert transform, the inverse of the spectrum
+    // rotated by -i on the interior bins (DC and Nyquist carry none), so both
+    // come out of the half-spectrum c2r transform instead of a full-length
+    // complex inverse of the one-sided spectrum.
+    let n = out_video.len();
+    let mut hilbert_fft: Vec<Complex32> = high_pass_fft
         .iter()
-        .map(|sample| sample.re.mul_add(sample.re, sample.im * sample.im).sqrt() * inv_deviation)
+        .map(|bin| Complex32::new(bin.im, -bin.re))
+        .collect();
+    hilbert_fft[0] = Complex32::new(0.0, 0.0);
+    hilbert_fft[n / 2] = Complex32::new(0.0, 0.0);
+    let hilbert = irfft_owned_f32(hilbert_fft, Some(n), spec.fft_block_c2r_f32.as_ref());
+    let hf_part = irfft_owned_f32(high_pass_fft, Some(n), spec.fft_block_c2r_f32.as_ref());
+    let inv_deviation = 1.0 / deviation;
+    let mut amplitude: Vec<f32> = hf_part
+        .iter()
+        .zip(&hilbert)
+        .map(|(&hf, &hilbert)| hf.mul_add(hf, hilbert * hilbert).sqrt() * inv_deviation)
         .collect();
 
     // Clip the value after filtering to make sure we don't go negative.
