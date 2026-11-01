@@ -69,21 +69,6 @@ fn wrap_phase(phase: f64) -> f64 {
     phase.sin().atan2(phase.cos())
 }
 
-/// Central differences of a sequence given the differences `steps` between
-/// its consecutive values, one-sided at the ends; empty for fewer than two
-/// values.
-fn central_differences<T: Float>(steps: &[T]) -> Vec<T> {
-    let Some((&first, &last)) = steps.first().zip(steps.last()) else {
-        return Vec::new();
-    };
-    let two = T::one() + T::one();
-    let mut out = Vec::with_capacity(steps.len() + 1);
-    out.push(first);
-    out.extend(steps.windows(2).map(|pair| (pair[0] + pair[1]) / two));
-    out.push(last);
-    out
-}
-
 /// One restoration pass over a field.
 struct Upconverted {
     /// The restored chroma block.
@@ -116,45 +101,54 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
     let samp_rate = spec.tbc_sample_rate();
 
     // Under-carrier phase advance per sample, as the central difference of
-    // the unwrapped phase, clamped to the legal corridor ahead of the
-    // multiplication: the studio limiter clipped the colour difference to
-    // these bounds, so anything outside is noise or a tape channel
-    // truncation transient, which the multiplication would scale up and the
-    // downstream de-emphasis smear into streaks at saturated transitions.
-    // Clipping the instantaneous frequency and re-integrating keeps the
-    // carrier smooth, with the clipped spans as constant-frequency
-    // stretches; the absolute phase is lost, which the FM decoders
-    // downstream do not care about. The clamped steps are f64: the corridor
-    // edge rounded to f32 would bias the thousands of clamped samples of a
-    // field alike, and their integral runs to ~1e5 rad.
+    // the unwrapped phase (one-sided at the ends), clamped to the legal
+    // corridor ahead of the multiplication: the studio limiter clipped the
+    // colour difference to these bounds, so anything outside is noise or a
+    // tape channel truncation transient, which the multiplication would
+    // scale up and the downstream de-emphasis smear into streaks at
+    // saturated transitions. Clipping the instantaneous frequency and
+    // re-integrating keeps the carrier smooth, with the clipped spans as
+    // constant-frequency stretches; the absolute phase is lost, which the FM
+    // decoders downstream do not care about. The clamped steps are f64: the
+    // corridor edge rounded to f32 would bias the thousands of clamped
+    // samples of a field alike, and their integral runs to ~1e5 rad.
+    //
+    // The restored-domain instantaneous frequency for the bell is the central
+    // difference of the re-integrated phase, whose consecutive samples differ
+    // by the clamped steps from the second one on. Both come out of one pass
+    // over the analytic signal that carries the previous raw and clamped
+    // steps, so no field-sized f64 buffer is needed.
     let step_per_hz = TAU / samp_rate;
     let corridor = f64::from(FOB_HZ - MAX_DEVIATION_HZ) / f64::from(mult) * step_per_hz
         ..=f64::from(FOR_HZ + MAX_DEVIATION_HZ) / f64::from(mult) * step_per_hz;
-    let steps: Vec<f32> = analytic
-        .windows(2)
-        .map(|pair| phase_step(pair[0], pair[1]))
-        .collect();
-    let steps: Vec<f64> = central_differences(&steps)
-        .into_iter()
-        .map(|step| f64::from(step).clamp(*corridor.start(), *corridor.end()))
-        .collect();
-    let mut integral = 0.0f64;
-    let phase: Vec<f32> = steps
-        .iter()
-        .map(|&step| {
-            integral += f64::from(mult) * step;
-            integral.rem_euclid(TAU) as f32
-        })
-        .collect();
-
-    // Restored-domain instantaneous frequency for the bell: central
-    // differences of the re-integrated phase (whose consecutive samples
-    // differ by `steps[1..]`), smoothed, bounded to the legal excursion.
     let freq_scale = f64::from(mult) / step_per_hz;
-    let raw_freq: Vec<f32> = central_differences(&steps[1..])
-        .into_iter()
-        .map(|step| (step * freq_scale) as f32)
-        .collect();
+    let n = analytic.len();
+    assert!(n >= 2, "a field has more than one sample");
+    let mut phase = Vec::with_capacity(n);
+    let mut raw_freq = Vec::with_capacity(n);
+    let mut integral = 0.0f64;
+    let mut prev_raw = None;
+    let mut prev_step = 0.0f64;
+    for k in 0..n {
+        let raw = analytic.get(k + 1).map(|&next| phase_step(analytic[k], next));
+        let centered = match (prev_raw, raw) {
+            (Some(before), Some(after)) => (before + after) / 2.0,
+            (None, Some(after)) => after,
+            (Some(before), None) => before,
+            (None, None) => unreachable!(),
+        };
+        let step = f64::from(centered).clamp(*corridor.start(), *corridor.end());
+        integral += f64::from(mult) * step;
+        phase.push(integral.rem_euclid(TAU) as f32);
+        match k {
+            0 => {}
+            1 => raw_freq.push((step * freq_scale) as f32),
+            _ => raw_freq.push(((prev_step + step) / 2.0 * freq_scale) as f32),
+        }
+        prev_raw = raw;
+        prev_step = step;
+    }
+    raw_freq.push((prev_step * freq_scale) as f32);
     let mut inst_freq = moving_average(&raw_freq, INST_FREQ_SMOOTHING);
     for freq in &mut inst_freq {
         *freq = freq.clamp(*CARRIER_RANGE_HZ.start(), *CARRIER_RANGE_HZ.end());
