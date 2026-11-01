@@ -136,7 +136,157 @@ impl SincLut {
         let window = buf[start..start + SINC_TAPS].try_into().unwrap();
         sinc_dot(window, &self.rows[phase].0, &self.rows[phase + 1].0, alpha)
     }
+
+    /// The tap window start, weight row and lerp fraction of each coordinate,
+    /// split exactly as `resample` splits one.
+    #[inline(always)]
+    fn decompose(coords: &[f64; RESAMPLE_BATCH]) -> [(usize, usize, f32); RESAMPLE_BATCH] {
+        coords.map(|coord| {
+            let coord_int = coord as usize;
+            let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
+            let phase = phase_pos as usize;
+            let alpha = (phase_pos - phase as f64) as f32;
+            (coord_int - SINC_TAPS_BEFORE, phase, alpha)
+        })
+    }
+
+    /// Resample `buf` at each coordinate, all within `coord_bounds`. With SIMD
+    /// the batch's dot products are reduced together through one transpose
+    /// tree, which pairs the partial sums in the order `sinc_dot` reduces a
+    /// single window, so the outputs equal `resample`'s.
+    #[inline(always)]
+    fn resample_batch(
+        &self,
+        buf: &[f32],
+        coords: &[f64; RESAMPLE_BATCH],
+        out: &mut [f32; RESAMPLE_BATCH],
+    ) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        {
+            use std::arch::x86_64::*;
+            let taps = Self::decompose(coords);
+            // SAFETY: the windows and rows are checked slices of SINC_TAPS
+            // floats; the stores cover `out` exactly.
+            unsafe {
+                let mut p = [_mm512_setzero_ps(); RESAMPLE_BATCH];
+                for (product, &(start, phase, alpha)) in p.iter_mut().zip(&taps) {
+                    let x = _mm512_loadu_ps(buf[start..start + SINC_TAPS].as_ptr());
+                    let a = _mm512_loadu_ps(self.rows[phase].0.as_ptr());
+                    let b = _mm512_loadu_ps(self.rows[phase + 1].0.as_ptr());
+                    let w = _mm512_fmadd_ps(_mm512_sub_ps(b, a), _mm512_set1_ps(alpha), a);
+                    *product = _mm512_mul_ps(x, w);
+                }
+                // Each stage halves the vector count by adding the two halves
+                // (256, 128, 64 then 32 bits wide) of every output's partials,
+                // interleaving two outputs per vector as it goes.
+                let mut q = [_mm512_setzero_ps(); 8];
+                for (k, q) in q.iter_mut().enumerate() {
+                    let (a, b) = (p[2 * k], p[2 * k + 1]);
+                    *q = _mm512_add_ps(
+                        _mm512_shuffle_f32x4::<0x44>(a, b),
+                        _mm512_shuffle_f32x4::<0xEE>(a, b),
+                    );
+                }
+                let mut r = [_mm512_setzero_ps(); 4];
+                for (k, r) in r.iter_mut().enumerate() {
+                    let (a, b) = (q[2 * k], q[2 * k + 1]);
+                    *r = _mm512_add_ps(
+                        _mm512_shuffle_f32x4::<0x88>(a, b),
+                        _mm512_shuffle_f32x4::<0xDD>(a, b),
+                    );
+                }
+                let mut s = [_mm512_setzero_ps(); 2];
+                for (k, s) in s.iter_mut().enumerate() {
+                    let (a, b) = (r[2 * k], r[2 * k + 1]);
+                    *s = _mm512_add_ps(
+                        _mm512_shuffle_ps::<0x44>(a, b),
+                        _mm512_shuffle_ps::<0xEE>(a, b),
+                    );
+                }
+                let t = _mm512_add_ps(
+                    _mm512_shuffle_ps::<0x88>(s[0], s[1]),
+                    _mm512_shuffle_ps::<0xDD>(s[0], s[1]),
+                );
+                // Element 4m + c of `t` is output m + 4c.
+                let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+                _mm512_storeu_ps(out.as_mut_ptr(), _mm512_permutexvar_ps(order, t));
+            }
+        }
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma",
+            not(target_feature = "avx512f")
+        ))]
+        {
+            use std::arch::x86_64::*;
+            let taps = Self::decompose(coords);
+            // SAFETY: the windows and rows are checked slices of SINC_TAPS
+            // floats, loaded at offsets 0 and 8; the stores cover `out` exactly.
+            unsafe {
+                for (half, out) in out.chunks_exact_mut(8).enumerate() {
+                    let mut p = [_mm256_setzero_ps(); 8];
+                    for (product, &(start, phase, alpha)) in
+                        p.iter_mut().zip(&taps[half * 8..half * 8 + 8])
+                    {
+                        let window = buf[start..start + SINC_TAPS].as_ptr();
+                        let (w0, w1) =
+                            (self.rows[phase].0.as_ptr(), self.rows[phase + 1].0.as_ptr());
+                        let alpha = _mm256_set1_ps(alpha);
+                        let mut acc = _mm256_setzero_ps();
+                        for offset in [0, 8] {
+                            let x = _mm256_loadu_ps(window.add(offset));
+                            let a = _mm256_loadu_ps(w0.add(offset));
+                            let b = _mm256_loadu_ps(w1.add(offset));
+                            let w = _mm256_fmadd_ps(_mm256_sub_ps(b, a), alpha, a);
+                            acc = _mm256_add_ps(acc, _mm256_mul_ps(x, w));
+                        }
+                        *product = acc;
+                    }
+                    let mut q = [_mm256_setzero_ps(); 4];
+                    for (k, q) in q.iter_mut().enumerate() {
+                        let (a, b) = (p[2 * k], p[2 * k + 1]);
+                        *q = _mm256_add_ps(
+                            _mm256_permute2f128_ps::<0x20>(a, b),
+                            _mm256_permute2f128_ps::<0x31>(a, b),
+                        );
+                    }
+                    let mut s = [_mm256_setzero_ps(); 2];
+                    for (k, s) in s.iter_mut().enumerate() {
+                        let (a, b) = (q[2 * k], q[2 * k + 1]);
+                        *s = _mm256_add_ps(
+                            _mm256_shuffle_ps::<0x44>(a, b),
+                            _mm256_shuffle_ps::<0xEE>(a, b),
+                        );
+                    }
+                    let t = _mm256_add_ps(
+                        _mm256_shuffle_ps::<0x88>(s[0], s[1]),
+                        _mm256_shuffle_ps::<0xDD>(s[0], s[1]),
+                    );
+                    // Element 4l + c of `t` is output 2c + l.
+                    let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+                    _mm256_storeu_ps(out.as_mut_ptr(), _mm256_permutevar8x32_ps(t, order));
+                }
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx512f"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            )
+        )))]
+        {
+            for (out, &coord) in out.iter_mut().zip(coords) {
+                *out = self.resample(buf, coord);
+            }
+        }
+    }
 }
+
+/// Outputs the batched resampler produces per call.
+const RESAMPLE_BATCH: usize = 16;
 
 /// `sum(window[t] * lerp(w0[t], w1[t], alpha))` over the taps. Explicit SIMD
 /// where the build has it: the compiler bundles the equivalent array code only
@@ -431,24 +581,40 @@ fn scale_field_linear(
         };
         let raw_adjust = level_adjusted(pack_wow_factor(sp.deriv), median, threshold);
         let alpha_raw = alpha * raw_adjust;
-        for eval_index in idx..run_end {
+        // Clamp the source position into the interior so the tap window stays
+        // in bounds. Valid fields never reach the edge, so this is a no-op for
+        // normal output; it only catches degenerate line locations.
+        // `.max().min()` (not `clamp`) also folds a NaN coordinate to the low
+        // edge.
+        let coord_at = |eval_index: usize| {
             let x = eval_index as f64 * eval_scale;
             let b0 = (sp.t1 - x) * sp.inv_h;
             let b1 = (x - sp.t0) * sp.inv_h;
-            let coord = b0.mul_add(sp.c0, b1 * sp.c1) + shift;
-            let level_adjust = if smoothing_enabled {
-                smoothed_adjust = one_minus_alpha.mul_add(smoothed_adjust, alpha_raw);
-                smoothed_adjust
+            (b0.mul_add(sp.c0, b1 * sp.c1) + shift)
+                .max(coord_lo)
+                .min(coord_hi)
+        };
+        let next_adjust = |smoothed_adjust: &mut f64| {
+            if smoothing_enabled {
+                *smoothed_adjust = one_minus_alpha.mul_add(*smoothed_adjust, alpha_raw);
+                *smoothed_adjust
             } else {
                 raw_adjust
-            };
-            // Clamp the source position into the interior so the tap window
-            // stays in bounds. Valid fields never reach the edge, so this is a
-            // no-op for normal output; it only catches degenerate line locations.
-            // `.max().min()` (not `clamp`) also folds a NaN coordinate to the
-            // low edge.
-            let coord = coord.max(coord_lo).min(coord_hi);
-            dsout.push(level_adjust as f32 * lut.resample(buf, coord));
+            }
+        };
+        let mut eval_index = idx;
+        while run_end - eval_index >= RESAMPLE_BATCH {
+            let coords: [f64; RESAMPLE_BATCH] = std::array::from_fn(|j| coord_at(eval_index + j));
+            let adjusts: [f32; RESAMPLE_BATCH] =
+                std::array::from_fn(|_| next_adjust(&mut smoothed_adjust) as f32);
+            let mut samples = [0.0f32; RESAMPLE_BATCH];
+            lut.resample_batch(buf, &coords, &mut samples);
+            dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
+            eval_index += RESAMPLE_BATCH;
+        }
+        for eval_index in eval_index..run_end {
+            let level_adjust = next_adjust(&mut smoothed_adjust);
+            dsout.push(level_adjust as f32 * lut.resample(buf, coord_at(eval_index)));
         }
         idx = run_end;
     }
@@ -633,22 +799,39 @@ fn scale_field_k<const K: usize>(
         lineoffset_out_samples,
         end_eval,
         |poly, range| {
-            for eval_index in range {
+            // Clamp the source position into the interior so the tap window stays
+            // in bounds. Valid fields never reach the edge, so this is a no-op for
+            // normal output; it only catches degenerate line locations.
+            // `.max().min()` (not `clamp`) also folds a NaN coordinate to the low
+            // edge.
+            let coord_adjust = |eval_index: usize, smoothed_adjust: &mut f64| {
                 let (coord, deriv) = poly.eval::<K>(eval_index as f64 * eval_scale);
                 let raw_adjust = adjusted(pack_wow_factor(deriv));
                 let level_adjust = if smoothing_enabled {
-                    smoothed_adjust = alpha.mul_add(raw_adjust, one_minus_alpha * smoothed_adjust);
-                    smoothed_adjust
+                    *smoothed_adjust =
+                        alpha.mul_add(raw_adjust, one_minus_alpha * *smoothed_adjust);
+                    *smoothed_adjust
                 } else {
                     raw_adjust
                 };
-                // Clamp the source position into the interior so the tap window
-                // stays in bounds. Valid fields never reach the edge, so this is a
-                // no-op for normal output; it only catches degenerate line
-                // locations. `.max().min()` (not `clamp`) also folds a NaN
-                // coordinate to the low edge.
                 let coord = (coord + shift).max(coord_lo).min(coord_hi);
-                dsout.push(level_adjust as f32 * lut.resample(buf, coord));
+                (coord, level_adjust as f32)
+            };
+            let mut eval_index = range.start;
+            while range.end - eval_index >= RESAMPLE_BATCH {
+                let mut coords = [0.0f64; RESAMPLE_BATCH];
+                let mut adjusts = [0.0f32; RESAMPLE_BATCH];
+                for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
+                    (*coord, *adjust) = coord_adjust(eval_index + j, &mut smoothed_adjust);
+                }
+                let mut samples = [0.0f32; RESAMPLE_BATCH];
+                lut.resample_batch(buf, &coords, &mut samples);
+                dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
+                eval_index += RESAMPLE_BATCH;
+            }
+            for eval_index in eval_index..range.end {
+                let (coord, level_adjust) = coord_adjust(eval_index, &mut smoothed_adjust);
+                dsout.push(level_adjust * lut.resample(buf, coord));
             }
         },
     );
