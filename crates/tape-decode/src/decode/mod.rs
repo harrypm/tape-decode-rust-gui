@@ -385,8 +385,7 @@ fn shift_chroma_and_remove_dc(mut output: Vec<f32>, move_by: isize) -> Vec<f32> 
 
     roll(&mut output, move_by);
 
-    let sum: f32 = output.iter().copied().sum();
-    let mean = sum / output.len() as f32;
+    let mean = sum_algebraic(&output) / output.len() as f32;
     for sample in output.iter_mut() {
         *sample -= mean;
     }
