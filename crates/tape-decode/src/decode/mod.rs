@@ -304,31 +304,45 @@ fn fine_tune_frequency(freq: f64, color_under: f64, max_step: f64) -> f64 {
     }
 }
 
+/// The four quadrature phases of a heterodyne carrier of `het_wave_scale`
+/// cycles per sample starting at `phase_drift` radians: `-cos`, `sin`,
+/// `cos` and `-sin` over `field_len` samples.
 pub(crate) fn gen_chroma_heterodyne(
     het_wave_scale: f64,
     phase_drift: f64,
     field_len: usize,
 ) -> Vec<Vec<f32>> {
     use std::f64::consts::TAU;
+    // The carrier is walked as rotating phasors: LANES of them per chunk,
+    // each advancing LANES samples per rotation so the rotations do not form
+    // one dependency chain, re-seeded from an exact sine and cosine of the
+    // reduced angle every CHUNK samples so the f64 rounding of the rotations
+    // never accumulates past that.
+    const CHUNK: usize = 256;
+    const LANES: usize = 8;
     let angle_step = TAU * het_wave_scale;
+    let angle_at = |i: usize| angle_step.mul_add(i as f64, phase_drift).rem_euclid(TAU);
+    let (lane_sin, lane_cos) = (angle_step * LANES as f64).sin_cos();
 
-    let mut phase0 = Vec::with_capacity(field_len);
-    let mut phase1 = Vec::with_capacity(field_len);
-    let mut phase2 = Vec::with_capacity(field_len);
-    let mut phase3 = Vec::with_capacity(field_len);
-
-    for i in 0..field_len {
-        // Reduce the (large, accumulating) carrier phase modulo a turn before
-        // narrowing, so the carrier itself is evaluated over a small argument.
-        let reduced = angle_step.mul_add(i as f64, phase_drift).rem_euclid(TAU) as f32;
-        let (sin, cos) = reduced.sin_cos();
-        phase0.push(-cos);
-        phase1.push(sin);
-        phase2.push(cos);
-        phase3.push(-sin);
+    let mut phases: [Vec<f32>; 4] = std::array::from_fn(|_| Vec::with_capacity(field_len));
+    for chunk_start in (0..field_len).step_by(CHUNK) {
+        let len = CHUNK.min(field_len - chunk_start);
+        let mut phasors: [(f64, f64); LANES] =
+            std::array::from_fn(|lane| angle_at(chunk_start + lane).sin_cos());
+        for k in 0..len {
+            let (sin, cos) = phasors[k % LANES];
+            let (sin32, cos32) = (sin as f32, cos as f32);
+            phases[0].push(-cos32);
+            phases[1].push(sin32);
+            phases[2].push(cos32);
+            phases[3].push(-sin32);
+            phasors[k % LANES] = (
+                sin.mul_add(lane_cos, cos * lane_sin),
+                cos.mul_add(lane_cos, -(sin * lane_sin)),
+            );
+        }
     }
-
-    vec![phase0, phase1, phase2, phase3]
+    phases.into()
 }
 
 pub(crate) fn butter_sos(
