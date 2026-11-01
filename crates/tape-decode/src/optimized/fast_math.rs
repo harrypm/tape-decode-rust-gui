@@ -92,3 +92,51 @@ pub(crate) fn exp_fast(z: f32) -> f32 {
     const LOG2_E: f32 = core::f32::consts::LOG2_E;
     exp2_fast((z * LOG2_E).clamp(-126.0, 127.0))
 }
+
+/// `y.atan2(x)` to within 1e-11 rad, branch-free so callers' loops
+/// vectorize: the ratio of the smaller magnitude to the larger is folded to
+/// `|u| <= tan(pi / 8)` by the pi/4 identity and atan(u) is its Taylor series
+/// through the 25th power, all in f64. Both arguments zero give zero.
+#[inline(always)]
+pub(crate) fn atan2_precise(y: f32, x: f32) -> f32 {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    const TAN_PI_8: f64 = std::f64::consts::SQRT_2 - 1.0;
+    // (-1)^k / (2k + 1) from k = 12 down to 0.
+    const SERIES: [f64; 13] = [
+        1.0 / 25.0,
+        -1.0 / 23.0,
+        1.0 / 21.0,
+        -1.0 / 19.0,
+        1.0 / 17.0,
+        -1.0 / 15.0,
+        1.0 / 13.0,
+        -1.0 / 11.0,
+        1.0 / 9.0,
+        -1.0 / 7.0,
+        1.0 / 5.0,
+        -1.0 / 3.0,
+        1.0,
+    ];
+    let (y, x) = (f64::from(y), f64::from(x));
+    let (ay, ax) = (y.abs(), x.abs());
+    let swap = ay > ax;
+    let (num, den) = if swap { (ax, ay) } else { (ay, ax) };
+    let t = if den > 0.0 { num / den } else { 0.0 };
+    let fold = t > TAN_PI_8;
+    let u = if fold { (t - 1.0) / (t + 1.0) } else { t };
+    let u2 = u * u;
+    let series = SERIES[1..]
+        .iter()
+        .fold(SERIES[0], |acc, &coefficient| acc.mul_add(u2, coefficient));
+    let mut angle = u * series;
+    if fold {
+        angle += FRAC_PI_4;
+    }
+    if swap {
+        angle = FRAC_PI_2 - angle;
+    }
+    if x < 0.0 {
+        angle = PI - angle;
+    }
+    (if y < 0.0 { -angle } else { angle }) as f32
+}

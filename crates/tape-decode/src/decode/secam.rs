@@ -50,20 +50,6 @@ fn bell_gain(freq_hz: f32) -> f32 {
     ((1.0 + (16.0 * bell_f).powi(2)) / (1.0 + (1.26 * bell_f).powi(2))).sqrt()
 }
 
-/// Moving average of `len` (odd) taps centred on each sample, zero-padded at
-/// the ends.
-fn moving_average(values: &[f32], len: usize) -> Vec<f32> {
-    debug_assert!(len % 2 == 1);
-    let half = len / 2;
-    (0..values.len())
-        .map(|i| {
-            let lo = i.saturating_sub(half);
-            let hi = (i + half + 1).min(values.len());
-            values[lo..hi].iter().sum::<f32>() / len as f32
-        })
-        .collect()
-}
-
 /// Wrap to (-pi, pi].
 fn wrap_phase(phase: f64) -> f64 {
     phase.sin().atan2(phase.cos())
@@ -97,7 +83,10 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
     // Over the whole field, so short-window edge effects do not bias the
     // phase.
     let analytic = analytic_signal(&filtered, fft);
-    let envelope: Vec<f32> = analytic.iter().map(|z| z.norm()).collect();
+    let envelope: Vec<f32> = analytic
+        .iter()
+        .map(|z| z.re.mul_add(z.re, z.im * z.im).sqrt())
+        .collect();
     let samp_rate = spec.tbc_sample_rate();
 
     // Under-carrier phase advance per sample, as the central difference of
@@ -111,7 +100,8 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
     // constant-frequency stretches; the absolute phase is lost, which the FM
     // decoders downstream do not care about. The clamped steps are f64: the
     // corridor edge rounded to f32 would bias the thousands of clamped
-    // samples of a field alike, and their integral runs to ~1e5 rad.
+    // samples of a field alike. The integral is kept reduced to a turn,
+    // which every clamped step is well under.
     //
     // The restored-domain instantaneous frequency for the bell is the central
     // difference of the re-integrated phase, whose consecutive samples differ
@@ -139,7 +129,10 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
         };
         let step = f64::from(centered).clamp(*corridor.start(), *corridor.end());
         integral += f64::from(mult) * step;
-        phase.push(integral.rem_euclid(TAU) as f32);
+        if integral >= TAU {
+            integral -= TAU;
+        }
+        phase.push(integral as f32);
         match k {
             0 => {}
             1 => raw_freq.push((step * freq_scale) as f32),
@@ -149,7 +142,7 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
         prev_step = step;
     }
     raw_freq.push((prev_step * freq_scale) as f32);
-    let mut inst_freq = moving_average(&raw_freq, INST_FREQ_SMOOTHING);
+    let mut inst_freq = boxcar_same(&raw_freq, INST_FREQ_SMOOTHING);
     for freq in &mut inst_freq {
         *freq = freq.clamp(*CARRIER_RANGE_HZ.start(), *CARRIER_RANGE_HZ.end());
     }
@@ -160,7 +153,7 @@ fn upconvert(chroma: &[f32], spec: &DecoderSpec, mult: u32, rest_amplitude: f32)
     // dip passes through to the output instead of being limited away, since
     // downstream SECAM decoders key their concealment off exactly those
     // collapses, and carrier-free noise does not become full-scale splatter.
-    let env_median = median_from_values(&mut envelope.clone());
+    let env_median = median_radix(&envelope);
     let signal: Vec<f32> = envelope
         .iter()
         .zip(&inst_freq)
@@ -255,11 +248,16 @@ fn measure_carrier(
     let window = chroma.get(start..start + len)?;
     let rotor_step = TAU * f_rot / samp_rate;
     let correlate = |samples: &[f32], t0: usize| -> Complex64 {
-        samples
-            .iter()
-            .enumerate()
-            .map(|(k, &x)| Complex64::from_polar(f64::from(x), -rotor_step * (t0 + k) as f64))
-            .sum()
+        // The rotor is walked from the window start rather than evaluated
+        // per sample.
+        let mut rotor = Complex64::from_polar(1.0, -rotor_step * t0 as f64);
+        let advance = Complex64::from_polar(1.0, -rotor_step);
+        let mut sum = Complex64::new(0.0, 0.0);
+        for &x in samples {
+            sum += rotor * f64::from(x);
+            rotor *= advance;
+        }
+        sum
     };
     let half = len / 2;
     let z1 = correlate(&window[..half], start);

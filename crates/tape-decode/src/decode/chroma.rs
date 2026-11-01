@@ -599,7 +599,8 @@ pub(super) fn analytic_signal(
 
 /// Phase advance from `a` to `b`, in (-pi, pi].
 pub(super) fn phase_step(a: Complex32, b: Complex32) -> f32 {
-    (b * a.conj()).arg()
+    let product = b * a.conj();
+    atan2_precise(product.im, product.re)
 }
 
 /// Offset in Hz of the ME-SECAM colour-under rest carrier pair from its

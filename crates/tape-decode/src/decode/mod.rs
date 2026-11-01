@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::optimized::{
-    boxcar_same, exp_fast, f32_from_total_order_key, f32_total_order_key, narrow_sos,
-    powf_fast_nonneg, scale_field, select_ranks_by_key, sosfilt_f32, sosfiltfilt_f32,
-    sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
+    atan2_precise, boxcar_same, exp_fast, f32_from_total_order_key, f32_total_order_key,
+    narrow_sos, powf_fast_nonneg, scale_field, select_ranks_by_key, sosfilt_f32,
+    sosfiltfilt_f32, sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
@@ -172,6 +172,19 @@ fn median_from_values<T: Float>(values: &mut [T]) -> T {
         let (_, &mut median, _) = values.select_nth_unstable_by(mid, cmp);
         median
     }
+}
+
+/// Median of `values` (the mean of the two middle values for an even
+/// count), found by radix counting: for the field-sized inputs this serves,
+/// cheaper than selecting in a copy.
+fn median_radix(values: &[f32]) -> f32 {
+    let upper = values.len() / 2;
+    if !values.len().is_multiple_of(2) {
+        let [median] = select_ranks_by_key(values, f32_total_order_key, [upper]);
+        return f32_from_total_order_key(median);
+    }
+    let [lower, upper] = select_ranks_by_key(values, f32_total_order_key, [upper - 1, upper]);
+    (f32_from_total_order_key(lower) + f32_from_total_order_key(upper)) / 2.0
 }
 
 fn fft_in_place_f32(buffer: &mut [Complex32], fft: &dyn Fft<f32>, inverse: bool) {
