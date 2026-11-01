@@ -77,9 +77,12 @@ fn fit_burst(burst: &[f32], burst_start: usize, fsc_hz: f64, seed: BurstFit) -> 
         // (amplitude, phase, dc, frequency).
         let mut jtj = [[0.0f64; 4]; 4];
         let mut jtr = [0.0f64; 4];
+        // The model phase advances by a constant per sample, so its sine and
+        // cosine are walked as a rotating phasor from the first sample's.
+        let (mut sin, mut cos) = (TAU * fit.frequency * time_at(0) - fit.phase).sin_cos();
+        let (step_sin, step_cos) = (TAU * fit.frequency / (4.0 * fsc_hz)).sin_cos();
         for (k, &sample) in burst.iter().enumerate() {
             let t = time_at(k);
-            let (sin, cos) = (TAU * fit.frequency * t - fit.phase).sin_cos();
             let residual = f64::from(sample) - (fit.amplitude * cos + fit.dc);
             let d_phase = fit.amplitude * sin;
             let jacobian = [cos, d_phase, 1.0, -TAU * t * d_phase];
@@ -89,6 +92,10 @@ fn fit_burst(burst: &[f32], burst_start: usize, fsc_hz: f64, seed: BurstFit) -> 
                 }
                 *jtr_row += j_row * residual;
             }
+            (sin, cos) = (
+                sin.mul_add(step_cos, cos * step_sin),
+                cos.mul_add(step_cos, -(sin * step_sin)),
+            );
         }
         jtj[3][3] += FREQUENCY_PRIOR_WEIGHT;
         jtr[3] += FREQUENCY_PRIOR_WEIGHT * (fsc_hz - fit.frequency);
