@@ -778,14 +778,23 @@ fn apply_burst_lock(
         .as_ref()
         .map_or(0, |prev| prev.burst_start_line);
 
-    let burst_downscaled = downscale_raw_vec(field, &spec.sinc_lut, true, 0.0)?;
+    // The burst lock reads each line only as far past the burst as the
+    // burst sits from the line start (see `get_upconverted_burst`).
+    let (burst_start, burst_end) = burst_area(spec);
+    let burst_downscaled = downscale_raw_vec(
+        field,
+        &spec.sinc_lut,
+        true,
+        0.0,
+        Some(burst_start + burst_end),
+    )?;
     let (track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
         field,
         &burst_downscaled,
         chroma_heterodyne,
         inter_field_state.track_phase,
-        burst_area(spec),
+        (burst_start, burst_end),
         prev_burst_start_line,
     );
     inter_field_state.track_phase = Some(track_phase);

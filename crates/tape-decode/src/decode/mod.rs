@@ -1298,12 +1298,14 @@ fn sample_clamped(data: &[f32], idx: isize) -> f32 {
 }
 
 /// TBC of one channel of the field onto the output grid, resampled `shift`
-/// input samples late.
+/// input samples late. With a `line_window` only that many output samples
+/// at the start of every line are resampled, the rest left zero.
 fn downscale_raw_vec(
     field: &mut DecodedField,
     lut: &SincLut,
     use_burst_channel: bool,
     shift: f64,
+    line_window: Option<usize>,
 ) -> Result<Vec<f32>> {
     let actual_linelocs = field.linelocs.as_deref().context("missing linelocs")?;
     let outwidth = field.outlinelen;
@@ -1344,6 +1346,7 @@ fn downscale_raw_vec(
                 level_adjust_threshold: 15.0,
                 cached_median_mad: field.wow_analysis,
                 shift,
+                line_window: line_window.unwrap_or(outwidth),
             },
         )?
     };
@@ -1545,8 +1548,13 @@ impl Decoder {
                         // Drop it; the luma pass below recomputes with the final
                         // geometry and the chroma pass then reuses that.
                         field_obj.wow_analysis = None;
-                        let mut luma =
-                            downscale_raw_vec(&mut field_obj, &self.spec.sinc_lut, false, 0.0)?;
+                        let mut luma = downscale_raw_vec(
+                            &mut field_obj,
+                            &self.spec.sinc_lut,
+                            false,
+                            0.0,
+                            None,
+                        )?;
                         if self.spec.rf_y_comb != 0.0 {
                             luma = y_comb(&luma, field_obj.outlinelen, self.spec.rf_y_comb);
                         }

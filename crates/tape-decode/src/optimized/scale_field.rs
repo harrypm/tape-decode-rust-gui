@@ -30,6 +30,9 @@ pub(crate) struct ScaleFieldParams {
     /// Source samples added to every output sample's position: a positive
     /// shift resamples the channel that much later.
     pub shift: f64,
+    /// Output samples resampled at the start of every line; the rest of each
+    /// line is left zero.
+    pub line_window: usize,
 }
 
 pub(crate) fn scale_field(
@@ -490,6 +493,7 @@ fn scale_field_linear(
         level_adjust_threshold,
         cached_median_mad,
         shift,
+        line_window,
     } = *params;
     let lineoffset_out_samples = outwidth * (lineoffset + 1);
     let required_eval_count = lineoffset_out_samples + out_len;
@@ -605,21 +609,39 @@ fn scale_field_linear(
             }
         };
         let mut eval_index = idx;
-        while run_end - eval_index >= RESAMPLE_BATCH {
-            let mut coords = [0.0f64; RESAMPLE_BATCH];
-            let mut adjusts = [0.0f32; RESAMPLE_BATCH];
-            for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
-                *coord = coord_at(eval_index + j);
-                *adjust = next_adjust(&mut smoothed_adjust) as f32;
+        while eval_index < run_end {
+            let position = (eval_index - lineoffset_out_samples) % outwidth;
+            if position >= line_window {
+                // Past the window: the rest of the line is zero, and the
+                // smoothing settles towards the run's constant target in
+                // closed form over the skipped samples.
+                let skipped = (outwidth - position).min(run_end - eval_index);
+                dsout.resize(dsout.len() + skipped, 0.0);
+                if smoothing_enabled {
+                    smoothed_adjust = (smoothed_adjust - raw_adjust)
+                        .mul_add(one_minus_alpha.powi(skipped as i32), raw_adjust);
+                }
+                eval_index += skipped;
+                continue;
             }
-            let mut samples = [0.0f32; RESAMPLE_BATCH];
-            lut.resample_batch(buf, &coords, &mut samples);
-            dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
-            eval_index += RESAMPLE_BATCH;
-        }
-        for eval_index in eval_index..run_end {
-            let level_adjust = next_adjust(&mut smoothed_adjust);
-            dsout.push(level_adjust as f32 * lut.resample(buf, coord_at(eval_index)));
+            let segment_end = eval_index + (line_window - position).min(run_end - eval_index);
+            while segment_end - eval_index >= RESAMPLE_BATCH {
+                let mut coords = [0.0f64; RESAMPLE_BATCH];
+                let mut adjusts = [0.0f32; RESAMPLE_BATCH];
+                for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
+                    *coord = coord_at(eval_index + j);
+                    *adjust = next_adjust(&mut smoothed_adjust) as f32;
+                }
+                let mut samples = [0.0f32; RESAMPLE_BATCH];
+                lut.resample_batch(buf, &coords, &mut samples);
+                dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
+                eval_index += RESAMPLE_BATCH;
+            }
+            for eval_index in eval_index..segment_end {
+                let level_adjust = next_adjust(&mut smoothed_adjust);
+                dsout.push(level_adjust as f32 * lut.resample(buf, coord_at(eval_index)));
+            }
+            eval_index = segment_end;
         }
         idx = run_end;
     }
@@ -738,6 +760,7 @@ fn scale_field_k<const K: usize>(
         level_adjust_threshold,
         cached_median_mad,
         shift,
+        line_window,
     } = *params;
     let lineoffset_out_samples = outwidth * (lineoffset + 1);
     let required_eval_count = lineoffset_out_samples + out_len;
@@ -823,20 +846,36 @@ fn scale_field_k<const K: usize>(
                 (coord, level_adjust as f32)
             };
             let mut eval_index = range.start;
-            while range.end - eval_index >= RESAMPLE_BATCH {
-                let mut coords = [0.0f64; RESAMPLE_BATCH];
-                let mut adjusts = [0.0f32; RESAMPLE_BATCH];
-                for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
-                    (*coord, *adjust) = coord_adjust(eval_index + j, &mut smoothed_adjust);
+            while eval_index < range.end {
+                let position = (eval_index - lineoffset_out_samples) % outwidth;
+                if position >= line_window {
+                    // Past the window: the rest of the line is zero; the
+                    // smoothing still follows every sample's wow factor.
+                    let skipped = (outwidth - position).min(range.end - eval_index);
+                    for eval_index in eval_index..eval_index + skipped {
+                        coord_adjust(eval_index, &mut smoothed_adjust);
+                    }
+                    dsout.resize(dsout.len() + skipped, 0.0);
+                    eval_index += skipped;
+                    continue;
                 }
-                let mut samples = [0.0f32; RESAMPLE_BATCH];
-                lut.resample_batch(buf, &coords, &mut samples);
-                dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
-                eval_index += RESAMPLE_BATCH;
-            }
-            for eval_index in eval_index..range.end {
-                let (coord, level_adjust) = coord_adjust(eval_index, &mut smoothed_adjust);
-                dsout.push(level_adjust * lut.resample(buf, coord));
+                let segment_end = eval_index + (line_window - position).min(range.end - eval_index);
+                while segment_end - eval_index >= RESAMPLE_BATCH {
+                    let mut coords = [0.0f64; RESAMPLE_BATCH];
+                    let mut adjusts = [0.0f32; RESAMPLE_BATCH];
+                    for (j, (coord, adjust)) in coords.iter_mut().zip(&mut adjusts).enumerate() {
+                        (*coord, *adjust) = coord_adjust(eval_index + j, &mut smoothed_adjust);
+                    }
+                    let mut samples = [0.0f32; RESAMPLE_BATCH];
+                    lut.resample_batch(buf, &coords, &mut samples);
+                    dsout.extend(adjusts.iter().zip(&samples).map(|(&a, &v)| a * v));
+                    eval_index += RESAMPLE_BATCH;
+                }
+                for eval_index in eval_index..segment_end {
+                    let (coord, level_adjust) = coord_adjust(eval_index, &mut smoothed_adjust);
+                    dsout.push(level_adjust * lut.resample(buf, coord));
+                }
+                eval_index = segment_end;
             }
         },
     );
