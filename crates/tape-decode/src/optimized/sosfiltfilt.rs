@@ -537,7 +537,15 @@ fn sosfilt_sample_slice(mut sample: f32, sections: &mut [Sos<f32>]) -> f32 {
 /// instead of zeroing it.
 pub(crate) fn sosfilt_f32(sos: &[Sos<f32>], input: &[f32]) -> Vec<f32> {
     match sos.len() {
-        1 => sosfilt_stack::<1>(sos, input),
+        // A single section runs as the reduced recurrence, whose one
+        // loop-carried FMA sets its throughput; its stored delays are zero.
+        1 => {
+            let mut section = ReducedBiquad::from_sos(&sos[0]);
+            input
+                .iter()
+                .map(|&sample| reduced_step(&mut section, sample))
+                .collect()
+        }
         2 => sosfilt_stack::<2>(sos, input),
         3 => sosfilt_stack::<3>(sos, input),
         4 => sosfilt_stack::<4>(sos, input),
