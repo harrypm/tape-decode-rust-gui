@@ -274,6 +274,19 @@ pub(crate) fn decode_video_block(
     let mut indata_fft = rfft_f32(&rawdata[..BLOCKSIZE], spec.fft_block_r2c_f32.as_ref());
     let half_bins = indata_fft.len();
 
+    // The color-under burst channel is the raw RF through the zero-phase
+    // burst chain, a real gain on the spectrum just taken; apply it before
+    // the RF filters below rewrite that spectrum in place.
+    let burst_spectrum = (!spec.chroma_afc_enabled()
+        && spec.color_system != ColorSystem::Monochrome)
+        .then(|| {
+            indata_fft
+                .iter()
+                .zip(&spec.chroma_burst_block_fft_gain)
+                .map(|(&bin, &gain)| bin * gain)
+                .collect::<Vec<Complex32>>()
+        });
+
     if let Some(video_notch_f) = &spec.video_notch_filter {
         multiply_spectrum_real(&mut indata_fft, &video_notch_f[..half_bins]);
     }
@@ -418,13 +431,11 @@ pub(crate) fn decode_video_block(
         // The burst chain (bandpass plus optional notches) is zero-phase, so it
         // runs as the precomputed |H|^2 spectrum gain in one r2c/c2r round trip
         // instead of cascaded time-domain forward/backward filters.
-        let source = if spec.color_system != ColorSystem::Monochrome {
-            &rawdata[..BLOCKSIZE]
-        } else {
-            out_video.as_slice()
-        };
-        let mut spectrum = rfft_f32(source, spec.fft_block_r2c_f32.as_ref());
-        multiply_spectrum_real(&mut spectrum, &spec.chroma_burst_block_fft_gain);
+        let spectrum = burst_spectrum.unwrap_or_else(|| {
+            let mut spectrum = rfft_f32(&out_video, spec.fft_block_r2c_f32.as_ref());
+            multiply_spectrum_real(&mut spectrum, &spec.chroma_burst_block_fft_gain);
+            spectrum
+        });
         let filtered = irfft_owned_f32(spectrum, None, spec.fft_block_c2r_f32.as_ref());
         let out_chroma = shift_chroma_and_remove_dc(filtered, spec.chroma_offset());
         out.demod_burst
