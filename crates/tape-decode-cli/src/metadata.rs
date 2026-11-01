@@ -173,6 +173,7 @@ mod tests {
             sample_rate: 17_734_475.0,
             black_16b_ire: 1024.0,
             white_16b_ire: 1024.0,
+            blanking_16b_ire: 1024.0,
             field_height: 313,
             colour_burst_start: 0,
             colour_burst_end: 0,
