@@ -1458,8 +1458,8 @@ impl Decoder {
                 // current window does not cover all of them and more input may still
                 // arrive, pause here: hand the pending field back untouched and
                 // report `requested_begin`'s block as the earliest offset still
-                // needed. `decode_video_block` advances the video-EQ state, so we
-                // must not run it on a partial block set that a resumed call reruns.
+                // needed. The blocks already in hand are not decoded now, as the
+                // resumed call decodes the whole set again.
                 let needed_end = (requested_end - 1) * usable_blocksize + BLOCKSIZE;
                 if needed_end > data_start + data.len() && !final_chunk {
                     if let Some(field) = decoded_field {
