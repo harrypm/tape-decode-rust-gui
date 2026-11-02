@@ -226,10 +226,6 @@ fn refine_linelocs_hsync(
     normal_hsync_length: usize,
     levels: VideoLevels,
 ) -> Result<Vec<f64>> {
-    if linebad.len() != initial_linelocs.len() {
-        bail!("linebad length doesn't match linelocs length");
-    }
-
     let one_usec = spec.freq as usize;
     let is_pal = spec.sys_frame_lines != LineSystem::Line525;
     let zc_threshold = levels.iretohz(spec.sys_vsync_ire / 2.0);
@@ -375,11 +371,10 @@ fn valid_pulses_to_linelocs(
     reference_line: i64,
     meanlinelen: f64,
     proclines: usize,
-) -> (Vec<f64>, Vec<u8>) {
+) -> Vec<f64> {
     validpulses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
 
     let mut line_locations = vec![0.0; proclines];
-    let line_location_errs = vec![0; proclines];
     let validpulses_len = validpulses.len();
     let max_allowed_distance_between_pulse_and_line = meanlinelen / 1.5;
     let reference_line = reference_line as f64;
@@ -430,7 +425,7 @@ fn valid_pulses_to_linelocs(
         }
     }
 
-    (line_locations, line_location_errs)
+    line_locations
 }
 
 fn rotated_phase(current_phase: usize, track_rotation: i64) -> usize {
@@ -881,7 +876,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                     .iter()
                     .map(|&start| start as f64)
                     .collect::<Vec<_>>();
-                let (linelocs_vec, mut linebad_vec) = valid_pulses_to_linelocs(
+                let linelocs_vec = valid_pulses_to_linelocs(
                     validpulses,
                     (first_hsync.loc as i64) as f64,
                     first_hsync.line as i64,
@@ -893,12 +888,6 @@ pub(crate) fn predecode_field_from_rawdecode(
                 } else {
                     linelocs_vec[pending_field.outlinecount - 7]
                 };
-                let bad_lines = linebad_vec.iter().filter(|&&value| value != 0).count();
-                if bad_lines >= 30 && spec.rf_saved_levels {
-                    tracing::debug!(
-                        "Possible sync issues, re-running level detection on next field!"
-                    );
-                }
                 let mut levels = res.levels;
                 if !spec.rf_saved_levels {
                     let (sync_level, blank_level) = refine_levels_from_vsync(
@@ -917,6 +906,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                     }
                 }
 
+                let mut linebad_vec = vec![0u8; linelocs_vec.len()];
                 let linelocs2_vec = if !spec.rf_skip_hsync_refine {
                     let normal_hsync_length = usectoinpx(spec, spec.sys_hsync_pulse_us) as usize;
                     refine_linelocs_hsync(
@@ -928,8 +918,16 @@ pub(crate) fn predecode_field_from_rawdecode(
                         levels,
                     )?
                 } else {
-                    linelocs_vec.clone()
+                    linelocs_vec
                 };
+                // With --use-saved-levels this many bad lines has the next
+                // field re-detect its levels.
+                let bad_lines = linebad_vec.iter().filter(|&&bad| bad != 0).count();
+                if bad_lines >= 30 && spec.rf_saved_levels {
+                    tracing::debug!(
+                        "Possible sync issues, re-running level detection on next field!"
+                    );
+                }
                 pending_field.valid = true;
                 pending_field.levels = levels;
                 // The field is accepted: the next field's sync search starts
