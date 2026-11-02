@@ -1740,8 +1740,9 @@ impl Decoder {
                     let distance_from_previous_field =
                         disk_loc - roundfloat(prevfi.file_loc as f64 / bytes_per_field as f64, 1);
                     if prevfi.detected_first_field == detected_first_field
-                        && prevfi_2.is_some_and(|prev| prev.detected_first_field)
-                            == prevfi.detected_first_field
+                        && prevfi_2.is_some_and(|prev| {
+                            prev.detected_first_field == prevfi.detected_first_field
+                        })
                         && inrange(distance_from_previous_field, 0.9, 1.1)
                     {
                         // treat this as progressive, and manually flip the field order.
