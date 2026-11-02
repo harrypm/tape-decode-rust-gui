@@ -234,7 +234,6 @@ fn refine_linelocs_hsync(
     let ire_110 = levels.iretohz(110.0);
 
     let mut linelocs_refined = initial_linelocs.to_vec();
-    let mut refined_from_right_lineloc = -1.0;
     let mut prev_porch_level = -1.0f32;
     let one_usec_samples = spec.freq;
     let normal_hsync_samples = normal_hsync_length as f64;
@@ -248,17 +247,20 @@ fn refine_linelocs_hsync(
         let ll1 = round_ties_even_to_isize(initial_linelocs[i]) - one_usec as isize;
         let zc = calczc_do(demod_05, ll1, zc_threshold, (one_usec * 2) as isize, 0)?;
 
-        let mut right_cross = f64::NAN;
-        if !spec.rf_disable_right_hsync {
-            right_cross = calczc_do(
+        let right_cross = if spec.rf_disable_right_hsync {
+            f64::NAN
+        } else {
+            calczc_do(
                 demod_05,
                 ll1 + normal_hsync_length as isize - one_usec as isize,
                 zc_threshold,
                 (normal_hsync_length * 2) as isize,
                 1,
-            )?;
-        }
-        let mut right_cross_refined = false;
+            )?
+        };
+        // The line start a sync pulse length before the rising edge's
+        // refined crossing.
+        let mut refined_from_right = None;
 
         if !zc.is_nan() && linebad[i] == 0 {
             linelocs_refined[i] = zc;
@@ -331,13 +333,9 @@ fn refine_linelocs_hsync(
                 )?;
 
                 if !zc2.is_nan() && (zc2 - right_cross).abs() < (one_usec_samples / 2.0) {
-                    refined_from_right_lineloc =
-                        right_cross - normal_hsync_samples + (2.25 * (spec.freq / 40.0));
-                    if (refined_from_right_lineloc - linelocs_refined[i]).abs()
-                        < (one_usec_samples * 2.0)
-                    {
-                        right_cross = zc2;
-                        right_cross_refined = true;
+                    let from_right = zc2 - normal_hsync_samples + (2.25 * (spec.freq / 40.0));
+                    if (from_right - linelocs_refined[i]).abs() < (one_usec_samples * 2.0) {
+                        refined_from_right = Some(from_right);
                         prev_porch_level = porch_level;
                     }
                 }
@@ -348,9 +346,9 @@ fn refine_linelocs_hsync(
             linelocs_refined[i] = initial_linelocs[i];
         }
 
-        if !right_cross.is_nan() && right_cross_refined {
+        if let Some(from_right) = refined_from_right {
             linebad[i] = 0;
-            linelocs_refined[i] = refined_from_right_lineloc;
+            linelocs_refined[i] = from_right;
         }
     }
 
