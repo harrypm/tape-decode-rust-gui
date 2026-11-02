@@ -105,6 +105,12 @@ Result: `master` = 35 upstream commits + 60 fork commits (64 − 4 skipped/absor
 ### Not yet verified (needs user / real data)
 - GUI launcher real-world behaviour (auto-chroma checkbox, CVBS single .tbc flow) — requires user confirmation per rules
 - Real SECAM Quad/Type C / ME-SECAM decode A/B against pre-rebase output — needs a sample RF capture path
-- Push `--force-with-lease` to fork/master + tag push (awaiting user go-ahead)
 
-(AppImage rebuild + `--selftest` completed in Step 6 above.)
+(AppImage rebuild + `--selftest` completed in Step 6 above; push executed in Step 7 below.)
+
+### Step 7 (01:4x UTC): Commit + push (user go-ahead: "commit and push my updated main")
+- Pre-push remote check: fork/master still at a16ccba (lease holds)
+- Committed this session's restore point (zip + bundle) per restore-point rule; pre-session untracked files left as-is (AppImages exceed GitHub's 100 MB limit and were never tracked)
+- `git push --force-with-lease fork master` → 97 commits (35 upstream + 60 rebased + 2 follow-ups)
+- `git push --force fork v v2.0.0 v2.0.0b v3.0.0 v4.0.0` (repointed tags)
+- `git push fork backup/pre-upstream-rebase-20261101` — pre-rebase history preserved remotely against post-force-push GC
