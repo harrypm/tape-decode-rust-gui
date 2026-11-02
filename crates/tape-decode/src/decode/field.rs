@@ -398,7 +398,7 @@ fn valid_pulses_to_linelocs(
             let mut current_pulse_sample_location = -1.0;
 
             let mut pulse_search_index = current_pulse_index;
-            while pulse_search_index < validpulses_len.saturating_sub(1) {
+            loop {
                 if current_distance_from_pulse_to_line
                     <= smallest_distance_observed_from_pulse_to_line
                 {
@@ -408,8 +408,11 @@ fn valid_pulses_to_linelocs(
                     current_pulse_sample_location = validpulses[pulse_search_index];
                 }
 
+                let Some(next_pulse) = validpulses.get(pulse_search_index + 1) else {
+                    break;
+                };
                 let next_observed_distance_between_pulse_and_line =
-                    (validpulses[pulse_search_index + 1] - expected_line_location).abs();
+                    (next_pulse - expected_line_location).abs();
                 if next_observed_distance_between_pulse_and_line
                     > current_distance_from_pulse_to_line
                 {
