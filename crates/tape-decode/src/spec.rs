@@ -153,7 +153,8 @@ pub struct DecoderSpec {
     pub(crate) fft_block_c2r_f32: Arc<dyn ComplexToReal<f32>>,
     pub(crate) fft_field_forward_f32: Arc<dyn Fft<f32>>,
 
-    pub(crate) ntscj: bool,
+    /// Black pedestal above blanking in IRE.
+    pub(crate) black_ire: f64,
     pub(crate) track_phase: Option<i64>,
     pub(crate) wow_level_adjust_smoothing: f32,
     pub(crate) wow_interpolation_method: WowInterpolation,
@@ -177,6 +178,15 @@ impl DecoderSpec {
             ColorSystem::Monochrome
         } else {
             sys_params.color_system
+        };
+        // NTSC sets black up 7.5 IRE above blanking; every other standard
+        // (including the 525-line PAL-M variants) keeps it at 0 IRE. The
+        // pedestal belongs to the line standard, so a composite format whose
+        // chroma stays undecoded keeps it.
+        let black_ire = if sys_params.color_system == ColorSystem::Ntsc && !request.ntscj {
+            7.5
+        } else {
+            0.0
         };
         // cafc measures a single carrier peak, which the line-alternating
         // two-carrier SECAM FM chroma does not have.
@@ -749,7 +759,7 @@ impl DecoderSpec {
             fft_block_c2r_f32,
             fft_field_forward_f32,
 
-            ntscj: request.ntscj,
+            black_ire,
             track_phase,
             wow_level_adjust_smoothing,
             wow_interpolation_method: request.wow_interpolation_method,
@@ -777,17 +787,6 @@ impl DecoderSpec {
     #[inline]
     pub(crate) fn samplesperline(&self) -> f64 {
         self.freq / self.linelen() as f64
-    }
-
-    #[inline]
-    pub(crate) fn black_ire(&self) -> f64 {
-        // NTSC uses a 7.5 IRE black pedestal; every other standard (including
-        // 525-line PAL-M variants) sets up black at 0 IRE.
-        if self.color_system == ColorSystem::Ntsc && !self.ntscj {
-            7.5
-        } else {
-            0.0
-        }
     }
 
     #[inline]

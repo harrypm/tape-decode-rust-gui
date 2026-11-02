@@ -1822,7 +1822,7 @@ impl Decoder {
                 metadata_field.out_scale,
             )
         };
-        let black = ire_to_output(spec.black_ire() as f32);
+        let black = ire_to_output(spec.black_ire as f32);
         let white = ire_to_output(100.0);
         let blanking = ire_to_output(0.0);
         let to_sample = |us: f64| (us * spec.sys_outfreq + BADJ).round_ties_even() as i64;
