@@ -788,6 +788,14 @@ fn apply_burst_lock(
     Ok(())
 }
 
+/// Where the next field is read from.
+enum NextField {
+    /// A position in this field's buffer.
+    At(f64),
+    /// Samples to skip from this field's scheduled read location.
+    Skip(f64),
+}
+
 pub(crate) fn predecode_field_from_rawdecode(
     rawdecode: FieldData,
     spec: &DecoderSpec,
@@ -816,7 +824,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         wow_interpolation_method: spec.wow_interpolation_method,
         validpulses: Vec::new(),
         is_first_field: None,
-        nextfieldoffset: None,
         vblank_next: None,
         is_progressive_field: None,
         field_number: 0,
@@ -848,7 +855,7 @@ pub(crate) fn predecode_field_from_rawdecode(
     }
 
     inter_field_state.compute_linelocs_issues = true;
-    if let Some(res) = res.as_ref() {
+    let next_field = if let Some(res) = res.as_ref() {
         let is_first_field = pending_field.is_first_field.unwrap_or(false);
         pending_field.linecount = Some(if is_first_field { 263 } else { 262 });
 
@@ -867,8 +874,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                         "Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit"
                     );
                 }
-                pending_field.nextfieldoffset =
-                    Some((line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen));
+                NextField::At((line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen))
             } else {
                 let validpulses = pending_field
                     .validpulses
@@ -894,8 +900,6 @@ pub(crate) fn predecode_field_from_rawdecode(
                         "Possible sync issues, re-running level detection on next field!"
                     );
                 }
-                pending_field.nextfieldoffset = Some(nextfield);
-
                 if !spec.rf_saved_levels {
                     let (sync_level, blank_level) = refine_levels_from_vsync(
                         &pending_field.data.video.demod,
@@ -986,23 +990,26 @@ pub(crate) fn predecode_field_from_rawdecode(
                         }
                     }
                 }
+                NextField::At(nextfield)
             }
         } else {
             tracing::warn!("Unable to determine start of field - dropping field");
-            pending_field.nextfieldoffset = Some(pending_field.inlinelen * 100.0);
+            NextField::Skip(pending_field.inlinelen * 100.0)
         }
     } else {
         tracing::warn!("Unable to find any sync pulses, jumping 100 ms");
-        pending_field.nextfieldoffset = Some(spec.freq_hz() / 10.0);
-    }
-    let mut pending_offset = pending_field
-        .nextfieldoffset
-        .context("missing nextfieldoffset")?;
-    if pending_field.valid {
-        pending_offset -= scheduled_readloc as f64 - pending_field.data.startloc as f64;
-    }
+        NextField::Skip(spec.freq_hz() / 10.0)
+    };
+    // The decoder advances from the scheduled read location, which sits
+    // `scheduled_readloc - startloc` samples into the buffer.
+    let offset = match next_field {
+        NextField::At(position) => {
+            position - (scheduled_readloc as f64 - pending_field.data.startloc as f64)
+        }
+        NextField::Skip(skip) => skip,
+    };
     Ok(DecodeFieldResult {
         field: pending_field,
-        offset: pending_offset,
+        offset,
     })
 }

@@ -922,7 +922,6 @@ struct DecodedField {
     wow_interpolation_method: WowInterpolation,
     validpulses: Vec<i64>,
     is_first_field: Option<bool>,
-    nextfieldoffset: Option<f64>,
     vblank_next: Option<f64>,
     is_progressive_field: Option<bool>,
     field_number: i64,
