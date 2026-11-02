@@ -517,29 +517,16 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
     Ok(field.sync_confidence.min(newconf))
 }
 
-// Level of samples `[start, end)` of each output line: the mean of the middle
-// third of the sorted per-line medians, which rejects lines hit by dropouts.
-fn picture_line_level(picture_luma: &[f32], field: &DecodedField, start: usize, end: usize) -> f32 {
-    if field.outlinecount == 0 || field.outlinelen == 0 || start >= end {
-        return f32::NAN;
-    }
-
-    let mut levels = Vec::with_capacity(field.outlinecount);
-    for line in 0..field.outlinecount {
-        let line_start = line * field.outlinelen;
-        let start = line_start + start;
-        let end = line_start + end;
-        if end > picture_luma.len() {
-            levels.push(f32::NAN);
-            continue;
-        }
-        levels.push(median_from_values(&mut picture_luma[start..end].to_vec()));
-    }
-
-    levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let start = field.outlinecount / 3;
-    let end = (field.outlinecount * 2) / 3;
-    mean_slice(&levels[start..end]) as f32
+// Level of samples `[start, end)` of each line of a picture of `outlinelen`
+// samples per line: the mean of the middle third of the sorted per-line
+// medians, which rejects lines hit by dropouts.
+fn picture_line_level(picture_luma: &[f32], outlinelen: usize, start: usize, end: usize) -> f32 {
+    let mut levels: Vec<f32> = picture_luma
+        .chunks_exact(outlinelen)
+        .map(|line| median_from_values(&mut line[start..end].to_vec()))
+        .collect();
+    levels.sort_by(f32::total_cmp);
+    mean_slice(&levels[levels.len() / 3..(levels.len() * 2) / 3]) as f32
 }
 
 fn demod_slice_bounds(len: usize, start: i64, end: i64) -> Option<(usize, usize)> {
@@ -1605,7 +1592,7 @@ impl Decoder {
                                 if adjust.backporch {
                                     ire0 = picture_line_level(
                                         &luma,
-                                        &field_obj,
+                                        field_obj.outlinelen,
                                         backporch_start + PADDING,
                                         backporch_end - PADDING,
                                     );
@@ -1616,7 +1603,7 @@ impl Decoder {
                                     // its measured distance rescales hz_ire.
                                     let hsync_level = picture_line_level(
                                         &luma,
-                                        &field_obj,
+                                        field_obj.outlinelen,
                                         PADDING,
                                         backporch_start - PADDING,
                                     );
