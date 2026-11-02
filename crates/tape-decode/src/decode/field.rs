@@ -157,14 +157,6 @@ fn solve_4x4(a: [[f64; 4]; 4], b: [f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
-fn resolve_signed_index(len: usize, index: isize) -> Option<usize> {
-    if index >= 0 {
-        usize::try_from(index).ok().filter(|&index| index < len)
-    } else {
-        len.checked_sub(index.unsigned_abs())
-    }
-}
-
 fn calczc_do(
     data: &[f32],
     start_offset: isize,
@@ -172,47 +164,37 @@ fn calczc_do(
     count: isize,
     mut edge: i64,
 ) -> Result<f64> {
-    let start_offset_clamped = start_offset.max(1);
-    let start_offset_index =
-        usize::try_from(start_offset_clamped).context("start_offset out of range")?;
-    if start_offset_index >= data.len() {
+    // The crossing is interpolated from the sample before it, so the search
+    // starts at index 1 at the earliest.
+    let start = start_offset.max(1) as usize;
+    if start >= data.len() {
         bail!("start_offset out of range");
     }
 
-    let target_f = target;
     if edge == 0 {
-        edge = if data[start_offset_index] < target_f {
-            1
-        } else {
-            -1
-        };
+        edge = if data[start] < target { 1 } else { -1 };
     }
 
-    let edge_index =
-        resolve_signed_index(data.len(), start_offset).context("start_offset out of range")?;
-    let edge_value = data[edge_index];
-    if (edge == 1 && edge_value > target_f) || (edge == -1 && edge_value < target_f) {
+    if (edge == 1 && data[start] > target) || (edge == -1 && data[start] < target) {
         return Ok(f64::NAN);
     }
 
     let search_len = count + 1;
     let search_end = if search_len <= 0 {
-        start_offset_index
+        start
     } else {
-        start_offset_index
-            .saturating_add(search_len as usize)
-            .min(data.len())
+        start.saturating_add(search_len as usize).min(data.len())
     };
-    let Some(loc) = data[start_offset_index..search_end]
+    let Some(loc) = data[start..search_end]
         .iter()
-        .position(|&sample| (edge == 1 && sample >= target_f) || (edge != 1 && sample <= target_f))
+        .position(|&sample| (edge == 1 && sample >= target) || (edge != 1 && sample <= target))
     else {
         return Ok(f64::NAN);
     };
 
-    let x = start_offset_index + loc;
-    let a = data[x - 1] - target_f;
-    let b = data[x] - target_f;
+    let x = start + loc;
+    let a = data[x - 1] - target;
+    let b = data[x] - target;
     let y = if b - a != 0.0 { -a / (-a + b) } else { 0.0 };
 
     Ok(x as f64 - 1.0 + f64::from(y))
