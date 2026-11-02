@@ -798,6 +798,7 @@ fn apply_burst_lock(
         prev_burst_start_line,
     );
     inter_field_state.track_phase = Some(track_phase);
+    field.track_phase = Some(track_phase);
     field.burst_lock = Some(burst_lock);
     Ok(())
 }
@@ -844,6 +845,7 @@ pub(crate) fn predecode_field_from_rawdecode(
         valid: false,
         sync_confidence: 100,
         burst_lock: None,
+        track_phase: inter_field_state.track_phase,
         wow_analysis: None,
     };
     if let Some(prevfield) = &pending_field.prevfield {

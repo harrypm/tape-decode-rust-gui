@@ -985,6 +985,10 @@ struct DecodedField {
     valid: bool,
     sync_confidence: i64,
     burst_lock: Option<BurstLock>,
+    /// The chroma track phase the burst lock reported for this field (and
+    /// starts the next field's lock from); with the field count it selects
+    /// the track IRE0 offset.
+    track_phase: Option<i64>,
     /// Cached `(median, mad)` of the field's wow-factor distribution. These
     /// depend only on the line-location spline, so they are identical for every
     /// channel; `downscale_raw_vec` fills this on the first call and reuses it.
@@ -1596,7 +1600,7 @@ impl Decoder {
                                     }
                                 }
                             }
-                            if let Some(track_phase) = self.inter_field_state.track_phase {
+                            if let Some(track_phase) = field_obj.track_phase {
                                 let idx = (track_phase ^ (field_obj.field_number % 2)) as usize;
                                 ire0 += self.spec.sys_track_ire0_offset[idx];
                             }
