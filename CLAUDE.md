@@ -26,6 +26,7 @@
   vectorizes, then portable SIMD (`std::simd` under the nightly cfg with a
   plain fallback), then arch-specific intrinsics. A preference, not a rule:
   step down a level when the measured gap is too big.
+- We assume x86-64-v3 as baseline target, v1/v2 performance is unimportant.
 - Don't carry fields, parameters or options that nothing reads; delete
   machinery the moment it becomes dead.
 - CLI is conventional clap: `--kebab-case`, value enums. Profiles express
