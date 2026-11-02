@@ -62,6 +62,11 @@ Result: master = 30 upstream + 63 fork commits; old pre-rebase history on `backu
 - Profile round-trip: SECAM_QUADRUPLEX direct=True cvbs_single=True; SECAM_TYPEC direct=True cvbs_single=True; SECAM_VHS direct=False cvbs_single=False (method-1 exclusion intact)
 - `QT_QPA_PLATFORM=offscreen python3 decode_selftest.py` → **SELFTEST OK**
 
-### Pending
-- Push `--force-with-lease fork master` + tags + backup branch (awaiting user go-ahead)
+### Step 5 (22:50 UTC): Commit + push (user go-ahead: "commit and push")
+- Pre-push: tracked tree clean; fork/master still at 9e21e95 (lease holds)
+- `git push --force-with-lease fork master` → 9e21e95..f2342e2 (30 upstream + 63 rebased + log commit)
+- `git push --force fork v v2.0.0 v2.0.0b v3.0.0 v4.0.0` (repointed tags)
+- `git push fork backup/pre-upstream-rebase-20261102` — today's pre-rebase history preserved remotely
+
+### Remaining (user-side)
 - Optional: AppImage rebuild against the new tree; real-data SECAM decode A/B
