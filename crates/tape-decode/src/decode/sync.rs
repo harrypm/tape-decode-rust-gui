@@ -679,7 +679,6 @@ struct Line0FallbackResult {
 
 struct PulseClassificationResult {
     valid_starts: Vec<i64>,
-    lt_vsync: Option<(f64, f64)>,
     meanlinelen: f64,
     line0loc: Option<f64>,
     first_hsync_loc: Option<f64>,
@@ -1533,7 +1532,6 @@ fn try_get_pulses_core(
         0.0
     };
 
-    let mut lt_vsync = Some(vsync);
     let mut fallback = None;
 
     let valid_samples = valid_types
@@ -1558,7 +1556,6 @@ fn try_get_pulses_core(
             }
         }
 
-        lt_vsync = None;
         fallback = get_line0_fallback(
             &valid_samples,
             raw_pulses,
@@ -1593,7 +1590,6 @@ fn try_get_pulses_core(
 
     PulseClassificationResult {
         valid_starts,
-        lt_vsync,
         meanlinelen,
         line0loc: first_hsync.line0loc,
         first_hsync_loc: first_hsync.first_hsync_loc,
@@ -1842,7 +1838,6 @@ pub(crate) fn try_get_pulses(
     if found.pulses.is_empty()
         && (inter_field_state.prev_first_hsync_loc == -1.0 || spec.rf_fallback_vsync)
     {
-        field.lt_vsync = None;
         return None;
     }
 
@@ -1850,7 +1845,6 @@ pub(crate) fn try_get_pulses(
 
     field.validpulses = result.valid_starts;
     field.vblank_next = result.vblank_next;
-    field.lt_vsync = result.lt_vsync;
     field.is_first_field = Some(result.is_first_field);
     field.is_progressive_field = Some(result.is_progressive_field);
     if let Some(first_hsync_loc) = result.first_hsync_loc {

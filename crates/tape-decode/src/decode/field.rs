@@ -831,10 +831,8 @@ pub(crate) fn predecode_field_from_rawdecode(
         wow_interpolation_method: spec.wow_interpolation_method,
         validpulses: Vec::new(),
         is_first_field: None,
-        linebad: None,
         nextfieldoffset: None,
         vblank_next: None,
-        lt_vsync: None,
         is_progressive_field: None,
         field_number: 0,
         linelocs: None,
@@ -843,7 +841,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         out_scale: None,
         field_phase_id: None,
         valid: false,
-        sync_confidence: 100,
         burst_lock: None,
         track_phase: inter_field_state.track_phase,
         wow_analysis: None,
@@ -861,7 +858,7 @@ pub(crate) fn predecode_field_from_rawdecode(
     let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect);
     let needs_level_retry = match &res {
         None => true,
-        Some(res) => res.line0loc.is_none() || pending_field.sync_confidence == 0,
+        Some(res) => res.line0loc.is_none(),
     };
     if needs_level_retry && !do_level_detect {
         tracing::debug!("Search for pulses failed, re-checking levels");
@@ -951,7 +948,6 @@ pub(crate) fn predecode_field_from_rawdecode(
                 } else {
                     linelocs_vec.clone()
                 };
-                pending_field.linebad = Some(linebad_vec.clone());
                 pending_field.valid = true;
 
                 if spec.sys_frame_lines != LineSystem::Line525 {

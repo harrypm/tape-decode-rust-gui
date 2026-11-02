@@ -462,7 +462,7 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
     let linecount = field.linecount.unwrap_or(0);
     let end = (field.lineoffset + linecount).min(linelocs.len());
     if end.saturating_sub(field.lineoffset) < 3 {
-        return Ok(field.sync_confidence);
+        return Ok(100);
     }
 
     let mut lld2max = f64::NEG_INFINITY;
@@ -471,8 +471,7 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
         lld2max = lld2max.max(lld2);
     }
 
-    let newconf = if lld2max > 4.0 { 45 } else { 100 };
-    Ok(field.sync_confidence.min(newconf))
+    Ok(if lld2max > 4.0 { 45 } else { 100 })
 }
 
 // Level of samples `[start, end)` of each line of a picture of `outlinelen`
@@ -916,10 +915,8 @@ struct DecodedField {
     wow_interpolation_method: WowInterpolation,
     validpulses: Vec<i64>,
     is_first_field: Option<bool>,
-    linebad: Option<Vec<u8>>,
     nextfieldoffset: Option<f64>,
     vblank_next: Option<f64>,
-    lt_vsync: Option<(f64, f64)>,
     is_progressive_field: Option<bool>,
     field_number: i64,
     linelocs: Option<Vec<f64>>,
@@ -928,7 +925,6 @@ struct DecodedField {
     out_scale: Option<f64>,
     field_phase_id: Option<i64>,
     valid: bool,
-    sync_confidence: i64,
     burst_lock: Option<BurstLock>,
     /// The chroma track phase the burst lock reported for this field (and
     /// starts the next field's lock from); with the field count it selects
@@ -1361,7 +1357,6 @@ pub struct Decoder {
     chroma_afc_state: ChromaAfcState,
     conversion_lo: Option<ConversionLoState>,
     output: OutputSequence,
-    seen_first_field: bool,
     metadata_field: Option<MetadataFieldState>,
     lastvalidfield: Vec<Option<WriteableField>>,
     pending_result: Option<DecodeFieldResult>,
@@ -1384,7 +1379,6 @@ impl Decoder {
             chroma_afc_state,
             conversion_lo,
             output: OutputSequence::default(),
-            seen_first_field: false,
             metadata_field: None,
             lastvalidfield: vec![None, None],
             pending_result: None,
@@ -1725,8 +1719,6 @@ impl Decoder {
                             write_field = false;
                         }
                     }
-                } else if field_obj.is_first_field.unwrap_or(false) {
-                    self.seen_first_field = true;
                 }
 
                 let info = FieldInfoEntry {
