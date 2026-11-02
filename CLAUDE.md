@@ -22,6 +22,10 @@
 - Hot kernels live in `optimized/`: explicit SIMD where the compiler bundles
   too narrowly, lookup tables sized to stay cache resident, bounds
   established by construction rather than per-sample checks.
+- Vectorize by preference in this order: plain code the compiler
+  vectorizes, then portable SIMD (`std::simd` under the nightly cfg with a
+  plain fallback), then arch-specific intrinsics. A preference, not a rule:
+  step down a level when the measured gap is too big.
 - Don't carry fields, parameters or options that nothing reads; delete
   machinery the moment it becomes dead.
 - CLI is conventional clap: `--kebab-case`, value enums. Profiles express
