@@ -854,7 +854,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         res = try_get_pulses(&mut pending_field, spec, inter_field_state, true);
     }
 
-    inter_field_state.compute_linelocs_issues = true;
     let next_field = if let Some(res) = res.as_ref() {
         let is_first_field = pending_field.is_first_field.unwrap_or(false);
         pending_field.linecount = Some(if is_first_field { 263 } else { 262 });
@@ -893,13 +892,13 @@ pub(crate) fn predecode_field_from_rawdecode(
                 } else {
                     linelocs_vec[pending_field.outlinecount - 7]
                 };
-                if linebad_vec.iter().filter(|&&value| value != 0).count() < 30 {
-                    inter_field_state.compute_linelocs_issues = false;
-                } else if spec.rf_saved_levels {
+                let bad_lines = linebad_vec.iter().filter(|&&value| value != 0).count();
+                if bad_lines >= 30 && spec.rf_saved_levels {
                     tracing::debug!(
                         "Possible sync issues, re-running level detection on next field!"
                     );
                 }
+                let mut levels = res.levels;
                 if !spec.rf_saved_levels {
                     let (sync_level, blank_level) = refine_levels_from_vsync(
                         &pending_field.data.video.demod,
@@ -910,11 +909,10 @@ pub(crate) fn predecode_field_from_rawdecode(
                     );
                     let adjust = spec.rf_ire0_adjust;
                     if adjust.backporch {
-                        inter_field_state.levels.ire0 = blank_level;
+                        levels.ire0 = blank_level;
                     }
                     if adjust.hsync {
-                        inter_field_state.levels.hz_ire =
-                            (blank_level - sync_level) / -spec.sys_vsync_ire;
+                        levels.hz_ire = (blank_level - sync_level) / -spec.sys_vsync_ire;
                     }
                 }
 
@@ -926,12 +924,20 @@ pub(crate) fn predecode_field_from_rawdecode(
                         &pending_field.data.video.demod_05,
                         &mut linebad_vec,
                         normal_hsync_length,
-                        inter_field_state.levels,
+                        levels,
                     )?
                 } else {
                     linelocs_vec.clone()
                 };
                 pending_field.valid = true;
+                // The field is accepted: the next field's sync search starts
+                // from its first hsync, order and levels.
+                inter_field_state.prev_first_hsync_readloc = pending_field.readloc as i64;
+                inter_field_state.prev_first_hsync_loc = first_hsync.loc;
+                inter_field_state.prev_first_hsync_diff = first_hsync.diff;
+                inter_field_state.prev_first_field = i64::from(is_first_field);
+                inter_field_state.compute_linelocs_issues = bad_lines >= 30;
+                inter_field_state.levels = levels;
 
                 if spec.sys_frame_lines != LineSystem::Line525 {
                     pending_field.linelocs = Some(linelocs2_vec);

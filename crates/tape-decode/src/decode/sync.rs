@@ -1610,6 +1610,9 @@ pub(crate) struct FirstHsync {
     pub(crate) line: f64,
     /// Line 0 of the field, `line` lines before the pulse.
     pub(crate) line0loc: f64,
+    /// Lines from the estimate off the previous field's first hsync to the
+    /// pulse (the previous field's own value when the estimate was used).
+    pub(crate) diff: f64,
 }
 
 pub(crate) struct PulseResult {
@@ -1618,6 +1621,9 @@ pub(crate) struct PulseResult {
     /// The field's sync tip and blanking levels as measured on its pulses.
     pub(crate) sync_level: f32,
     pub(crate) blank_level: f32,
+    /// The working levels, retuned to the measured ones by the
+    /// `--ire0-adjust` modes.
+    pub(crate) levels: VideoLevels,
 }
 
 /// Sync pulses of a field, with the sync tip and blanking levels they were
@@ -1825,7 +1831,7 @@ fn find_sync_pulses(
 pub(crate) fn try_get_pulses(
     field: &mut DecodedField,
     spec: &DecoderSpec,
-    inter_field_state: &mut InterFieldState,
+    inter_field_state: &InterFieldState,
     do_level_detect: bool,
 ) -> Option<PulseResult> {
     // Without level detection the field is sliced between the working levels.
@@ -1835,13 +1841,13 @@ pub(crate) fn try_get_pulses(
     });
     let found = find_sync_pulses(spec, field, estimates);
 
+    let mut levels = inter_field_state.levels;
     let adjust = spec.rf_ire0_adjust;
     if adjust.backporch {
-        inter_field_state.levels.ire0 = found.blank_level;
+        levels.ire0 = found.blank_level;
     }
     if adjust.hsync {
-        inter_field_state.levels.hz_ire =
-            (found.blank_level - found.sync_level) / -spec.sys_vsync_ire;
+        levels.hz_ire = (found.blank_level - found.sync_level) / -spec.sys_vsync_ire;
     }
 
     if found.pulses.is_empty()
@@ -1856,12 +1862,6 @@ pub(crate) fn try_get_pulses(
     field.vblank_next = result.vblank_next;
     field.is_first_field = Some(result.is_first_field);
     field.is_progressive_field = Some(result.is_progressive_field);
-    if let Some(first_hsync_loc) = result.first_hsync_loc {
-        inter_field_state.prev_first_hsync_readloc = field.readloc as i64;
-        inter_field_state.prev_first_hsync_loc = first_hsync_loc;
-        inter_field_state.prev_first_hsync_diff = result.prev_hsync_diff;
-    }
-    inter_field_state.prev_first_field = if result.is_first_field { 1 } else { 0 };
     Some(PulseResult {
         first_hsync: result.first_hsync_loc.map(|loc| FirstHsync {
             loc,
@@ -1869,10 +1869,12 @@ pub(crate) fn try_get_pulses(
             line0loc: result
                 .line0loc
                 .expect("line 0 is located together with the first hsync"),
+            diff: result.prev_hsync_diff,
         }),
         meanlinelen: result.meanlinelen,
         sync_level: found.sync_level,
         blank_level: found.blank_level,
+        levels,
     })
 }
 
