@@ -448,16 +448,16 @@ fn get_linefreq(
     linecount: Option<usize>,
     lineoffset: usize,
     line: Option<usize>,
-    linelocs: Option<&[f32]>,
+    linelocs: Option<&[f64]>,
 ) -> f64 {
     let mut length =
         if let (Some(line), Some(linecount), Some(linelocs)) = (line, linecount, linelocs) {
             if line >= linecount + lineoffset {
-                f64::from(linelocs[line]) - f64::from(linelocs[line - 1])
+                linelocs[line] - linelocs[line - 1]
             } else if line > 0 {
-                (f64::from(linelocs[line + 1]) - f64::from(linelocs[line - 1])) / 2.0
+                (linelocs[line + 1] - linelocs[line - 1]) / 2.0
             } else {
-                f64::from(linelocs[1]) - f64::from(linelocs[0])
+                linelocs[1] - linelocs[0]
             }
         } else {
             linelen
@@ -477,7 +477,7 @@ fn usectoinpx(
     lineoffset: usize,
     x: f64,
     line: Option<usize>,
-    linelocs: Option<&[f32]>,
+    linelocs: Option<&[f64]>,
 ) -> f64 {
     x * get_linefreq(
         linelen,
@@ -507,7 +507,7 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
         return Ok(field.sync_confidence);
     }
 
-    let mut lld2max = f32::NEG_INFINITY;
+    let mut lld2max = f64::NEG_INFINITY;
     for index in field.lineoffset..end - 2 {
         let lld2 = linelocs[index + 2] - (2.0 * linelocs[index + 1]) + linelocs[index];
         lld2max = lld2max.max(lld2);
@@ -934,8 +934,8 @@ struct PrevFieldState {
 #[derive(Clone)]
 struct InterFieldState {
     prev_first_hsync_readloc: i64,
-    prev_first_hsync_loc: f32,
-    prev_first_hsync_diff: f32,
+    prev_first_hsync_loc: f64,
+    prev_first_hsync_diff: f64,
     prev_first_field: i64,
     track_phase: Option<i64>,
     compute_linelocs_issues: bool,
@@ -977,7 +977,7 @@ struct DecodedField {
     lt_vsync: Option<(f64, f64)>,
     is_progressive_field: Option<bool>,
     field_number: i64,
-    linelocs: Option<Vec<f32>>,
+    linelocs: Option<Vec<f64>>,
     lineoffset: usize,
     linecount: Option<usize>,
     out_scale: Option<f64>,
@@ -1311,12 +1311,6 @@ fn downscale_raw_vec(
     let outwidth = field.outlinelen;
     let k = field.wow_interpolation_method.spline_degree();
     let out_len = field.outlinecount * outwidth;
-    // The line-location spline is solved in f64; widen the f32 sync output here.
-    let actual_linelocs = actual_linelocs
-        .iter()
-        .map(|&v| f64::from(v))
-        .collect::<Vec<f64>>();
-    let actual_linelocs = actual_linelocs.as_slice();
     let expected_linelocs = (0..actual_linelocs.len())
         .map(|i| i as f64 * field.inlinelen)
         .collect::<Vec<_>>();

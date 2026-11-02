@@ -171,7 +171,7 @@ fn calczc_do(
     target: f32,
     count: isize,
     mut edge: i64,
-) -> Result<f32> {
+) -> Result<f64> {
     let start_offset_clamped = start_offset.max(1);
     let start_offset_index =
         usize::try_from(start_offset_clamped).context("start_offset out of range")?;
@@ -192,7 +192,7 @@ fn calczc_do(
         resolve_signed_index(data.len(), start_offset).context("start_offset out of range")?;
     let edge_value = data[edge_index];
     if (edge == 1 && edge_value > target_f) || (edge == -1 && edge_value < target_f) {
-        return Ok(f32::NAN);
+        return Ok(f64::NAN);
     }
 
     let search_len = count + 1;
@@ -207,7 +207,7 @@ fn calczc_do(
         .iter()
         .position(|&sample| (edge == 1 && sample >= target_f) || (edge != 1 && sample <= target_f))
     else {
-        return Ok(f32::NAN);
+        return Ok(f64::NAN);
     };
 
     let x = start_offset_index + loc;
@@ -215,7 +215,7 @@ fn calczc_do(
     let b = data[x] - target_f;
     let y = if b - a != 0.0 { -a / (-a + b) } else { 0.0 };
 
-    Ok(x as f32 - 1.0 + y)
+    Ok(x as f64 - 1.0 + f64::from(y))
 }
 
 fn signed_bounds_slice<T>(data: &[T], start: isize, end: isize) -> &[T] {
@@ -232,18 +232,18 @@ fn slice_empty_or_out_of_range(values: &[f32], min: f32, max: f32) -> bool {
     values.iter().any(|&value| value < min || value > max)
 }
 
-fn round_ties_even_to_isize(value: f32) -> isize {
+fn round_ties_even_to_isize(value: f64) -> isize {
     value.round_ties_even() as isize
 }
 
 fn refine_linelocs_hsync(
     spec: &DecoderSpec,
-    initial_linelocs: &[f32],
+    initial_linelocs: &[f64],
     demod_05: &[f32],
     linebad: &mut [u8],
     normal_hsync_length: usize,
     levels: VideoLevels,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<f64>> {
     if linebad.len() != initial_linelocs.len() {
         bail!("linebad length doesn't match linelocs length");
     }
@@ -258,8 +258,8 @@ fn refine_linelocs_hsync(
     let mut linelocs_refined = initial_linelocs.to_vec();
     let mut refined_from_right_lineloc = -1.0;
     let mut prev_porch_level = -1.0f32;
-    let one_usec_samples = spec.freq as f32;
-    let normal_hsync_samples = normal_hsync_length as f32;
+    let one_usec_samples = spec.freq;
+    let normal_hsync_samples = normal_hsync_length as f64;
 
     for i in 0..initial_linelocs.len() {
         if (3..=6).contains(&i) || (is_pal && (1..=2).contains(&i)) {
@@ -270,7 +270,7 @@ fn refine_linelocs_hsync(
         let ll1 = round_ties_even_to_isize(initial_linelocs[i]) - one_usec as isize;
         let zc = calczc_do(demod_05, ll1, zc_threshold, (one_usec * 2) as isize, 0)?;
 
-        let mut right_cross = f32::NAN;
+        let mut right_cross = f64::NAN;
         if !spec.rf_disable_right_hsync {
             right_cross = calczc_do(
                 demod_05,
@@ -362,7 +362,7 @@ fn refine_linelocs_hsync(
 
                 if !zc2.is_nan() && (zc2 - right_cross).abs() < (one_usec_samples / 2.0) {
                     refined_from_right_lineloc =
-                        right_cross - normal_hsync_samples + (2.25 * (spec.freq as f32 / 40.0));
+                        right_cross - normal_hsync_samples + (2.25 * (spec.freq / 40.0));
                     if (refined_from_right_lineloc - linelocs_refined[i]).abs()
                         < (one_usec_samples * 2.0)
                     {
@@ -388,24 +388,24 @@ fn refine_linelocs_hsync(
 }
 
 fn valid_pulses_to_linelocs(
-    mut validpulses: Vec<f32>,
-    reference_pulse: f32,
+    mut validpulses: Vec<f64>,
+    reference_pulse: f64,
     reference_line: i64,
-    meanlinelen: f32,
+    meanlinelen: f64,
     proclines: usize,
-) -> (Vec<f32>, Vec<u8>) {
+) -> (Vec<f64>, Vec<u8>) {
     validpulses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
 
     let mut line_locations = vec![0.0; proclines];
     let line_location_errs = vec![0; proclines];
     let validpulses_len = validpulses.len();
     let max_allowed_distance_between_pulse_and_line = meanlinelen / 1.5;
-    let reference_line = reference_line as f32;
+    let reference_line = reference_line as f64;
     let mut current_pulse_index = 0usize;
 
     for (line_index, line_location) in line_locations.iter_mut().enumerate() {
         let expected_line_location =
-            reference_pulse + meanlinelen * (line_index as f32 - reference_line);
+            reference_pulse + meanlinelen * (line_index as f64 - reference_line);
         *line_location = expected_line_location;
 
         if current_pulse_index < validpulses_len {
@@ -724,7 +724,7 @@ fn get_phase_rotation_sequence(
 
 /// Line locations refined from the burst phase, or `None` when burst hsync
 /// refinement is disabled or the color killer blanks the field.
-fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Vec<f32>> {
+fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Vec<f64>> {
     if spec.rf_disable_burst_hsync {
         return None;
     }
@@ -760,8 +760,8 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
         // Less the subcarrier drift the fitted frequency accumulates between
         // the line start and the burst center.
         let drift = (burst.frequency - fsc_hz) * burst.center / fsc_hz;
-        let scale = f64::from(linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
-        linelocs[line] += ((line_adjust - drift) * scale) as f32;
+        let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
+        linelocs[line] += (line_adjust - drift) * scale;
     }
     Some(linelocs)
 }
@@ -880,27 +880,26 @@ pub(crate) fn predecode_field_from_rawdecode(
             let first_hsync_loc_line = res
                 .first_hsync_loc_line
                 .context("missing first_hsync_loc_line")?;
-            let input_len = pending_field.data.input_len as f32;
+            let input_len = pending_field.data.input_len as f64;
             let lastline = (input_len - line0loc) / res.meanlinelen - 1.0;
-            if lastline < proclines as f32 {
+            if lastline < proclines as f64 {
                 if pending_field.prevfield.is_some() {
                     tracing::info!(lastline, proclines, meanlinelen = res.meanlinelen, line0loc);
                     tracing::info!(
                         "Did not find the expected number of lines (lastline < proclines) , skipping a tiny bit"
                     );
                 }
-                pending_field.nextfieldoffset = Some(f64::from(
-                    (line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen as f32),
-                ));
+                pending_field.nextfieldoffset =
+                    Some((line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen));
             } else {
                 let validpulses = pending_field
                     .validpulses
                     .iter()
-                    .map(|&start| start as f32)
+                    .map(|&start| start as f64)
                     .collect::<Vec<_>>();
                 let (linelocs_vec, mut linebad_vec) = valid_pulses_to_linelocs(
                     validpulses,
-                    (first_hsync_loc as i64) as f32,
+                    (first_hsync_loc as i64) as f64,
                     first_hsync_loc_line as i64,
                     res.meanlinelen,
                     proclines,
@@ -908,7 +907,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                 let nextfield = if let Some(vblank_next) = pending_field.vblank_next {
                     vblank_next - (pending_field.inlinelen * 8.0)
                 } else {
-                    f64::from(linelocs_vec[pending_field.outlinecount - 7])
+                    linelocs_vec[pending_field.outlinecount - 7]
                 };
                 if linebad_vec.iter().filter(|&&value| value != 0).count() < 30 {
                     inter_field_state.compute_linelocs_issues = false;
@@ -1010,8 +1009,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                         // the I/Q colour axes (calibrated for ~147 degrees of output
                         // burst phase).
                         let fsc_phase_deg = 117.25;
-                        let shift =
-                            -((fsc_phase_deg / 360.0) / spec.sys_fsc_mhz * spec.freq) as f32;
+                        let shift = -((fsc_phase_deg / 360.0) / spec.sys_fsc_mhz * spec.freq);
                         if let Some(linelocs) = pending_field.linelocs.as_mut() {
                             for value in linelocs {
                                 *value += shift;

@@ -155,12 +155,11 @@ pub(crate) fn detect_dropouts_rf(
     );
     dropouts_rf.retain(|(start_rf, end_rf)| *end_rf - *start_rf as isize > min_length);
 
-    let linelocs_f64 = linelocs.iter().map(|&v| f64::from(v)).collect::<Vec<f64>>();
     let (rv_lines, rv_starts, rv_ends) = map_dropouts_rf_to_tbc(
         &dropouts_rf,
         start_line,
         end_line,
-        &linelocs_f64,
+        linelocs,
         field.outlinelen,
         field.lineoffset,
     );

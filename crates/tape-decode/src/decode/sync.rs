@@ -135,26 +135,26 @@ fn run_vblank_state_machine(
     (done, valid_types, valid_starts, valid_good)
 }
 
-fn round_nearest_line_loc(line_number: f32) -> f32 {
+fn round_nearest_line_loc(line_number: f64) -> f64 {
     let rounded = (line_number / 0.5).round_ties_even();
     (0.5 * rounded * 10.0).round_ties_even() / 10.0
 }
 
 #[derive(Default)]
 struct SyncDistanceResult {
-    distance_offset: f32,
-    hsync_loc: f32,
+    distance_offset: f64,
+    hsync_loc: f64,
     valid_locations: usize,
 }
 
 fn calc_sync_from_known_distances(
-    meanlinelen: f32,
-    vsync_tolerance_lines: f32,
-    hsync_start_line: f32,
-    first_pulse: f32,
-    second_pulse: f32,
-    first_line: f32,
-    second_line: f32,
+    meanlinelen: f64,
+    vsync_tolerance_lines: f64,
+    hsync_start_line: f64,
+    first_pulse: f64,
+    second_pulse: f64,
+    first_line: f64,
+    second_line: f64,
 ) -> SyncDistanceResult {
     let mut output = SyncDistanceResult::default();
 
@@ -175,13 +175,13 @@ fn calc_sync_from_known_distances(
 }
 
 struct GetFirstHsyncLocResult {
-    line0loc: Option<f32>,
-    first_hsync_loc: Option<f32>,
-    hsync_start_line: f32,
-    next_field: Option<f32>,
+    line0loc: Option<f64>,
+    first_hsync_loc: Option<f64>,
+    hsync_start_line: f64,
+    next_field: Option<f64>,
     first_field: bool,
     progressive_field: bool,
-    prev_hsync_diff: f32,
+    prev_hsync_diff: f64,
 }
 
 /// Scan the valid pulse train and, for the leading and trailing vblank sections,
@@ -189,11 +189,11 @@ struct GetFirstHsyncLocResult {
 /// line lengths used to detect field order (`field_order_lengths`).
 fn measure_vblank_sections(
     validpulses_type: &[PulseType],
-    validpulses_start: &[f32],
+    validpulses_start: &[f64],
     validpulses_valid: &[bool],
-    meanlinelen: f32,
-    field_lines: [f32; 2],
-) -> ([f32; 8], [f32; 4]) {
+    meanlinelen: f64,
+    field_lines: [f64; 2],
+) -> ([f64; 8], [f64; 4]) {
     let mut field_order_lengths = [-1.0; 4];
     let mut vblank_pulses = [-1.0; 8];
 
@@ -244,7 +244,7 @@ fn measure_vblank_sections(
 
 /// Expected field-order signatures, each [first HSYNC, first EQPL2, last HSYNC,
 /// last EQPL2], returned as (first field, second field, progressive field).
-fn field_order_signatures(is_ntsc: bool) -> ([f32; 4], [f32; 4], [f32; 4]) {
+fn field_order_signatures(is_ntsc: bool) -> ([f64; 4], [f64; 4], [f64; 4]) {
     if is_ntsc {
         (
             [1.0, 0.5, 0.5, 1.0],
@@ -265,7 +265,7 @@ fn field_order_signatures(is_ntsc: bool) -> ([f32; 4], [f32; 4], [f32; 4]) {
 /// consensus is weighed against the caller's confidence floor, with a VSYNC
 /// fallback hint breaking ties when it is more confident than either field.
 fn decide_field_order(
-    field_order_lengths: [f32; 4],
+    field_order_lengths: [f64; 4],
     is_ntsc: bool,
     inter_field_state: &InterFieldState,
     mut field_order_confidence: i64,
@@ -378,21 +378,21 @@ fn decide_field_order(
 
 fn get_first_hsync_loc(
     validpulses_type: &[PulseType],
-    validpulses_start: &[f32],
+    validpulses_start: &[f64],
     validpulses_valid: &[bool],
-    meanlinelen: f32,
+    meanlinelen: f64,
     is_ntsc: bool,
-    field_lines: [f32; 2],
-    num_eq_pulses: f32,
+    field_lines: [f64; 2],
+    num_eq_pulses: f64,
     inter_field_state: &InterFieldState,
-    last_field_offset_lines: f32,
+    last_field_offset_lines: f64,
     field_order_confidence: i64,
     fallback: Option<Line0FallbackResult>,
 ) -> GetFirstHsyncLocResult {
     // Only the fallback line-0 location is consulted below; the field-order hints
     // are consumed inside `decide_field_order`. -1.0 means "no fallback".
     let fallback_line0loc = fallback.map_or(-1.0, |r| r.line0);
-    const VSYNC_TOLERANCE_LINES: f32 = 0.5;
+    const VSYNC_TOLERANCE_LINES: f64 = 0.5;
     const FIRST_VBLANK_EQ_1_START: usize = 0;
     const FIRST_VBLANK_VSYNC_START: usize = 1;
     const FIRST_VBLANK_VSYNC_END: usize = 2;
@@ -505,12 +505,12 @@ fn get_first_hsync_loc(
     let mut offset = 0.0;
 
     let first_vblank_hsync_estimate = if first_vblank_valid_location_count != 0 {
-        first_vblank_first_hsync_loc / first_vblank_valid_location_count as f32
+        first_vblank_first_hsync_loc / first_vblank_valid_location_count as f64
     } else {
         0.0
     };
     let last_vblank_hsync_estimate = if last_vblank_valid_location_count != 0 {
-        last_vblank_first_hsync_loc / last_vblank_valid_location_count as f32
+        last_vblank_first_hsync_loc / last_vblank_valid_location_count as f64
     } else {
         0.0
     };
@@ -598,9 +598,9 @@ fn get_first_hsync_loc(
     }
 
     if valid_location_count > 0 {
-        offset /= valid_location_count as f32;
+        offset /= valid_location_count as f64;
         first_hsync_loc =
-            ((first_hsync_loc + offset) / valid_location_count as f32).round_ties_even();
+            ((first_hsync_loc + offset) / valid_location_count as f64).round_ties_even();
 
         if !used_estimated_hsync {
             prev_hsync_diff = (first_hsync_loc - estimated_hsync_loc) / meanlinelen;
@@ -628,7 +628,7 @@ fn get_first_hsync_loc(
         }
 
         if hsync_count > 0 {
-            hsync_offset /= hsync_count as f32;
+            hsync_offset /= hsync_count as f64;
             first_hsync_loc -= hsync_offset;
         }
 
@@ -672,7 +672,7 @@ struct ValidPulseSample {
 
 #[derive(Clone, Copy)]
 struct Line0FallbackResult {
-    line0: f32,
+    line0: f64,
     first_field: i64,
     first_field_confidence: i64,
 }
@@ -680,14 +680,14 @@ struct Line0FallbackResult {
 struct PulseClassificationResult {
     valid_starts: Vec<i64>,
     lt_vsync: Option<(f64, f64)>,
-    meanlinelen: f32,
-    line0loc: Option<f32>,
-    first_hsync_loc: Option<f32>,
-    first_hsync_loc_line: f32,
-    vblank_next: Option<f32>,
+    meanlinelen: f64,
+    line0loc: Option<f64>,
+    first_hsync_loc: Option<f64>,
+    first_hsync_loc_line: f64,
+    vblank_next: Option<f64>,
     is_first_field: bool,
     is_progressive_field: bool,
-    prev_hsync_diff: f32,
+    prev_hsync_diff: f64,
 }
 
 #[inline(always)]
@@ -1319,7 +1319,7 @@ fn get_line0_fallback(
 
     if let Some(line0) = line_0 {
         return Some(Line0FallbackResult {
-            line0: line0 as f32,
+            line0,
             first_field,
             first_field_confidence,
         });
@@ -1356,7 +1356,7 @@ fn get_line0_fallback(
     }
 
     Some(Line0FallbackResult {
-        line0: line_0.unwrap() as f32,
+        line0: line_0.unwrap(),
         first_field: -1,
         first_field_confidence: -1,
     })
@@ -1526,20 +1526,20 @@ fn try_get_pulses_core(
             let idx = idx as usize;
             let linelen = valid_starts[idx] - valid_starts[idx - 1];
             if inrange(linelen as f64 / field.inlinelen, 0.95, 1.05) {
-                linelens.push(linelen as f32);
+                linelens.push(linelen as f64);
             }
         }
     }
 
-    let meanlinelen: f32 = if linelens.is_empty() {
-        field.inlinelen as f32
+    let meanlinelen: f64 = if linelens.is_empty() {
+        field.inlinelen
     } else {
-        linelens.iter().sum::<f32>() / linelens.len() as f32
+        linelens.iter().sum::<f64>() / linelens.len() as f64
     };
 
     // Calculate in terms of lines to prevent integer overflow when seeking ahead large amounts.
     let prev_first_hsync_offset_lines = if inter_field_state.prev_first_hsync_readloc != -1 {
-        (inter_field_state.prev_first_hsync_readloc - field.readloc as i64) as f32 / meanlinelen
+        (inter_field_state.prev_first_hsync_readloc - field.readloc as i64) as f64 / meanlinelen
     } else {
         0.0
     };
@@ -1558,11 +1558,11 @@ fn try_get_pulses_core(
         let mut expected_first_field = None;
         if inter_field_state.prev_first_hsync_readloc != -1 {
             let prev_abs = inter_field_state.prev_first_hsync_readloc as f64
-                + f64::from(inter_field_state.prev_first_hsync_loc);
+                + inter_field_state.prev_first_hsync_loc;
             let lines_per_field = frame_lines as f64 / 2.0;
-            let target_abs = prev_abs + (lines_per_field * f64::from(meanlinelen));
+            let target_abs = prev_abs + (lines_per_field * meanlinelen);
             // Target VSYNC area approx 8 lines before active video (Start of VSYNC block).
-            let expected_line0_abs = target_abs - (8.0 * f64::from(meanlinelen));
+            let expected_line0_abs = target_abs - (8.0 * meanlinelen);
             expected_line0 = Some(expected_line0_abs - field.readloc as f64);
             if inter_field_state.prev_first_field != -1 {
                 expected_first_field = Some(1 - inter_field_state.prev_first_field);
@@ -1589,13 +1589,13 @@ fn try_get_pulses_core(
         &valid_types,
         &valid_starts
             .iter()
-            .map(|&start| start as f32)
+            .map(|&start| start as f64)
             .collect::<Vec<_>>(),
         &valid_good,
         meanlinelen,
         is_ntsc,
-        [field_lines.0 as f32, field_lines.1 as f32],
-        num_pulses as f32,
+        [field_lines.0 as f64, field_lines.1 as f64],
+        num_pulses,
         inter_field_state,
         prev_first_hsync_offset_lines,
         spec.rf_field_order_confidence,
@@ -1617,10 +1617,10 @@ fn try_get_pulses_core(
 }
 
 pub(crate) struct PulseResult {
-    pub(crate) line0loc: Option<f32>,
-    pub(crate) first_hsync_loc: Option<f32>,
-    pub(crate) first_hsync_loc_line: Option<f32>,
-    pub(crate) meanlinelen: f32,
+    pub(crate) line0loc: Option<f64>,
+    pub(crate) first_hsync_loc: Option<f64>,
+    pub(crate) first_hsync_loc_line: Option<f64>,
+    pub(crate) meanlinelen: f64,
     /// The field's sync tip and blanking levels as measured on its pulses.
     pub(crate) sync_level: f32,
     pub(crate) blank_level: f32,
@@ -1870,7 +1870,7 @@ pub(crate) fn try_get_pulses(
     let result = try_get_pulses_core(spec, &found.pulses, field, inter_field_state);
 
     field.validpulses = result.valid_starts;
-    field.vblank_next = result.vblank_next.map(f64::from);
+    field.vblank_next = result.vblank_next;
     field.lt_vsync = result.lt_vsync;
     field.is_first_field = Some(result.is_first_field);
     field.is_progressive_field = Some(result.is_progressive_field);
@@ -1901,12 +1901,12 @@ pub(crate) fn try_get_pulses(
 /// separation is within half of the expected one and its SNR is at least 9.
 pub(crate) fn refine_levels_from_vsync(
     demod: &[f32],
-    line0loc: f32,
-    meanlinelen: f32,
+    line0loc: f64,
+    meanlinelen: f64,
     sync_level: f32,
     blank_level: f32,
 ) -> (f32, f32) {
-    const WINDOW_LINES: f32 = 8.5;
+    const WINDOW_LINES: f64 = 8.5;
     const MIN_YIELD_FRACTION: f32 = 0.15;
     const MIN_YIELD_SAMPLES: usize = 5;
     const OUTLIER_MADS: f32 = 3.5;
