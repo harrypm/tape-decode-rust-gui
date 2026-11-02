@@ -939,15 +939,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                 }
 
                 let linelocs2_vec = if !spec.rf_skip_hsync_refine {
-                    let normal_hsync_length = usectoinpx(
-                        spec.linelen() as f64,
-                        spec.samplesperline(),
-                        pending_field.linecount,
-                        pending_field.lineoffset,
-                        spec.sys_hsync_pulse_us,
-                        None,
-                        None,
-                    ) as usize;
+                    let normal_hsync_length = usectoinpx(spec, spec.sys_hsync_pulse_us) as usize;
                     refine_linelocs_hsync(
                         spec,
                         &linelocs_vec,

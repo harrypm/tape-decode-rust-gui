@@ -442,51 +442,9 @@ fn shift_chroma_and_remove_dc(mut output: Vec<f32>, move_by: isize) -> Vec<f32> 
     output
 }
 
-fn get_linefreq(
-    linelen: f64,
-    samplesperline: f64,
-    linecount: Option<usize>,
-    lineoffset: usize,
-    line: Option<usize>,
-    linelocs: Option<&[f64]>,
-) -> f64 {
-    let mut length =
-        if let (Some(line), Some(linecount), Some(linelocs)) = (line, linecount, linelocs) {
-            if line >= linecount + lineoffset {
-                linelocs[line] - linelocs[line - 1]
-            } else if line > 0 {
-                (linelocs[line + 1] - linelocs[line - 1]) / 2.0
-            } else {
-                linelocs[1] - linelocs[0]
-            }
-        } else {
-            linelen
-        };
-
-    if length <= 0.0 {
-        length = linelen;
-    }
-
-    samplesperline * length
-}
-
-fn usectoinpx(
-    linelen: f64,
-    samplesperline: f64,
-    linecount: Option<usize>,
-    lineoffset: usize,
-    x: f64,
-    line: Option<usize>,
-    linelocs: Option<&[f64]>,
-) -> f64 {
-    x * get_linefreq(
-        linelen,
-        samplesperline,
-        linecount,
-        lineoffset,
-        line,
-        linelocs,
-    )
+/// Microseconds to input samples.
+fn usectoinpx(spec: &DecoderSpec, x: f64) -> f64 {
+    x * spec.freq
 }
 
 fn hz_to_output_scalar(spec: &DecoderSpec, input: f64, out_scale: f64) -> f64 {

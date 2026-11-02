@@ -1382,23 +1382,12 @@ fn try_get_pulses_core(
     field: &DecodedField,
     inter_field_state: &InterFieldState,
 ) -> PulseClassificationResult {
-    let linelen = spec.linelen() as f64;
     let num_pulses = spec.sys_num_pulses as f64;
     let frame_lines = spec.sys_frame_lines.line_count() as i64;
     let field_lines = (spec.sys_field_lines[0], spec.sys_field_lines[1]);
     let is_ntsc = spec.sys_frame_lines == LineSystem::Line525;
 
-    let to_inpx = |us: f64| {
-        usectoinpx(
-            linelen,
-            spec.samplesperline(),
-            field.linecount,
-            field.lineoffset,
-            us,
-            None,
-            None,
-        )
-    };
+    let to_inpx = |us: f64| usectoinpx(spec, us);
 
     let hsync_typical = to_inpx(spec.sys_hsync_pulse_us);
 
@@ -1732,17 +1721,7 @@ fn find_sync_pulses(
     // are not on a grid.
     const MIN_GRID_LENGTH: usize = 8;
 
-    let to_inpx = |us: f64| {
-        usectoinpx(
-            spec.linelen() as f64,
-            spec.samplesperline(),
-            field.linecount,
-            field.lineoffset,
-            us,
-            None,
-            None,
-        )
-    };
+    let to_inpx = |us: f64| usectoinpx(spec, us);
     let hsync_len = to_inpx(spec.sys_hsync_pulse_us);
     // The porch between the sync pulse and the active video, less 2 us of
     // margin; the blanking level is read halfway into it.

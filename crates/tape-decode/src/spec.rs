@@ -788,11 +788,6 @@ impl DecoderSpec {
     }
 
     #[inline]
-    pub(crate) fn samplesperline(&self) -> f64 {
-        self.freq / self.linelen() as f64
-    }
-
-    #[inline]
     pub(crate) fn video_sub_deemphasis_deviation(&self) -> f32 {
         self.sys_nonlinear_deviation
             .unwrap_or(self.sys_hz_ire * (100.0 - self.sys_vsync_ire))
