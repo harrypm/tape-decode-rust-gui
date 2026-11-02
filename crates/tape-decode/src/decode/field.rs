@@ -291,14 +291,6 @@ fn refine_linelocs_hsync(
                 if !zc2.is_nan() && (zc2 - zc).abs() < (one_usec_samples / 2.0) {
                     linelocs_refined[i] = zc2;
                     prev_porch_level = porch_level;
-                } else if prev_porch_level > 0.0 {
-                    let zc2 =
-                        calczc_do(demod_05, ll1, (prev_porch_level + sync_level) / 2.0, 400, 0)?;
-                    if !zc2.is_nan() && (zc2 - zc).abs() < (one_usec_samples / 2.0) {
-                        linelocs_refined[i] = zc2;
-                    } else {
-                        linebad[i] = 1;
-                    }
                 } else {
                     linebad[i] = 1;
                 }
