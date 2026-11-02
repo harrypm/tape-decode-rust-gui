@@ -931,6 +931,8 @@ struct DecodedField {
     out_scale: Option<f64>,
     field_phase_id: Option<i64>,
     valid: bool,
+    /// The levels the field's line locations were refined with.
+    levels: VideoLevels,
     burst_lock: Option<BurstLock>,
     /// The chroma track phase the burst lock reported for this field (and
     /// starts the next field's lock from); with the field count it selects
@@ -1578,7 +1580,7 @@ impl Decoder {
                                             hsync_level,
                                             "degenerate hz_ire from the hsync level, keeping the working one"
                                         );
-                                        hz_ire = self.inter_field_state.levels.hz_ire;
+                                        hz_ire = field_obj.levels.hz_ire;
                                     }
                                 }
                             }

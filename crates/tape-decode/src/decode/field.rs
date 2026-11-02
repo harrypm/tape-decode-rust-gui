@@ -833,6 +833,7 @@ pub(crate) fn predecode_field_from_rawdecode(
         out_scale: None,
         field_phase_id: None,
         valid: false,
+        levels: inter_field_state.levels,
         burst_lock: None,
         track_phase: inter_field_state.track_phase,
         wow_analysis: None,
@@ -930,6 +931,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                     linelocs_vec.clone()
                 };
                 pending_field.valid = true;
+                pending_field.levels = levels;
                 // The field is accepted: the next field's sync search starts
                 // from its first hsync, order and levels.
                 inter_field_state.prev_first_hsync_readloc = pending_field.readloc as i64;
