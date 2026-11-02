@@ -1372,6 +1372,40 @@ fn burst_area(spec: &DecoderSpec) -> (usize, usize) {
     (start, end - (end - start) % 4)
 }
 
+/// What the field-order check keeps of an output field.
+#[derive(Clone, Copy)]
+struct OutputFieldOrder {
+    is_first_field: bool,
+    detected_first_field: bool,
+    file_loc: u64,
+}
+
+impl OutputFieldOrder {
+    fn of(info: &FieldInfoEntry) -> Self {
+        Self {
+            is_first_field: info.is_first_field,
+            detected_first_field: info.detected_first_field,
+            file_loc: info.file_loc,
+        }
+    }
+}
+
+/// The output so far as the field-order check sees it: the count, which
+/// numbers the sequence, and the last two fields.
+#[derive(Default)]
+struct OutputSequence {
+    len: usize,
+    /// Newest first.
+    last: [Option<OutputFieldOrder>; 2],
+}
+
+impl OutputSequence {
+    fn push(&mut self, field: OutputFieldOrder) {
+        self.last = [Some(field), self.last[0]];
+        self.len += 1;
+    }
+}
+
 // Minimal state needed to progress a decode: the immutable spec, the running
 // input offset, and the speculative-predecode/field-ordering memory.
 pub struct Decoder {
@@ -1381,7 +1415,7 @@ pub struct Decoder {
     inter_field_state: InterFieldState,
     chroma_afc_state: ChromaAfcState,
     conversion_lo: Option<ConversionLoState>,
-    fields: Vec<FieldInfoEntry>,
+    output: OutputSequence,
     seen_first_field: bool,
     metadata_field: Option<MetadataFieldState>,
     lastvalidfield: Vec<Option<WriteableField>>,
@@ -1404,7 +1438,7 @@ impl Decoder {
             inter_field_state,
             chroma_afc_state,
             conversion_lo,
-            fields: Vec::new(),
+            output: OutputSequence::default(),
             seen_first_field: false,
             metadata_field: None,
             lastvalidfield: vec![None, None],
@@ -1643,16 +1677,15 @@ impl Decoder {
                 continue;
             }
 
-            if !self.fields.is_empty() || field_obj.is_first_field.unwrap_or(false) {
-                let prevfi_1 = self.fields.last().cloned();
-                let prevfi_2 = self.fields.iter().rev().nth(1).cloned();
+            if self.output.len != 0 || field_obj.is_first_field.unwrap_or(false) {
+                let [prevfi_1, prevfi_2] = self.output.last;
 
                 // --- Seed values (may be mutated below) ---
                 let mut is_first_field = field_obj.is_first_field.unwrap_or(false);
                 let detected_first_field = is_first_field;
                 let mut is_duplicate_field = false;
                 let mut sync_conf = sync_confidence_from_linelocs(&field_obj)?;
-                let seq_no = self.fields.len() + 1;
+                let seq_no = self.output.len + 1;
                 let disk_loc = roundfloat(field_obj.readloc as f64 / bytes_per_field as f64, 1);
                 let file_loc = field_obj.readloc;
 
@@ -1697,9 +1730,8 @@ impl Decoder {
 
                 // Interlaced video requires alternating fields. Handle cases where
                 // fields repeat (recording breaks, progressive content, etc.).
-                if let Some(prevfi) = prevfi_1
-                    .as_ref()
-                    .filter(|prevfi| prevfi.is_first_field == is_first_field)
+                if let Some(prevfi) =
+                    prevfi_1.filter(|prevfi| prevfi.is_first_field == is_first_field)
                 {
                     // Measure the field spacing against the previous field's exact
                     // sample position rather than its rounded reported location, so
@@ -1708,9 +1740,7 @@ impl Decoder {
                     let distance_from_previous_field =
                         disk_loc - roundfloat(prevfi.file_loc as f64 / bytes_per_field as f64, 1);
                     if prevfi.detected_first_field == detected_first_field
-                        && prevfi_2
-                            .as_ref()
-                            .is_some_and(|prev| prev.detected_first_field)
+                        && prevfi_2.is_some_and(|prev| prev.detected_first_field)
                             == prevfi.detected_first_field
                         && inrange(distance_from_previous_field, 0.9, 1.1)
                     {
@@ -1784,13 +1814,13 @@ impl Decoder {
                     self.lastvalidfield[idx] = Some(dataset.clone());
                     if is_duplicate_field {
                         if let Some(other) = self.lastvalidfield[1 - idx].clone() {
-                            self.fields.push(other.info.clone());
+                            self.output.push(OutputFieldOrder::of(&other.info));
                             output.push(other);
-                            self.fields.push(dataset.info.clone());
+                            self.output.push(OutputFieldOrder::of(&dataset.info));
                             output.push(dataset);
                         }
                     } else {
-                        self.fields.push(dataset.info.clone());
+                        self.output.push(OutputFieldOrder::of(&dataset.info));
                         output.push(dataset);
                     }
                 }
