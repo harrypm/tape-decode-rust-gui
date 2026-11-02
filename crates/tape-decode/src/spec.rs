@@ -120,7 +120,10 @@ pub struct DecoderSpec {
     pub(crate) cti_mix: f32,
     pub(crate) cti_width: u32,
 
-    pub(crate) chroma_burst_block_fft_gain: Vec<f32>,
+    /// Zero-phase gain of the block-level burst chain over the unique block
+    /// bins; `None` when the burst channel is the raw RF (under chroma AFC)
+    /// or not produced at all (no chroma processing).
+    pub(crate) chroma_burst_block_fft_gain: Option<Vec<f32>>,
     pub(crate) chroma_filter_video_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
@@ -521,18 +524,6 @@ impl DecoderSpec {
         };
 
         // --- Build chroma filters ---
-        let chroma_filter_video_burst = if is_color_under {
-            butter_sos(
-                decoder_params.chroma_bpf_order,
-                &[
-                    decoder_params.chroma_bpf_lower / freq_hz_half,
-                    decoder_params.chroma_bpf_upper / freq_hz_half,
-                ],
-                FilterBandType::Bandpass,
-            )?
-        } else {
-            chroma_bandpass_final(false)?
-        };
         let chroma_filter_deemphasis = if chroma_deemphasis_enabled {
             Some(biquad_sos_vec(peaking(
                 sys_params.fsc_mhz / chroma_afc_out_frequency_half,
@@ -561,23 +552,35 @@ impl DecoderSpec {
         // Combined zero-phase response of the block-level chroma burst chain
         // (the burst bandpass plus the optional audio/video notches): each
         // filtfilt transfer is the purely real |H|^2, so the whole chain
-        // collapses into one spectrum gain over the unique block bins.
-        let chroma_burst_block_fft_gain = {
-            let mut gain: Vec<f64> = sosfiltfft(&chroma_filter_video_burst, blocklen)
-                [..blocklen / 2 + 1]
-                .iter()
-                .map(|h| h.norm_sqr())
-                .collect();
-            for sos in [&chroma_filter_audio_notch, &chroma_filter_video_notch]
-                .into_iter()
-                .flatten()
-            {
-                for (bin, h) in gain.iter_mut().zip(sosfiltfft(sos, blocklen)) {
-                    *bin *= h.norm_sqr();
+        // collapses into one spectrum gain over the unique block bins. Under
+        // chroma AFC the burst channel is instead filtered at field level
+        // against the tracked carrier, and without chroma processing it is
+        // not produced at all.
+        let chroma_burst_block_fft_gain = (rf_write_chroma && !do_cafc)
+            .then(|| -> Result<Vec<f32>> {
+                let burst_bandpass = butter_sos(
+                    decoder_params.chroma_bpf_order,
+                    &[
+                        decoder_params.chroma_bpf_lower / freq_hz_half,
+                        decoder_params.chroma_bpf_upper / freq_hz_half,
+                    ],
+                    FilterBandType::Bandpass,
+                )?;
+                let mut gain: Vec<f64> = sosfiltfft(&burst_bandpass, blocklen)[..blocklen / 2 + 1]
+                    .iter()
+                    .map(|h| h.norm_sqr())
+                    .collect();
+                for sos in [&chroma_filter_audio_notch, &chroma_filter_video_notch]
+                    .into_iter()
+                    .flatten()
+                {
+                    for (bin, h) in gain.iter_mut().zip(sosfiltfft(sos, blocklen)) {
+                        *bin *= h.norm_sqr();
+                    }
                 }
-            }
-            convert_vec_in_place(gain, |bin| bin as f32)
-        };
+                Ok(convert_vec_in_place(gain, |bin| bin as f32))
+            })
+            .transpose()?;
 
         // Post-TBC chroma filter at output sample rate (4fsc).
         let chroma_filter_final = chroma_bandpass_final(is_color_under)?;
