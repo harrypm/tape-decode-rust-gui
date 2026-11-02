@@ -303,12 +303,13 @@ impl Tape {
     /// Copy the samples `[from, from + dst.len())` out of `state` into `dst`,
     /// truncated at the buffered frontier. Returns the count written.
     fn copy_out(state: &BufState, from: u64, dst: &mut [f32]) -> usize {
-        let frontier = state.start + state.buf.len() as u64;
-        let lo = from.saturating_sub(state.start).min(state.buf.len() as u64) as usize;
-        let hi = (from + dst.len() as u64)
-            .min(frontier)
-            .saturating_sub(state.start)
-            .min(state.buf.len() as u64) as usize;
+        assert!(
+            from >= state.start,
+            "read at sample {from} behind the buffered start {}: the drop threshold passed a worker's input",
+            state.start
+        );
+        let lo = ((from - state.start) as usize).min(state.buf.len());
+        let hi = lo.saturating_add(dst.len()).min(state.buf.len());
         let got = hi - lo;
         dst[..got].copy_from_slice(&state.buf[lo..hi]);
         got
@@ -318,7 +319,9 @@ impl Tape {
     /// the forerunner has buffered them (or end of input is reached). Returns the
     /// number of samples written and whether end of input was reached (fewer than
     /// `dst.len()` were available), or `None` if `stop` was raised. `from` must be
-    /// at or after the current drop threshold, which every active worker satisfies.
+    /// at or after the current drop threshold: every worker reads at or beyond
+    /// its published `consumed`, and the threshold never passes the start of a
+    /// segment still to be spawned (see `MtOrchestrator::update_drop_threshold`).
     fn read_into(
         &self,
         from: u64,
@@ -642,6 +645,9 @@ struct MtOrchestrator<'a> {
     pool: HashMap<u64, Worker>,
     /// Lowest segment index not yet assigned to a worker.
     next_unassigned: u64,
+    /// The first sample `next_unassigned`'s worker will read (see
+    /// [`first_needed_offset`]), which the tape must keep until it is spawned.
+    next_unassigned_needed: u64,
     /// Fields committed to the output so far (the running global sequence count).
     committed: usize,
     /// Offset from the authoritative worker's field count to the global one (the
@@ -694,28 +700,32 @@ impl<'a> MtOrchestrator<'a> {
             {
                 break;
             }
-            let start_offset = self.seg_start(seg);
-            let start_needed = first_needed_offset(&self.spec, start_offset)?;
             let worker = Worker::spawn(
                 &self.spec,
                 &self.tape,
-                start_offset,
-                start_needed,
+                self.seg_start(seg),
+                self.next_unassigned_needed,
                 self.capacity,
             );
             self.pool.insert(seg, worker);
             self.next_unassigned += 1;
+            self.next_unassigned_needed =
+                first_needed_offset(&self.spec, self.seg_start(self.next_unassigned))?;
         }
         Ok(())
     }
 
-    /// Drop tape input that no live decoder needs any more, using the minimum
-    /// `consumed` offset published across the pool. Each worker only ever reads
-    /// at or beyond its own `consumed`, so this never drops input still in use,
-    /// and a shut-down (joined) worker no longer constrains it. As the
-    /// authoritative decoder advances this follows it forward, keeping the
-    /// buffered span bounded even while it stays authoritative across many
-    /// discarded segments.
+    /// Drop tape input that no decoder, live or still to be spawned, needs any
+    /// more: the minimum `consumed` offset published across the pool, capped
+    /// at the first sample the next unassigned segment's worker will read.
+    /// Each worker only ever reads at or beyond its own `consumed`, so this
+    /// never drops input still in use, and a shut-down (joined) worker no
+    /// longer constrains it. The cap matters with few threads: the
+    /// authoritative decoder runs up to `capacity` fields ahead of the
+    /// committed output and so can pass the next unassigned segment's start
+    /// before that segment is spawned. As the authoritative decoder advances
+    /// this follows it forward, keeping the buffered span bounded even while
+    /// it stays authoritative across many discarded segments.
     fn update_drop_threshold(&self) {
         if let Some(min) = self
             .pool
@@ -723,7 +733,8 @@ impl<'a> MtOrchestrator<'a> {
             .map(|w| w.consumed.load(Ordering::Relaxed))
             .min()
         {
-            self.tape.set_drop_threshold(min);
+            self.tape
+                .set_drop_threshold(min.min(self.next_unassigned_needed));
         }
     }
 
@@ -980,6 +991,7 @@ pub fn decode_all_mt(
         .saturating_add(HANDOFF_MARGIN)
         .clamp(4, MAX_BUFFERED_FIELDS);
 
+    let next_unassigned_needed = first_needed_offset(&spec, start_offset)?;
     let mut orchestrator = MtOrchestrator {
         writer,
         spec,
@@ -990,6 +1002,7 @@ pub fn decode_all_mt(
         capacity,
         pool: HashMap::new(),
         next_unassigned: 0,
+        next_unassigned_needed,
         committed: 0,
         field_number_delta: 0,
         next_field_number_delta: 0,
