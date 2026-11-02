@@ -185,14 +185,17 @@ fn chroma_transient_improvement(
     }
 }
 
-/// Output sample range of a field line, clamped to the buffer.
+/// Output sample range of a field line, clamped to the buffer: empty for
+/// the lines before the first output line, which the PAL burst lock
+/// measures too.
 fn line_bounds(field: &DecodedField, len: usize, line_number: usize) -> (usize, usize) {
     let lineoffset = field.lineoffset + 1;
     let linestart = (line_number as isize - lineoffset as isize) * field.outlinelen as isize;
     let lineend = linestart + field.outlinelen as isize;
+    let len = len as isize;
     (
-        resolve_slice_bound(len, linestart),
-        resolve_slice_bound(len, lineend),
+        linestart.clamp(0, len) as usize,
+        lineend.clamp(0, len) as usize,
     )
 }
 
