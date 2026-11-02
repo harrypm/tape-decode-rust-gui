@@ -1,5 +1,6 @@
 use super::select_ranks_by_key;
 use anyhow::{bail, Result};
+use lanes::{fold, Lanes};
 
 // Full-field wow factors are large; fixed-point keeps the buffer at 4 bytes per
 // sample without losing the precision needed by the level-adjust pass.
@@ -129,36 +130,21 @@ impl SincLut {
     /// Resample `buf` at `coord`, which must lie within `coord_bounds`.
     #[inline(always)]
     fn resample(&self, buf: &[f32], coord: f64) -> f32 {
-        let coord_int = coord as usize;
-        // The phase is split in f64 so the lower row index stays below
-        // SINC_PHASES even when the fraction is within an f32 ulp of 1.
-        let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
-        let phase = phase_pos as usize;
-        let alpha = (phase_pos - phase as f64) as f32;
-        let start = coord_int - SINC_TAPS_BEFORE;
-        let window = buf[start..start + SINC_TAPS].try_into().unwrap();
-        sinc_dot(window, &self.rows[phase].0, &self.rows[phase + 1].0, alpha)
+        lanes::sum(self.tap_products(buf, split_coord(coord)))
     }
 
-    /// The tap window start, weight row and lerp fraction of each coordinate,
-    /// split exactly as `resample` splits one.
+    /// The window of `buf` at `start`, weighted by row `phase` lerped towards
+    /// the next row by `alpha`.
     #[inline(always)]
-    fn decompose(coords: &[f64; RESAMPLE_BATCH]) -> [(usize, usize, f32); RESAMPLE_BATCH] {
-        let mut taps = [(0, 0, 0.0); RESAMPLE_BATCH];
-        for (tap, &coord) in taps.iter_mut().zip(coords) {
-            let coord_int = coord as usize;
-            let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
-            let phase = phase_pos as usize;
-            let alpha = (phase_pos - phase as f64) as f32;
-            *tap = (coord_int - SINC_TAPS_BEFORE, phase, alpha);
-        }
-        taps
+    fn tap_products(&self, buf: &[f32], (start, phase, alpha): (usize, usize, f32)) -> Lanes {
+        let window = buf[start..start + SINC_TAPS].try_into().unwrap();
+        lanes::tap_products(window, &self.rows[phase].0, &self.rows[phase + 1].0, alpha)
     }
 
-    /// Resample `buf` at each coordinate, all within `coord_bounds`. With SIMD
-    /// the batch's dot products are reduced together through one transpose
-    /// tree, which pairs the partial sums in the order `sinc_dot` reduces a
-    /// single window, so the outputs equal `resample`'s.
+    /// Resample `buf` at each coordinate, all within `coord_bounds`. The
+    /// windows' products are reduced together: every fold halves each
+    /// output's partial sums, pairing them as `sum` pairs a single window's,
+    /// so the outputs equal `resample`'s.
     #[inline(always)]
     fn resample_batch(
         &self,
@@ -166,202 +152,159 @@ impl SincLut {
         coords: &[f64; RESAMPLE_BATCH],
         out: &mut [f32; RESAMPLE_BATCH],
     ) {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-        {
-            use std::arch::x86_64::*;
-            let taps = Self::decompose(coords);
-            // SAFETY: the windows and rows are checked slices of SINC_TAPS
-            // floats; the stores cover `out` exactly.
-            unsafe {
-                let mut p = [_mm512_setzero_ps(); RESAMPLE_BATCH];
-                for (product, &(start, phase, alpha)) in p.iter_mut().zip(&taps) {
-                    let x = _mm512_loadu_ps(buf[start..start + SINC_TAPS].as_ptr());
-                    let a = _mm512_loadu_ps(self.rows[phase].0.as_ptr());
-                    let b = _mm512_loadu_ps(self.rows[phase + 1].0.as_ptr());
-                    let w = _mm512_fmadd_ps(_mm512_sub_ps(b, a), _mm512_set1_ps(alpha), a);
-                    *product = _mm512_mul_ps(x, w);
-                }
-                // Each stage halves the vector count by adding the two halves
-                // (256, 128, 64 then 32 bits wide) of every output's partials,
-                // interleaving two outputs per vector as it goes.
-                let mut q = [_mm512_setzero_ps(); 8];
-                for (k, q) in q.iter_mut().enumerate() {
-                    let (a, b) = (p[2 * k], p[2 * k + 1]);
-                    *q = _mm512_add_ps(
-                        _mm512_shuffle_f32x4::<0x44>(a, b),
-                        _mm512_shuffle_f32x4::<0xEE>(a, b),
-                    );
-                }
-                let mut r = [_mm512_setzero_ps(); 4];
-                for (k, r) in r.iter_mut().enumerate() {
-                    let (a, b) = (q[2 * k], q[2 * k + 1]);
-                    *r = _mm512_add_ps(
-                        _mm512_shuffle_f32x4::<0x88>(a, b),
-                        _mm512_shuffle_f32x4::<0xDD>(a, b),
-                    );
-                }
-                let mut s = [_mm512_setzero_ps(); 2];
-                for (k, s) in s.iter_mut().enumerate() {
-                    let (a, b) = (r[2 * k], r[2 * k + 1]);
-                    *s = _mm512_add_ps(
-                        _mm512_shuffle_ps::<0x44>(a, b),
-                        _mm512_shuffle_ps::<0xEE>(a, b),
-                    );
-                }
-                let t = _mm512_add_ps(
-                    _mm512_shuffle_ps::<0x88>(s[0], s[1]),
-                    _mm512_shuffle_ps::<0xDD>(s[0], s[1]),
-                );
-                // Element 4m + c of `t` is output m + 4c.
-                let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
-                _mm512_storeu_ps(out.as_mut_ptr(), _mm512_permutexvar_ps(order, t));
-            }
+        let mut taps = [(0, 0, 0.0); RESAMPLE_BATCH];
+        for (tap, &coord) in taps.iter_mut().zip(coords) {
+            *tap = split_coord(coord);
         }
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            target_feature = "fma",
-            not(target_feature = "avx512f")
-        ))]
-        {
-            use std::arch::x86_64::*;
-            let taps = Self::decompose(coords);
-            // SAFETY: the windows and rows are checked slices of SINC_TAPS
-            // floats, loaded at offsets 0 and 8; the stores cover `out` exactly.
-            unsafe {
-                for (half, out) in out.chunks_exact_mut(8).enumerate() {
-                    let mut p = [_mm256_setzero_ps(); 8];
-                    for (product, &(start, phase, alpha)) in
-                        p.iter_mut().zip(&taps[half * 8..half * 8 + 8])
-                    {
-                        let window = buf[start..start + SINC_TAPS].as_ptr();
-                        let (w0, w1) =
-                            (self.rows[phase].0.as_ptr(), self.rows[phase + 1].0.as_ptr());
-                        let alpha = _mm256_set1_ps(alpha);
-                        let mut acc = _mm256_setzero_ps();
-                        for offset in [0, 8] {
-                            let x = _mm256_loadu_ps(window.add(offset));
-                            let a = _mm256_loadu_ps(w0.add(offset));
-                            let b = _mm256_loadu_ps(w1.add(offset));
-                            let w = _mm256_fmadd_ps(_mm256_sub_ps(b, a), alpha, a);
-                            acc = _mm256_add_ps(acc, _mm256_mul_ps(x, w));
-                        }
-                        *product = acc;
-                    }
-                    let mut q = [_mm256_setzero_ps(); 4];
-                    for (k, q) in q.iter_mut().enumerate() {
-                        let (a, b) = (p[2 * k], p[2 * k + 1]);
-                        *q = _mm256_add_ps(
-                            _mm256_permute2f128_ps::<0x20>(a, b),
-                            _mm256_permute2f128_ps::<0x31>(a, b),
-                        );
-                    }
-                    let mut s = [_mm256_setzero_ps(); 2];
-                    for (k, s) in s.iter_mut().enumerate() {
-                        let (a, b) = (q[2 * k], q[2 * k + 1]);
-                        *s = _mm256_add_ps(
-                            _mm256_shuffle_ps::<0x44>(a, b),
-                            _mm256_shuffle_ps::<0xEE>(a, b),
-                        );
-                    }
-                    let t = _mm256_add_ps(
-                        _mm256_shuffle_ps::<0x88>(s[0], s[1]),
-                        _mm256_shuffle_ps::<0xDD>(s[0], s[1]),
-                    );
-                    // Element 4l + c of `t` is output 2c + l.
-                    let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-                    _mm256_storeu_ps(out.as_mut_ptr(), _mm256_permutevar8x32_ps(t, order));
-                }
-            }
+        let mut pairs = [Lanes::default(); 8];
+        for (pair, taps) in pairs.iter_mut().zip(taps.chunks_exact(2)) {
+            *pair = fold::<8>(
+                self.tap_products(buf, taps[0]),
+                self.tap_products(buf, taps[1]),
+            );
         }
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "avx512f"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "avx2",
-                target_feature = "fma"
-            )
-        )))]
-        {
-            for (out, &coord) in out.iter_mut().zip(coords) {
-                *out = self.resample(buf, coord);
-            }
-        }
+        let quads = [
+            fold::<4>(pairs[0], pairs[1]),
+            fold::<4>(pairs[2], pairs[3]),
+            fold::<4>(pairs[4], pairs[5]),
+            fold::<4>(pairs[6], pairs[7]),
+        ];
+        let octets = [fold::<2>(quads[0], quads[1]), fold::<2>(quads[2], quads[3])];
+        out.copy_from_slice(fold::<1>(octets[0], octets[1]).as_ref());
     }
 }
 
-/// Outputs the batched resampler produces per call.
-const RESAMPLE_BATCH: usize = 16;
+/// Outputs the batched resampler produces per call: the folds halve every
+/// output's partial sums until one vector holds an output per lane.
+const RESAMPLE_BATCH: usize = SINC_TAPS;
 
-/// `sum(window[t] * lerp(w0[t], w1[t], alpha))` over the taps. Explicit SIMD
-/// where the build has it: the compiler bundles the equivalent array code only
-/// two lanes wide, as the final add's two operands fix its vector width.
+/// The tap window start, weight row and lerp fraction of a source coordinate.
 #[inline(always)]
-fn sinc_dot(
-    window: &[f32; SINC_TAPS],
-    w0: &[f32; SINC_TAPS],
-    w1: &[f32; SINC_TAPS],
-    alpha: f32,
-) -> f32 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-    {
-        use std::arch::x86_64::*;
-        // SAFETY: each load reads 16 floats from an array of that length.
-        unsafe {
-            let x = _mm512_loadu_ps(window.as_ptr());
-            let a = _mm512_loadu_ps(w0.as_ptr());
-            let b = _mm512_loadu_ps(w1.as_ptr());
-            let w = _mm512_fmadd_ps(_mm512_sub_ps(b, a), _mm512_set1_ps(alpha), a);
-            _mm512_reduce_add_ps(_mm512_mul_ps(x, w))
-        }
+fn split_coord(coord: f64) -> (usize, usize, f32) {
+    let coord_int = coord as usize;
+    // The phase is split in f64 so the lower row index stays below
+    // SINC_PHASES even when the fraction is within an f32 ulp of 1.
+    let phase_pos = (coord - coord_int as f64) * SINC_PHASES as f64;
+    let phase = phase_pos as usize;
+    let alpha = (phase_pos - phase as f64) as f32;
+    (coord_int - SINC_TAPS_BEFORE, phase, alpha)
+}
+
+/// The resampler's arithmetic on one window's worth of lanes, in portable
+/// SIMD.
+#[cfg(nightly_portable_simd)]
+mod lanes {
+    use super::SINC_TAPS;
+    use std::simd::{Simd, StdFloat, Swizzle};
+
+    pub(super) type Lanes = Simd<f32, SINC_TAPS>;
+
+    /// `window[t] * lerp(w0[t], w1[t], alpha)` per tap.
+    #[inline(always)]
+    pub(super) fn tap_products(
+        window: &[f32; SINC_TAPS],
+        w0: &[f32; SINC_TAPS],
+        w1: &[f32; SINC_TAPS],
+        alpha: f32,
+    ) -> Lanes {
+        let x = Lanes::from_array(*window);
+        let a = Lanes::from_array(*w0);
+        let b = Lanes::from_array(*w1);
+        x * (b - a).mul_add(Lanes::splat(alpha), a)
     }
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma",
-        not(target_feature = "avx512f")
-    ))]
-    {
-        use std::arch::x86_64::*;
-        // SAFETY: each load reads 8 floats at offset 0 or 8 of a 16-float array.
-        unsafe {
-            let alpha = _mm256_set1_ps(alpha);
-            let mut acc = _mm256_setzero_ps();
-            for offset in [0, 8] {
-                let x = _mm256_loadu_ps(window.as_ptr().add(offset));
-                let a = _mm256_loadu_ps(w0.as_ptr().add(offset));
-                let b = _mm256_loadu_ps(w1.as_ptr().add(offset));
-                let w = _mm256_fmadd_ps(_mm256_sub_ps(b, a), alpha, a);
-                acc = _mm256_add_ps(acc, _mm256_mul_ps(x, w));
-            }
-            let quad = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-            let pair = _mm_add_ps(quad, _mm_movehl_ps(quad, quad));
-            _mm_cvtss_f32(_mm_add_ss(pair, _mm_shuffle_ps(pair, pair, 1)))
-        }
+
+    /// Sum of the lanes, pairing halves: `p[t] + p[t + 8]`, then the same
+    /// over 4, 2 and 1 lanes.
+    #[inline(always)]
+    pub(super) fn sum(p: Lanes) -> f32 {
+        let p = p.extract::<0, 8>() + p.extract::<8, 8>();
+        let p = p.extract::<0, 4>() + p.extract::<4, 4>();
+        let p = p.extract::<0, 2>() + p.extract::<2, 2>();
+        p[0] + p[1]
     }
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx512f"),
-        all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            target_feature = "fma"
-        )
-    )))]
-    {
-        let mut acc = [0.0f32; SINC_TAPS];
+
+    /// Where lane `i` of a `fold::<H>` reads in the sources' lanes
+    /// concatenated, `b`'s after `a`'s: source `i / 8`, block `(i % 8) / H`,
+    /// lane `i % H` of the block's half at `offset`.
+    const fn fold_index<const H: usize>(offset: usize) -> [usize; SINC_TAPS] {
+        let mut index = [0; SINC_TAPS];
+        let mut i = 0;
+        while i < SINC_TAPS {
+            let (source, within) = (i / (SINC_TAPS / 2), i % (SINC_TAPS / 2));
+            index[i] = SINC_TAPS * source + 2 * H * (within / H) + offset + within % H;
+            i += 1;
+        }
+        index
+    }
+
+    // The two swizzles of a fold as `Swizzle` implementations, so that their
+    // index tables can depend on `H`.
+    struct Lower<const H: usize>;
+    impl<const H: usize> Swizzle<SINC_TAPS> for Lower<H> {
+        const INDEX: [usize; SINC_TAPS] = fold_index::<H>(0);
+    }
+    struct Upper<const H: usize>;
+    impl<const H: usize> Swizzle<SINC_TAPS> for Upper<H> {
+        const INDEX: [usize; SINC_TAPS] = fold_index::<H>(H);
+    }
+
+    /// Adds the two `H`-lane halves of every `2 * H`-lane block of `a` and of
+    /// `b`: `a`'s sums fill the low eight lanes, `b`'s the high.
+    #[inline(always)]
+    pub(super) fn fold<const H: usize>(a: Lanes, b: Lanes) -> Lanes {
+        Lower::<H>::concat_swizzle(a, b) + Upper::<H>::concat_swizzle(a, b)
+    }
+}
+
+/// The resampler's arithmetic on one window's worth of lanes, as arrays the
+/// compiler bundles itself.
+#[cfg(not(nightly_portable_simd))]
+mod lanes {
+    use super::SINC_TAPS;
+
+    pub(super) type Lanes = [f32; SINC_TAPS];
+
+    /// `window[t] * lerp(w0[t], w1[t], alpha)` per tap.
+    #[inline(always)]
+    pub(super) fn tap_products(window: &Lanes, w0: &Lanes, w1: &Lanes, alpha: f32) -> Lanes {
+        let mut products = [0.0; SINC_TAPS];
         for t in 0..SINC_TAPS {
-            acc[t] = window[t] * (w1[t] - w0[t]).mul_add(alpha, w0[t]);
+            products[t] = window[t] * (w1[t] - w0[t]).mul_add(alpha, w0[t]);
         }
+        products
+    }
+
+    /// Sum of the lanes, pairing halves: `p[t] + p[t + 8]`, then the same
+    /// over 4, 2 and 1 lanes.
+    #[inline(always)]
+    pub(super) fn sum(mut p: Lanes) -> f32 {
         for t in 0..8 {
-            acc[t] += acc[t + 8];
+            p[t] += p[t + 8];
         }
         for t in 0..4 {
-            acc[t] += acc[t + 4];
+            p[t] += p[t + 4];
         }
         for t in 0..2 {
-            acc[t] += acc[t + 2];
+            p[t] += p[t + 2];
         }
-        acc[0] + acc[1]
+        p[0] + p[1]
+    }
+
+    /// Adds the two `H`-lane halves of every `2 * H`-lane block of `a` and of
+    /// `b`: `a`'s sums fill the low eight lanes, `b`'s the high.
+    #[inline(always)]
+    pub(super) fn fold<const H: usize>(a: Lanes, b: Lanes) -> Lanes {
+        let mut sums = [0.0; SINC_TAPS];
+        for (lane, sum) in sums.iter_mut().enumerate() {
+            let (source, within) = if lane < SINC_TAPS / 2 {
+                (&a, lane)
+            } else {
+                (&b, lane - SINC_TAPS / 2)
+            };
+            let lower = 2 * H * (within / H) + within % H;
+            *sum = source[lower] + source[lower + H];
+        }
+        sums
     }
 }
 
