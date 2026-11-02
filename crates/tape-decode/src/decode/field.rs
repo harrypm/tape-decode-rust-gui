@@ -856,10 +856,7 @@ pub(crate) fn predecode_field_from_rawdecode(
 
     let do_level_detect = !spec.rf_saved_levels || inter_field_state.compute_linelocs_issues;
     let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect);
-    let needs_level_retry = match &res {
-        None => true,
-        Some(res) => res.line0loc.is_none(),
-    };
+    let needs_level_retry = res.as_ref().is_none_or(|res| res.first_hsync.is_none());
     if needs_level_retry && !do_level_detect {
         tracing::debug!("Search for pulses failed, re-checking levels");
         res = try_get_pulses(&mut pending_field, spec, inter_field_state, true);
@@ -874,11 +871,8 @@ pub(crate) fn predecode_field_from_rawdecode(
         // VSYNC is processed.
         let proclines = pending_field.outlinecount + pending_field.lineoffset + 10;
 
-        if let Some(first_hsync_loc) = res.first_hsync_loc {
-            let line0loc = res.line0loc.context("missing line0loc with first hsync")?;
-            let first_hsync_loc_line = res
-                .first_hsync_loc_line
-                .context("missing first_hsync_loc_line")?;
+        if let Some(first_hsync) = res.first_hsync {
+            let line0loc = first_hsync.line0loc;
             let input_len = pending_field.data.input_len as f64;
             let lastline = (input_len - line0loc) / res.meanlinelen - 1.0;
             if lastline < proclines as f64 {
@@ -898,8 +892,8 @@ pub(crate) fn predecode_field_from_rawdecode(
                     .collect::<Vec<_>>();
                 let (linelocs_vec, mut linebad_vec) = valid_pulses_to_linelocs(
                     validpulses,
-                    (first_hsync_loc as i64) as f64,
-                    first_hsync_loc_line as i64,
+                    (first_hsync.loc as i64) as f64,
+                    first_hsync.line as i64,
                     res.meanlinelen,
                     proclines,
                 );

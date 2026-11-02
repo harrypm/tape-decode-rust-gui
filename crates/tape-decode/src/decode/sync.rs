@@ -1601,10 +1601,19 @@ fn try_get_pulses_core(
     }
 }
 
+/// The first hsync pulse after the vertical interval, as a position in the
+/// field buffer.
+#[derive(Clone, Copy)]
+pub(crate) struct FirstHsync {
+    pub(crate) loc: f64,
+    /// The field line the pulse starts, counted from line 0.
+    pub(crate) line: f64,
+    /// Line 0 of the field, `line` lines before the pulse.
+    pub(crate) line0loc: f64,
+}
+
 pub(crate) struct PulseResult {
-    pub(crate) line0loc: Option<f64>,
-    pub(crate) first_hsync_loc: Option<f64>,
-    pub(crate) first_hsync_loc_line: Option<f64>,
+    pub(crate) first_hsync: Option<FirstHsync>,
     pub(crate) meanlinelen: f64,
     /// The field's sync tip and blanking levels as measured on its pulses.
     pub(crate) sync_level: f32,
@@ -1854,9 +1863,13 @@ pub(crate) fn try_get_pulses(
     }
     inter_field_state.prev_first_field = if result.is_first_field { 1 } else { 0 };
     Some(PulseResult {
-        line0loc: result.line0loc,
-        first_hsync_loc: result.first_hsync_loc,
-        first_hsync_loc_line: Some(result.first_hsync_loc_line),
+        first_hsync: result.first_hsync_loc.map(|loc| FirstHsync {
+            loc,
+            line: result.first_hsync_loc_line,
+            line0loc: result
+                .line0loc
+                .expect("line 0 is located together with the first hsync"),
+        }),
         meanlinelen: result.meanlinelen,
         sync_level: found.sync_level,
         blank_level: found.blank_level,

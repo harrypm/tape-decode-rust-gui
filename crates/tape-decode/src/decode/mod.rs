@@ -457,12 +457,15 @@ fn hz_to_output_scalar(spec: &DecoderSpec, input: f64, out_scale: f64) -> f64 {
     (((reduced * out_scale) + spec.sys_output_zero as f64).clamp(0.0, 65535.0) + 0.5) as u16 as f64
 }
 
-fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
-    let linelocs = field.linelocs.as_ref().context("missing linelocs")?;
+fn sync_confidence_from_linelocs(field: &DecodedField) -> i64 {
+    let linelocs = field
+        .linelocs
+        .as_ref()
+        .expect("a valid field has line locations");
     let linecount = field.linecount.unwrap_or(0);
     let end = (field.lineoffset + linecount).min(linelocs.len());
     if end.saturating_sub(field.lineoffset) < 3 {
-        return Ok(100);
+        return 100;
     }
 
     let mut lld2max = f64::NEG_INFINITY;
@@ -471,7 +474,11 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> Result<i64> {
         lld2max = lld2max.max(lld2);
     }
 
-    Ok(if lld2max > 4.0 { 45 } else { 100 })
+    if lld2max > 4.0 {
+        45
+    } else {
+        100
+    }
 }
 
 // Level of samples `[start, end)` of each line of a picture of `outlinelen`
@@ -1252,7 +1259,10 @@ fn downscale_raw_vec(
     shift: f64,
     line_window: Option<usize>,
 ) -> Result<Vec<f32>> {
-    let actual_linelocs = field.linelocs.as_deref().context("missing linelocs")?;
+    let actual_linelocs = field
+        .linelocs
+        .as_deref()
+        .expect("a valid field has line locations");
     let outwidth = field.outlinelen;
     let k = field.wow_interpolation_method.spline_degree();
     let out_len = field.outlinecount * outwidth;
@@ -1623,7 +1633,7 @@ impl Decoder {
                 let mut is_first_field = field_obj.is_first_field.unwrap_or(false);
                 let detected_first_field = is_first_field;
                 let mut is_duplicate_field = false;
-                let mut sync_conf = sync_confidence_from_linelocs(&field_obj)?;
+                let mut sync_conf = sync_confidence_from_linelocs(&field_obj);
                 let seq_no = self.output.len + 1;
                 let disk_loc = roundfloat(field_obj.readloc as f64 / bytes_per_field as f64, 1);
                 let file_loc = field_obj.readloc;
@@ -1648,7 +1658,7 @@ impl Decoder {
                             &field_obj,
                             DOD_MERGE_THRESHOLD,
                             DOD_MIN_LENGTH,
-                        )?;
+                        );
                     if !dropout_lines.is_empty() {
                         drop_outs = Some(DropOuts {
                             field_line: dropout_lines,
