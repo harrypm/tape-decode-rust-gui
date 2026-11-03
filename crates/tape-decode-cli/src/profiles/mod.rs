@@ -101,10 +101,28 @@ fn load_defs(json: &str, kind: &str) -> Result<HashMap<String, Map<String, Value
     Ok(defs)
 }
 
+/// A profile's optional object-valued `field`, cloned out.
+fn object_field(
+    profile_obj: &Map<String, Value>,
+    field: &str,
+    key: &str,
+) -> Result<Option<Map<String, Value>>> {
+    profile_obj
+        .get(field)
+        .map(|value| {
+            value
+                .as_object()
+                .cloned()
+                .with_context(|| format!("profile {key} `{field}` must be an object"))
+        })
+        .transpose()
+}
+
 /// Expand a profile's optional `format` and `sys_params` `base` references
-/// against the embedded definition tables. Profiles loaded from a file may also
-/// be fully resolved already; in that case their top-level `decoder_params`
-/// and `sys_params` fields are left intact.
+/// against the embedded definition tables, dropping the `format` and `base`
+/// bookkeeping keys. The profile's own top-level `decoder_params` and
+/// `decode_options` apply over what `format` expands to, so a flattened
+/// profile keeps its edits even when it still names its format.
 fn expand_profile(
     key: &str,
     profile: &mut Value,
@@ -117,45 +135,37 @@ fn expand_profile(
         .as_object_mut()
         .with_context(|| format!("profile {key} must be an object"))?;
 
-    if let Some(format_value) = profile_obj.get("format") {
-        let format = format_value
-            .as_object()
-            .cloned()
-            .with_context(|| format!("profile {key} `format` must be an object"))?;
+    if let Some(format_value) = profile_obj.remove("format") {
+        let Value::Object(format) = format_value else {
+            bail!("profile {key} `format` must be an object");
+        };
         let format_base = format
             .get("base")
             .and_then(Value::as_str)
             .with_context(|| format!("profile {key} format missing `base`"))?;
         let mut resolved_format = resolve_format(format_base, format_defs, format_cache)?;
         deep_merge(&mut resolved_format, &without_base(&format));
-        let decoder_params = resolved_format
-            .remove("decoder_params")
-            .with_context(|| format!("profile {key} format missing `decoder_params`"))?;
-        profile_obj.insert("decoder_params".to_string(), decoder_params);
+        let mut decoder_params = match resolved_format.remove("decoder_params") {
+            Some(Value::Object(params)) => params,
+            Some(_) => bail!("profile {key} format `decoder_params` must be an object"),
+            None => bail!("profile {key} format missing `decoder_params`"),
+        };
+        if let Some(own) = object_field(profile_obj, "decoder_params", key)? {
+            deep_merge(&mut decoder_params, &own);
+        }
+        profile_obj.insert("decoder_params".to_string(), Value::Object(decoder_params));
         let mut decode_options = match resolved_format.remove("decode_options") {
             Some(Value::Object(options)) => options,
             Some(_) => bail!("profile {key} format `decode_options` must be an object"),
             None => Map::new(),
         };
-        let profile_decode_options = profile_obj
-            .get("decode_options")
-            .map(|value| {
-                value
-                    .as_object()
-                    .cloned()
-                    .with_context(|| format!("profile {key} `decode_options` must be an object"))
-            })
-            .transpose()?;
-        if let Some(profile_decode_options) = &profile_decode_options {
-            deep_merge(&mut decode_options, profile_decode_options);
+        if let Some(own) = object_field(profile_obj, "decode_options", key)? {
+            deep_merge(&mut decode_options, &own);
         }
         profile_obj.insert("decode_options".to_string(), Value::Object(decode_options));
     }
 
-    let sys_params = profile_obj
-        .get("sys_params")
-        .and_then(Value::as_object)
-        .cloned()
+    let sys_params = object_field(profile_obj, "sys_params", key)?
         .with_context(|| format!("profile {key} missing sys_params object"))?;
     if let Some(base_value) = sys_params.get("base") {
         let base = base_value
@@ -216,9 +226,10 @@ pub fn load_profile_file(path: &Path) -> Result<DecodeProfile> {
     deserialize_profile(flatten_profile(None, Some(path))?, &source)
 }
 
-/// Resolve a profile to its flattened JSON object: `base` inheritance chains in
-/// `format` and `sys_params` are expanded in place, leaving top-level
-/// `decoder_params`, `decode_options`, and `sys_params` with no `base` markers.
+/// Resolve a profile to its flattened JSON object: the `format` and the
+/// `sys_params` `base` inheritance chains are expanded into top-level
+/// `decoder_params`, `decode_options` and `sys_params`, with no `format` or
+/// `base` keys left.
 pub fn flatten_profile(profile: Option<&str>, profile_file: Option<&Path>) -> Result<Value> {
     match (profile, profile_file) {
         (Some(name), None) => {
