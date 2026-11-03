@@ -40,8 +40,7 @@
     },
     "sys_params": {
       "base": "405"
-    },
-    "tape_format": "BETAMAX"
+    }
   },
   "819_QUADRUPLEX": {
     "format": {
@@ -604,8 +603,7 @@
       "burst_abs_ref": 4000.0,
       "hz_ire": 8571.42857142857,
       "ire0": 3942857.1428571427
-    },
-    "tape_format": "BETAMAX"
+    }
   },
   "NTSC_BETAMAX_HIFI": {
     "format": {
@@ -621,8 +619,7 @@
       "burst_abs_ref": 4000.0,
       "hz_ire": 10000.0,
       "ire0": 4200000.0
-    },
-    "tape_format": "BETAMAX_HIFI"
+    }
   },
   "NTSC_HI8": {
     "format": {
@@ -641,8 +638,7 @@
       "burst_abs_ref": 4100.0,
       "hz_ire": 14285.714285714286,
       "ire0": 6271428.571428571
-    },
-    "tape_format": "HI8"
+    }
   },
   "NTSC_HI8_EP": {
     "format": {
@@ -661,8 +657,7 @@
       "burst_abs_ref": 4100.0,
       "hz_ire": 14285.714285714286,
       "ire0": 6271428.571428571
-    },
-    "tape_format": "HI8"
+    }
   },
   "NTSC_HI8_LP": {
     "format": {
@@ -681,8 +676,7 @@
       "burst_abs_ref": 4100.0,
       "hz_ire": 14285.714285714286,
       "ire0": 6271428.571428571
-    },
-    "tape_format": "HI8"
+    }
   },
   "NTSC_HI8_VP": {
     "format": {
@@ -701,8 +695,7 @@
       "burst_abs_ref": 4100.0,
       "hz_ire": 14285.714285714286,
       "ire0": 6271428.571428571
-    },
-    "tape_format": "HI8"
+    }
   },
   "NTSC_SUPERBETA": {
     "format": {
@@ -713,8 +706,7 @@
       "burst_abs_ref": 4000.0,
       "hz_ire": 10000.0,
       "ire0": 5150000.0
-    },
-    "tape_format": "SUPERBETA"
+    }
   },
   "NTSC_SVHS": {
     "format": {
@@ -808,8 +800,7 @@
       "burst_abs_ref": 5000.0,
       "hz_ire": 21000.0,
       "ire0": 7900000.0
-    },
-    "tape_format": "TYPEC"
+    }
   },
   "NTSC_UMATIC": {
     "format": {
@@ -839,8 +830,7 @@
       "burst_abs_ref": 3760.0,
       "hz_ire": 11428.57142857143,
       "ire0": 4257143.0
-    },
-    "tape_format": "UMATIC"
+    }
   },
   "NTSC_VHD": {
     "format": {
@@ -1263,8 +1253,7 @@
       "hz_ire": 9800.0,
       "ire0": 4220000.0,
       "nonlinear_deviation": 1400000.0
-    },
-    "tape_format": "BETAMAX"
+    }
   },
   "PAL_EIAJ": {
     "format": {
@@ -1280,8 +1269,7 @@
       "burst_abs_ref": 1000.0,
       "hz_ire": 12600.0,
       "ire0": 4340000.0
-    },
-    "tape_format": "EIAJ"
+    }
   },
   "PAL_HI8": {
     "format": {
@@ -1300,8 +1288,7 @@
       "burst_abs_ref": 9200.0,
       "hz_ire": 14000.0,
       "ire0": 6300000.0
-    },
-    "tape_format": "HI8"
+    }
   },
   "PAL_HI8_EP": {
     "format": {
@@ -1320,8 +1307,7 @@
       "burst_abs_ref": 9200.0,
       "hz_ire": 14000.0,
       "ire0": 6300000.0
-    },
-    "tape_format": "HI8"
+    }
   },
   "PAL_HI8_LP": {
     "format": {
@@ -1340,8 +1326,7 @@
       "burst_abs_ref": 9200.0,
       "hz_ire": 14000.0,
       "ire0": 6300000.0
-    },
-    "tape_format": "HI8"
+    }
   },
   "PAL_HI8_VP": {
     "format": {
@@ -1360,8 +1345,7 @@
       "burst_abs_ref": 9200.0,
       "hz_ire": 14000.0,
       "ire0": 6300000.0
-    },
-    "tape_format": "HI8"
+    }
   },
   "PAL_QUADRUPLEX": {
     "format": {
@@ -1479,8 +1463,7 @@
       "base": "PAL",
       "hz_ire": 12167.832167832168,
       "ire0": 7680000.0
-    },
-    "tape_format": "TYPEC"
+    }
   },
   "PAL_UMATIC": {
     "format": {
@@ -1509,8 +1492,7 @@
       "base": "PAL",
       "hz_ire": 11428.57142857143,
       "ire0": 4257143.0
-    },
-    "tape_format": "UMATIC"
+    }
   },
   "PAL_UMATIC_HI": {
     "format": {
@@ -1525,8 +1507,7 @@
       "base": "PAL",
       "hz_ire": 11428.57142857143,
       "ire0": 5257142.857142857
-    },
-    "tape_format": "UMATIC"
+    }
   },
   "PAL_UMATIC_SP": {
     "format": {
@@ -1536,8 +1517,7 @@
       "base": "PAL",
       "hz_ire": 11428.57142857143,
       "ire0": 6057142.857142857
-    },
-    "tape_format": "UMATIC"
+    }
   },
   "PAL_VCR": {
     "format": {
