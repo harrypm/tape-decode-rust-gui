@@ -5,7 +5,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tape_decode::{Decoder, DecoderMetadata, DecoderSpec, LumaOutput, WriteableField, BLOCKSIZE};
 
 use crate::reader::DecodeReader;
@@ -233,10 +233,13 @@ struct BufState {
     buf: Vec<f32>,
     /// Absolute sample offset of `buf[0]`.
     start: u64,
-    /// Set once the source has reported end of input.
+    /// Set once the source has reported end of input or failed.
     eof: bool,
-    /// Total input length in samples, known once `eof` is reached.
+    /// Total input length in samples, known once the source reported EOF.
     len: Option<u64>,
+    /// The input error that ended the stream, rendered with its cause chain
+    /// so every worker whose read runs into it can report it.
+    error: Option<String>,
     /// Samples before this offset are no longer needed by any decoder.
     drop_threshold: u64,
     /// Highest absolute offset any worker has requested. The forerunner reads up
@@ -257,6 +260,7 @@ impl Tape {
                 start: 0,
                 eof: false,
                 len: None,
+                error: None,
                 drop_threshold: 0,
                 demand: 0,
             }),
@@ -319,7 +323,8 @@ impl Tape {
     /// Fill `dst` with samples starting at absolute offset `from`, blocking until
     /// the forerunner has buffered them (or end of input is reached). Returns the
     /// number of samples written and whether end of input was reached (fewer than
-    /// `dst.len()` were available), or `None` if `stop` was raised. `from` must be
+    /// `dst.len()` were available), or `None` if `stop` was raised; a request
+    /// reaching past an input error fails with that error. `from` must be
     /// at or after the current drop threshold: every worker reads at or beyond
     /// its published `consumed`, and the threshold never passes the start of a
     /// segment still to be spawned (see `MtOrchestrator::update_drop_threshold`).
@@ -336,9 +341,14 @@ impl Tape {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            if state.eof || state.start + state.buf.len() as u64 >= target {
-                let got = Self::copy_out(&state, from, dst);
-                return Ok(Some((got, (got as u64) < want)));
+            if state.start + state.buf.len() as u64 >= target {
+                return Ok(Some((Self::copy_out(&state, from, dst), false)));
+            }
+            if state.eof {
+                if let Some(message) = &state.error {
+                    bail!("{message}");
+                }
+                return Ok(Some((Self::copy_out(&state, from, dst), true)));
             }
             // Not buffered yet: raise the forerunner's read target to cover us,
             // then wait for it to deliver. Because it always reads ahead of
@@ -373,16 +383,22 @@ impl Tape {
                     state = self.more_demand.wait(state).unwrap();
                 }
             };
-            // Read the next block with no lock held. `DecodeReader::read` already
-            // turns I/O errors into a clean EOF, so this never actually errors.
-            let n = source.read(&mut scratch[..to_read]).unwrap_or(0);
+            // Read the next block with no lock held.
+            let read = source.read(&mut scratch[..to_read]);
             let mut state = self.state.lock().unwrap();
             Self::drop_prefix(&mut state);
-            if n == 0 {
-                state.eof = true;
-                state.len = Some(state.start + state.buf.len() as u64);
-            } else {
-                state.buf.extend_from_slice(&scratch[..n]);
+            match read {
+                Ok(0) => {
+                    state.eof = true;
+                    state.len = Some(state.start + state.buf.len() as u64);
+                }
+                Ok(n) => state.buf.extend_from_slice(&scratch[..n]),
+                // Ends the stream like EOF so waiters wake; `read_into` fails
+                // the requests that reach past it.
+                Err(error) => {
+                    state.error = Some(format!("{error:#}"));
+                    state.eof = true;
+                }
             }
             self.data_ready.notify_all();
         }
