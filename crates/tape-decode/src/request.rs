@@ -146,7 +146,6 @@ pub struct SysParams {
     pub vsync_pulse_us: f64,
     pub output_zero: i64,
     pub outlinelen: usize,
-    pub outfreq: f64,
     pub ld_vits_whitelocs: Vec<[usize; 3]>,
     pub burst_abs_ref: Option<f32>,
     pub track_ire0_offset: [f32; 2],

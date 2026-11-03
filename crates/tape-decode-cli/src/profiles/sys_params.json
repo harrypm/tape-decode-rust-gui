@@ -35,7 +35,6 @@
     "line_period": 98.765,
     "nonlinear_deviation": 1400000.0,
     "num_pulses": 5,
-    "outfreq": 17.734475,
     "outlinelen": 1135,
     "output_zero": 256,
     "track_ire0_offset": [
@@ -131,7 +130,6 @@
     "hsync_pulse_us": 4.7,
     "line_period": 64.0,
     "num_pulses": 5,
-    "outfreq": 17.734475,
     "outlinelen": 1135,
     "output_zero": 256,
     "vsync_pulse_us": 27.3,
@@ -173,7 +171,6 @@
     "line_period": 48.8,
     "nonlinear_deviation": null,
     "num_pulses": 5,
-    "outfreq": 17.734475,
     "outlinelen": 1135,
     "output_zero": 256,
     "track_ire0_offset": [
@@ -202,7 +199,6 @@
     "fsc_mhz": 3.575611888111,
     "hz_ire": 7142.857142857143,
     "ire0": 3685714.2857142854,
-    "outfreq": 14.302447552444,
     "outlinelen": 909
   },
   "NTSC": {
@@ -212,7 +208,6 @@
     "fsc_mhz": 3.5795454545454546,
     "hz_ire": 7142.857142857143,
     "ire0": 3685714.2857142854,
-    "outfreq": 14.318181818181818,
     "outlinelen": 910
   },
   "PAL": {

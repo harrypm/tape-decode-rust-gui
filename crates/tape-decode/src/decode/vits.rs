@@ -4,12 +4,12 @@ fn lineslice_tbc_bounds(spec: &DecoderSpec, loc: &[usize; 3], keepphase: bool) -
     // return a slice corresponding with pre-TBC line
     let outlinelen = spec.sys_outlinelen as f64;
     let mut begin_px = outlinelen * (loc[0] as f64 - 1.0);
-    let mut begin_offset = spec.sys_outfreq * loc[1] as f64;
+    let mut begin_offset = usectooutpx(spec, loc[1] as f64);
     if keepphase {
         begin_offset = (begin_offset / 4.0).floor() * 4.0;
     }
     begin_px += begin_offset;
-    let length_px = spec.sys_outfreq * loc[2] as f64;
+    let length_px = usectooutpx(spec, loc[2] as f64);
     (
         begin_px.round_ties_even().max(0.0) as usize,
         (begin_px + length_px).round_ties_even().max(0.0) as usize,

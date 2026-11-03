@@ -510,11 +510,11 @@ pub(super) fn process_chroma(
         line if line > 0 => STARTING_LINE.max(field.output_row(line as usize)),
         _ => STARTING_LINE,
     };
-    let porch_end_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as usize;
+    let porch_end_px = usectooutpx(spec, spec.sys_active_video_us[0]) as usize;
     // The record chain's blanking-edge transient sets in slightly before the
     // nominal end of active video (the source's own blanking edge lands
     // inside the TBC active window), so the splice starts a little early.
-    let blank_start_px = ((spec.sys_active_video_us[1] - 0.85) * spec.sys_outfreq) as usize;
+    let blank_start_px = usectooutpx(spec, spec.sys_active_video_us[1] - 0.85) as usize;
 
     let pass1 = upconvert(chroma, spec, mult, rest_amplitude);
     let fit = fit_line_alternation(&pass1.inst_freq, outwidth, first_line, porch_end_px)

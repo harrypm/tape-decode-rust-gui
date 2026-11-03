@@ -404,7 +404,7 @@ fn process_chroma_internal(
     {
         // Measure the rest carrier pair on the late back porch, 3.7 to 0.3 us
         // before active video starts.
-        let active_start_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as isize;
+        let active_start_px = usectooutpx(spec, spec.sys_active_video_us[0]) as isize;
         let porch = (active_start_px - 65, active_start_px - 5);
         if let Some(offset) =
             secam_under_carrier_offset(spec, &chroma, field.outlinecount, field.outlinelen, porch)
@@ -467,7 +467,7 @@ fn process_chroma_internal(
     let burst_abs_ref = spec
         .sys_burst_abs_ref
         .expect("chroma output without burst_abs_ref");
-    let sync_tip_len = (spec.sys_hsync_pulse_us * spec.sys_outfreq).floor() as usize;
+    let sync_tip_len = usectooutpx(spec, spec.sys_hsync_pulse_us).floor() as usize;
     let noise_floor = chroma_automatic_gain(
         &mut uphet,
         burst_abs_ref,

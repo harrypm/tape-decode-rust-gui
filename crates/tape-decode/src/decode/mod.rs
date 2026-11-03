@@ -472,6 +472,11 @@ fn usectoinpx(spec: &DecoderSpec, x: f64) -> f64 {
     x * spec.freq
 }
 
+/// Microseconds to output samples.
+fn usectooutpx(spec: &DecoderSpec, x: f64) -> f64 {
+    x * spec.tbc_sample_rate() / 1e6
+}
+
 fn hz_to_output_scalar(spec: &DecoderSpec, input: f64, out_scale: f64) -> f64 {
     if spec.rf_export_raw_tbc {
         return input;
@@ -1184,8 +1189,8 @@ fn downscale_raw_vec(
 // upconvert. Its length is a whole number of subcarrier cycles (four samples
 // each) so the correlation against the reference subcarrier is unbiased.
 fn burst_area(spec: &DecoderSpec) -> (usize, usize) {
-    let start = ((spec.sys_color_burst_us[0] * spec.sys_outfreq).floor() as isize - 4).max(0) as usize;
-    let end = (spec.sys_color_burst_us[1] * spec.sys_outfreq).ceil() as usize + 8;
+    let start = (usectooutpx(spec, spec.sys_color_burst_us[0]).floor() as isize - 4).max(0) as usize;
+    let end = usectooutpx(spec, spec.sys_color_burst_us[1]).ceil() as usize + 8;
     (start, end - (end - start) % 4)
 }
 
@@ -1661,7 +1666,7 @@ impl Decoder {
         let black = ire_to_output(spec.black_ire as f32);
         let white = ire_to_output(100.0);
         let blanking = ire_to_output(0.0);
-        let to_sample = |us: f64| (us * spec.sys_outfreq + BADJ).round_ties_even() as i64;
+        let to_sample = |us: f64| (usectooutpx(spec, us) + BADJ).round_ties_even() as i64;
         let system = match (spec.sys_frame_lines, spec.color_system) {
             (LineSystem::Line525, ColorSystem::Pal) => "PAL-M",
             (LineSystem::Line525, _) => "NTSC",
@@ -1670,7 +1675,7 @@ impl Decoder {
         Some(DecoderMetadata {
             system,
             field_width: spec.sys_outlinelen,
-            sample_rate: spec.sys_outfreq * 1_000_000.0,
+            sample_rate: spec.tbc_sample_rate(),
             black_16b_ire: black * (1.0 - spec.level_adjust as f64),
             white_16b_ire: white * (1.0 + spec.level_adjust as f64),
             blanking_16b_ire: blanking,

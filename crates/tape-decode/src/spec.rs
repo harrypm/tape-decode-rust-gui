@@ -55,7 +55,6 @@ pub struct DecoderSpec {
     pub(crate) sys_vsync_pulse_us: f64,
     pub(crate) sys_output_zero: i64,
     pub(crate) sys_outlinelen: usize,
-    pub(crate) sys_outfreq: f64,
     pub(crate) sys_ld_vits_whitelocs: Vec<[usize; 3]>,
     pub(crate) sys_burst_abs_ref: Option<f32>,
     pub(crate) sys_track_ire0_offset: [f32; 2],
@@ -240,7 +239,7 @@ impl DecoderSpec {
         // The rate the TBC output is actually clocked at (outlinelen samples
         // per line period), which 4 * fsc only approximates after outlinelen
         // is rounded to whole samples.
-        let tbc_sample_rate = sys_params.outlinelen as f64 * fh;
+        let tbc_sample_rate = sys_params.outlinelen as f64 * 1e6 / sys_params.line_period;
         let fieldlen =
             sys_params.outlinelen * *sys_params.field_lines.iter().max().unwrap() as usize;
 
@@ -668,7 +667,6 @@ impl DecoderSpec {
             sys_vsync_pulse_us: sys_params.vsync_pulse_us,
             sys_output_zero: sys_params.output_zero,
             sys_outlinelen: sys_params.outlinelen,
-            sys_outfreq: sys_params.outfreq,
             sys_ld_vits_whitelocs: sys_params.ld_vits_whitelocs.clone(),
             sys_burst_abs_ref: sys_params.burst_abs_ref,
             sys_track_ire0_offset: sys_params.track_ire0_offset,
@@ -791,10 +789,11 @@ impl DecoderSpec {
         !self.chroma_afc_narrowband.is_empty()
     }
 
-    /// Output samples per second the TBC actually produces.
+    /// Output samples per second the TBC produces: `outlinelen` per line
+    /// period.
     #[inline]
     pub(crate) fn tbc_sample_rate(&self) -> f64 {
-        self.sys_outlinelen as f64 * self.chroma_afc_fh()
+        self.sys_outlinelen as f64 * 1e6 / self.sys_line_period
     }
 
     /// Output samples of the longest field: the length of the heterodyne

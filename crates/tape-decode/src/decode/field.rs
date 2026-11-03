@@ -607,7 +607,7 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     let mut linelocs = field.linelocs.clone()?;
     // Output samples per subcarrier cycle: a phase error maps to that many
     // output samples, scaled back to the line's input length.
-    let fsc_ratio = spec.sys_outfreq / spec.sys_fsc_mhz;
+    let fsc_ratio = spec.tbc_sample_rate() / (spec.sys_fsc_mhz * 1e6);
     // The vertical interval's lines, up to 9, carry no burst; after a
     // mid-field burst turn-on only the lines with color are refined.
     let first_line = (lock.burst_start_line as usize).max(10);
