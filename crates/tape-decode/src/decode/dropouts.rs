@@ -11,7 +11,8 @@ fn find_dropouts_rf(
     let down_thresh = threshold;
     let up_thresh = threshold * hysteresis;
     // Each dropout is (start, end); end == -1 marks one still open. Only the
-    // most recent dropout is ever extended, so the open one is always the last.
+    // most recent dropout is ever extended or reopened, so the open one is
+    // always the last.
     let mut dropouts: Vec<(usize, isize)> = Vec::new();
 
     // A closed state only reacts to value <= down_thresh and an open one only
@@ -32,12 +33,12 @@ fn find_dropouts_rf(
             for (offset, &value) in chunk.iter().enumerate() {
                 let i = chunk_start + offset;
                 if value <= down_thresh {
-                    let should_start = match dropouts.last() {
-                        None => true,
-                        Some(&(_, end)) => end != -1 && (i as isize - end) > merge_threshold,
-                    };
-                    if should_start {
-                        dropouts.push((i, -1));
+                    match dropouts.last_mut() {
+                        Some((_, end)) if *end == -1 => {}
+                        // A dropout starting within the merge threshold of the
+                        // previous one's end continues it.
+                        Some((_, end)) if i as isize - *end <= merge_threshold => *end = -1,
+                        _ => dropouts.push((i, -1)),
                     }
                 } else if value >= up_thresh {
                     if let Some(last) = dropouts.last_mut() {
