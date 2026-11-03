@@ -59,7 +59,6 @@ pub struct DecoderSpec {
     pub(crate) sys_ld_vits_whitelocs: Vec<[usize; 3]>,
     pub(crate) sys_burst_abs_ref: Option<f32>,
     pub(crate) sys_track_ire0_offset: [f32; 2],
-    pub(crate) sys_nonlinear_deviation: Option<f32>,
 
     pub(crate) decoder_color_under_carrier: f64,
     pub(crate) decoder_chroma_conversion_lo: Option<f64>,
@@ -142,6 +141,8 @@ pub struct DecoderSpec {
     pub(crate) video_nl_high_pass_f: Option<Vec<Complex32>>,
     pub(crate) video_nldeemp_enabled: bool,
     pub(crate) video_subdeemp_enabled: bool,
+    /// Deviation the sub-deemphasis measures its amplitude against, in Hz.
+    pub(crate) video_sub_deemphasis_deviation: f32,
     pub(crate) video_fsc_notch: Option<Vec<Sos<f32>>>,
     pub(crate) video05_filter: Vec<Complex32>,
 
@@ -277,6 +278,12 @@ impl DecoderSpec {
 
         let video_subdeemp_enabled =
             decoder_params.nonlinear.use_sub_deemphasis || request.subdeemp;
+        let video_sub_deemphasis_deviation = sys_params
+            .nonlinear_deviation
+            .unwrap_or(sys_params.hz_ire * (100.0 - sys_params.vsync_ire));
+        if video_subdeemp_enabled && video_sub_deemphasis_deviation == 0.0 {
+            bail!("sub-deemphasis requires a non-zero deviation");
+        }
         let chroma_deemphasis_enabled = decoder_params.chroma_deemphasis_enabled;
         let fm_audio_notch = request.fm_audio_notch;
         // Chroma processing, which also locks hsync to the burst, runs for every
@@ -665,7 +672,6 @@ impl DecoderSpec {
             sys_ld_vits_whitelocs: sys_params.ld_vits_whitelocs.clone(),
             sys_burst_abs_ref: sys_params.burst_abs_ref,
             sys_track_ire0_offset: sys_params.track_ire0_offset,
-            sys_nonlinear_deviation: sys_params.nonlinear_deviation,
 
             decoder_color_under_carrier: decoder_params.color_under_carrier,
             decoder_chroma_conversion_lo: conversion_lo,
@@ -729,6 +735,7 @@ impl DecoderSpec {
             video_nl_high_pass_f: video_nl_high_pass_f.map(store_complex_filter),
             video_nldeemp_enabled: request.video_nldeemp_enabled,
             video_subdeemp_enabled,
+            video_sub_deemphasis_deviation,
             video_fsc_notch: video_fsc_notch.map(store_sos_filter),
             video05_filter: store_complex_filter(video05_filter),
 
@@ -760,12 +767,6 @@ impl DecoderSpec {
     #[inline]
     pub(crate) fn linelen(&self) -> usize {
         (self.freq_hz() / (1_000_000.0 / self.sys_line_period)).round_ties_even() as usize
-    }
-
-    #[inline]
-    pub(crate) fn video_sub_deemphasis_deviation(&self) -> f32 {
-        self.sys_nonlinear_deviation
-            .unwrap_or(self.sys_hz_ire * (100.0 - self.sys_vsync_ire))
     }
 
     #[inline]

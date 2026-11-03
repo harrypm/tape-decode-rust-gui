@@ -99,27 +99,13 @@ fn irfft_f32(input: &[Complex32], n: Option<usize>, c2r: &dyn ComplexToReal<f32>
     irfft_owned_f32(input.to_vec(), n, c2r)
 }
 
-fn sub_deemphasis(
-    spec: &DecoderSpec,
-    out_video: &[f32],
-    out_video_fft: &[Complex32],
-) -> Result<Vec<f32>> {
+fn sub_deemphasis(spec: &DecoderSpec, out_video: &[f32], out_video_fft: &[Complex32]) -> Vec<f32> {
     let nl_high_pass_f = spec
         .video_nl_high_pass_f
         .as_ref()
-        .context("missing nonlinear high-pass filter")?;
-    if out_video_fft.len() != nl_high_pass_f.len() {
-        bail!("sub_deemphasis FFT inputs must have equal length");
-    }
-
-    let mut deviation = spec.video_sub_deemphasis_deviation();
-
+        .expect("the nonlinear high-pass is built with the sub-deemphasis");
     let high_pass_fft = spectrum_times_filter(out_video_fft, nl_high_pass_f);
-
-    deviation /= 2.0;
-    if deviation == 0.0 {
-        bail!("sub_deemphasis deviation must be non-zero");
-    }
+    let deviation = spec.video_sub_deemphasis_deviation / 2.0;
 
     let static_gain = spec
         .decoder_nonlinear_static_factor
@@ -193,7 +179,7 @@ fn sub_deemphasis(
         })
         .collect();
 
-    Ok(output)
+    output
 }
 
 #[inline(always)]
@@ -256,22 +242,12 @@ fn ediff1d_complex_to_begin_zero(values: &[Complex32]) -> Vec<Complex32> {
     out
 }
 
-pub(crate) fn decode_video_block(
-    rawdata: &[f32],
-    spec: &DecoderSpec,
-    out: &mut VideoChannels,
-) -> Result<()> {
-    if rawdata.len() < BLOCKSIZE {
-        bail!(
-            "rawdata length {} is shorter than blocklen {}",
-            rawdata.len(),
-            BLOCKSIZE
-        );
-    }
+pub(crate) fn decode_video_block(rawdata: &[f32], spec: &DecoderSpec, out: &mut VideoChannels) {
+    assert_eq!(rawdata.len(), BLOCKSIZE, "a block is decoded whole");
     // The whole RF conditioning chain works on the unique half spectrum; the
     // full (Hermitian) spectrum is only spelled out where the analytic signal
     // needs its one-sided complex inverse.
-    let mut indata_fft = rfft_f32(&rawdata[..BLOCKSIZE], spec.fft_block_r2c_f32.as_ref());
+    let mut indata_fft = rfft_f32(rawdata, spec.fft_block_r2c_f32.as_ref());
     let half_bins = indata_fft.len();
 
     // The color-under burst channel is the raw RF through the zero-phase
@@ -316,7 +292,7 @@ pub(crate) fn decode_video_block(
             let rf_top = spec
                 .video_rf_top_fft_gain
                 .as_ref()
-                .context("high_boost_value requires rf_top")?;
+                .expect("the high boost band is built with its gain");
             // The zero-phase band extraction is a real spectrum gain, applied
             // to the RF spectrum already in hand; only the per-sample envelope
             // gain below needs the time domain.
@@ -397,7 +373,7 @@ pub(crate) fn decode_video_block(
         let highpass = spec
             .video_nl_high_pass_f
             .as_ref()
-            .context("missing nonlinear high-pass filter")?;
+            .expect("the nonlinear high-pass is built with the nonlinear deemphasis");
         let hf_spectrum = spectrum_times_filter(&out_video_fft, highpass);
         let hf_part = irfft_owned_f32(hf_spectrum, None, spec.fft_block_c2r_f32.as_ref());
         // Clamp and subtract in a single pass so `hf_part` is read once instead
@@ -411,7 +387,7 @@ pub(crate) fn decode_video_block(
     }
 
     if spec.video_subdeemp_enabled {
-        out_video = sub_deemphasis(spec, &out_video, &out_video_fft)?;
+        out_video = sub_deemphasis(spec, &out_video, &out_video_fft);
     }
 
     if let Some(sos) = spec.video_fsc_notch.as_ref() {
@@ -450,6 +426,4 @@ pub(crate) fn decode_video_block(
     out.demod_05
         .extend(demod_05_slice.iter().map(|&v| v + ire0_f32));
     out.envelope.extend_from_slice(envelope_slice);
-
-    Ok(())
 }

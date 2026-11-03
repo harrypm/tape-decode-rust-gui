@@ -1368,7 +1368,7 @@ impl Decoder {
                         completed_blocks = false;
                         break;
                     };
-                    decode_video_block(rawdata, &self.spec, &mut video)?;
+                    decode_video_block(rawdata, &self.spec, &mut video);
                 }
                 self.pending_result = if completed_blocks {
                     let rawdecode = FieldData {
