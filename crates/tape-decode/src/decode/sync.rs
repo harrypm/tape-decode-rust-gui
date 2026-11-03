@@ -270,13 +270,14 @@ fn hsync_start_line(is_ntsc: bool, first_field: bool, num_eq_pulses: f64) -> f64
 }
 
 /// Decide the field order by scoring the measured `field_order_lengths`
-/// against the expected signatures. The interlaced consensus is weighed
-/// against the caller's confidence floor, with a VSYNC fallback hint breaking
-/// ties when it is more confident than either field.
+/// against the expected signatures, starting from `seed`, the order the
+/// previous field implies, when there is one. The interlaced consensus is
+/// weighed against the caller's confidence floor, with a VSYNC fallback hint
+/// breaking ties when it is more confident than either field.
 fn decide_field_order(
     field_order_lengths: [f64; 4],
     is_ntsc: bool,
-    inter_field_state: &InterFieldState,
+    seed: Option<bool>,
     mut field_order_confidence: i64,
     fallback: Option<Line0FallbackResult>,
 ) -> bool {
@@ -304,23 +305,21 @@ fn decide_field_order(
         }
     }
 
-    let mut first_field = if inter_field_state.prev_first_field == -1 {
+    let mut first_field = seed.unwrap_or_else(|| {
         interlaced_field_boundaries_detected == 0
             || (interlaced_field_boundaries_consensus as f64
                 / interlaced_field_boundaries_detected as f64)
                 .round_ties_even()
                 == 1.0
             || fallback_is_first_field == 1
-    } else {
-        inter_field_state.prev_first_field == 0
-    };
+    });
 
     let mut first_field_confidence = 0;
     let mut second_field_confidence = 0;
     let interlaced_field_order_weighting =
         interlaced_field_boundaries_detected as f64 / field_order_lengths.len() as f64;
     if interlaced_field_boundaries_detected > 0 {
-        if fallback_line0loc == -1.0 && inter_field_state.prev_first_hsync_loc < 0.0 {
+        if fallback_line0loc == -1.0 && seed.is_none() {
             field_order_confidence = field_order_confidence.min(50);
         }
 
@@ -395,10 +394,32 @@ fn get_first_hsync_loc(
         field_lines,
     );
 
+    // The previous accepted field's order carries over the fields elapsed
+    // since it, flipping with each one. They are counted from its first
+    // hsync to this field's vertical interval, else to its fallback line 0,
+    // else to its first pulse; without any pulse the estimate below places
+    // this field one on.
+    let seed = (inter_field_state.prev_first_field != -1).then(|| {
+        let reference = vblank_pulses[..4]
+            .iter()
+            .copied()
+            .find(|&pulse| pulse != -1.0)
+            .or(fallback.map(|r| r.line0))
+            .or(validpulses_start.first().copied());
+        let elapsed = reference.map_or(1, |reference| {
+            let prev_hsync_lines =
+                last_field_offset_lines + inter_field_state.prev_first_hsync_loc / meanlinelen;
+            ((reference / meanlinelen - prev_hsync_lines)
+                / ((field_lines[0] + field_lines[1]) / 2.0))
+                .round_ties_even() as i64
+        });
+        (inter_field_state.prev_first_field == 1) == (elapsed.rem_euclid(2) == 0)
+    });
+
     let first_field = decide_field_order(
         field_order_lengths,
         is_ntsc,
-        inter_field_state,
+        seed,
         field_order_confidence,
         fallback,
     );
