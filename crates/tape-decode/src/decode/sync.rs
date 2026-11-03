@@ -1404,9 +1404,7 @@ fn try_get_pulses_core(
         .collect::<Vec<_>>();
 
     let hsync_median = if hlens.is_empty() {
-        // Fall back to the configured microsecond value when no plausible hsync
-        // lengths are available, even though the common path uses sample counts.
-        spec.sys_hsync_pulse_us
+        hsync_typical
     } else {
         median_sample_count(&mut hlens)
     };
