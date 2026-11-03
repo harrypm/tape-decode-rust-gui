@@ -133,7 +133,6 @@ pub(crate) fn detect_dropouts_rf(
     min_length: isize,
 ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let env: &[f32] = &field.data.video.envelope;
-    let linecount = field.linecount.unwrap_or(0);
     let linelocs = field
         .linelocs
         .as_ref()
@@ -142,8 +141,11 @@ pub(crate) fn detect_dropouts_rf(
         .dod_threshold_a
         .unwrap_or_else(|| mean_slice(env) as f32 * spec.dod_threshold_p);
 
-    let start_line = field.lineoffset + 1;
-    let end_line = (linelocs.len() - 1).min(linecount + start_line + 1);
+    // The written rows, reported as fieldLine 1 ..= outlinecount.
+    let std::ops::Range {
+        start: start_line,
+        end: end_line,
+    } = field.output_lines();
 
     let start_rf = linelocs[start_line].floor() as usize;
     let end_rf = env.len().min(linelocs[end_line].ceil() as usize);
