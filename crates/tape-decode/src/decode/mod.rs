@@ -923,7 +923,6 @@ struct DecodedField {
     validpulses: Vec<i64>,
     is_first_field: Option<bool>,
     vblank_next: Option<f64>,
-    is_progressive_field: Option<bool>,
     field_number: i64,
     linelocs: Option<Vec<f64>>,
     lineoffset: usize,

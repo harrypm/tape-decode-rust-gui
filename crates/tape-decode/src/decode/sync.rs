@@ -180,7 +180,6 @@ struct GetFirstHsyncLocResult {
     hsync_start_line: f64,
     next_field: Option<f64>,
     first_field: bool,
-    progressive_field: bool,
     prev_hsync_diff: f64,
 }
 
@@ -243,48 +242,36 @@ fn measure_vblank_sections(
 }
 
 /// Expected field-order signatures, each [first HSYNC, first EQPL2, last HSYNC,
-/// last EQPL2], returned as (first field, second field, progressive field).
-fn field_order_signatures(is_ntsc: bool) -> ([f64; 4], [f64; 4], [f64; 4]) {
+/// last EQPL2], returned as (first field, second field).
+fn field_order_signatures(is_ntsc: bool) -> ([f64; 4], [f64; 4]) {
     if is_ntsc {
-        (
-            [1.0, 0.5, 0.5, 1.0],
-            [0.5, 1.0, 1.0, 0.5],
-            [1.0, 0.5, 1.0, 0.5],
-        )
+        ([1.0, 0.5, 0.5, 1.0], [0.5, 1.0, 1.0, 0.5])
     } else {
-        (
-            [0.5, 0.5, 1.0, 1.0],
-            [1.0, 1.0, 0.5, 0.5],
-            [0.5, 0.5, 0.5, 0.5],
-        )
+        ([0.5, 0.5, 1.0, 1.0], [1.0, 1.0, 0.5, 0.5])
     }
 }
 
-/// Decide field order, and whether the field is progressive, by scoring the
-/// measured `field_order_lengths` against the expected signatures. The interlaced
-/// consensus is weighed against the caller's confidence floor, with a VSYNC
-/// fallback hint breaking ties when it is more confident than either field.
+/// Decide the field order by scoring the measured `field_order_lengths`
+/// against the expected signatures. The interlaced consensus is weighed
+/// against the caller's confidence floor, with a VSYNC fallback hint breaking
+/// ties when it is more confident than either field.
 fn decide_field_order(
     field_order_lengths: [f64; 4],
     is_ntsc: bool,
     inter_field_state: &InterFieldState,
     mut field_order_confidence: i64,
     fallback: Option<Line0FallbackResult>,
-) -> (bool, bool) {
+) -> bool {
     let (fallback_line0loc, fallback_is_first_field, fallback_is_first_field_confidence) =
         match fallback {
             Some(r) => (r.line0, r.first_field, r.first_field_confidence),
             None => (-1.0, -1, -1),
         };
 
-    let mut progressive_field = false;
-    let (first_field_lengths, second_field_lengths, progressive_field_lengths) =
-        field_order_signatures(is_ntsc);
+    let (first_field_lengths, second_field_lengths) = field_order_signatures(is_ntsc);
 
     let mut interlaced_field_boundaries_consensus = 0;
     let mut interlaced_field_boundaries_detected = 0;
-    let mut progressive_field_consensus = 0;
-    let mut progressive_field_boundaries_detected = 0;
 
     for i in 0..field_order_lengths.len() {
         let field_length = field_order_lengths[i];
@@ -296,15 +283,6 @@ fn decide_field_order(
 
         if field_length == second_field_lengths[i] {
             interlaced_field_boundaries_detected += 1;
-        }
-
-        if field_length == progressive_field_lengths[i] {
-            progressive_field_consensus += 1;
-            progressive_field_boundaries_detected += 1;
-        }
-
-        if field_length != -1.0 {
-            progressive_field_boundaries_detected += 1;
         }
     }
 
@@ -323,9 +301,6 @@ fn decide_field_order(
     let mut second_field_confidence = 0;
     let interlaced_field_order_weighting =
         interlaced_field_boundaries_detected as f64 / field_order_lengths.len() as f64;
-
-    let progressive_field_order_weighting =
-        progressive_field_boundaries_detected as f64 / field_order_lengths.len() as f64;
     if interlaced_field_boundaries_detected > 0 {
         if fallback_line0loc == -1.0 && inter_field_state.prev_first_hsync_loc < 0.0 {
             field_order_confidence = field_order_confidence.min(50);
@@ -352,19 +327,6 @@ fn decide_field_order(
         {
             first_field = false;
         }
-
-        if progressive_field_boundaries_detected > 0 {
-            let progressive_field_confidence =
-                (((progressive_field_boundaries_detected - progressive_field_consensus) as f64
-                    / progressive_field_boundaries_detected as f64)
-                    * progressive_field_order_weighting
-                    * 100.0)
-                    .round_ties_even() as i64;
-
-            if progressive_field_confidence == field_order_lengths.len() as i64 {
-                progressive_field = true;
-            }
-        }
     }
 
     if fallback_is_first_field_confidence > first_field_confidence
@@ -373,7 +335,7 @@ fn decide_field_order(
         first_field = fallback_is_first_field == 1;
     }
 
-    (first_field, progressive_field)
+    first_field
 }
 
 fn get_first_hsync_loc(
@@ -418,14 +380,14 @@ fn get_first_hsync_loc(
         field_lines,
     );
 
-    let (first_field, progressive_field) = decide_field_order(
+    let first_field = decide_field_order(
         field_order_lengths,
         is_ntsc,
         inter_field_state,
         field_order_confidence,
         fallback,
     );
-    let (first_field_lengths, second_field_lengths, _) = field_order_signatures(is_ntsc);
+    let (first_field_lengths, second_field_lengths) = field_order_signatures(is_ntsc);
 
     let line0loc_line = 0.0;
     let vsync_section_lines = num_eq_pulses / 2.0;
@@ -642,7 +604,6 @@ fn get_first_hsync_loc(
             hsync_start_line,
             next_field: Some(next_field),
             first_field,
-            progressive_field,
             prev_hsync_diff,
         };
     }
@@ -653,7 +614,6 @@ fn get_first_hsync_loc(
         hsync_start_line,
         next_field: None,
         first_field,
-        progressive_field,
         prev_hsync_diff,
     }
 }
@@ -685,7 +645,6 @@ struct PulseClassificationResult {
     first_hsync_loc_line: f64,
     vblank_next: Option<f64>,
     is_first_field: bool,
-    is_progressive_field: bool,
     prev_hsync_diff: f64,
 }
 
@@ -1596,7 +1555,6 @@ fn try_get_pulses_core(
         first_hsync_loc_line: first_hsync.hsync_start_line,
         vblank_next: first_hsync.next_field,
         is_first_field: first_hsync.first_field,
-        is_progressive_field: first_hsync.progressive_field,
         prev_hsync_diff: first_hsync.prev_hsync_diff,
     }
 }
@@ -1861,7 +1819,6 @@ pub(crate) fn try_get_pulses(
     field.validpulses = result.valid_starts;
     field.vblank_next = result.vblank_next;
     field.is_first_field = Some(result.is_first_field);
-    field.is_progressive_field = Some(result.is_progressive_field);
     Some(PulseResult {
         first_hsync: result.first_hsync_loc.map(|loc| FirstHsync {
             loc,

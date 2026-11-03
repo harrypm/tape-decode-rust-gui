@@ -810,7 +810,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         validpulses: Vec::new(),
         is_first_field: None,
         vblank_next: None,
-        is_progressive_field: None,
         field_number: 0,
         linelocs: None,
         lineoffset: 0,
