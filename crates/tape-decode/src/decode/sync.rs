@@ -917,6 +917,7 @@ fn get_line0_fallback(
                 }
                 (Some(6), 525) => {
                     first_field = 1;
+                    first_field_confidence = 100;
                     line_offset = Some(6.0);
                 }
                 _ => {}
