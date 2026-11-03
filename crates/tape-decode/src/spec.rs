@@ -176,11 +176,9 @@ impl DecoderSpec {
         } else {
             sys_params.color_system
         };
-        // NTSC sets black up 7.5 IRE above blanking; every other standard
-        // (including the 525-line PAL-M variants) keeps it at 0 IRE. The
-        // pedestal belongs to the line standard, so a composite format whose
-        // chroma stays undecoded keeps it.
-        let black_ire = if sys_params.color_system == ColorSystem::Ntsc && !request.ntscj {
+        // System M, 525-line NTSC-M and PAL-M alike, sets black up 7.5 IRE
+        // above blanking; NTSC-J and the other standards keep it at 0 IRE.
+        let black_ire = if sys_params.frame_lines == LineSystem::Line525 && !request.ntscj {
             7.5
         } else {
             0.0
