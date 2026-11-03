@@ -1514,13 +1514,12 @@ impl Decoder {
                 // Dropout detection.
                 let mut drop_outs: Option<DropOuts> = None;
                 if self.spec.do_dod {
-                    let (_field_average, dropout_lines, dropout_starts, dropout_ends) =
-                        detect_dropouts_rf(
-                            &self.spec,
-                            &field_obj,
-                            DOD_MERGE_THRESHOLD,
-                            DOD_MIN_LENGTH,
-                        );
+                    let (dropout_lines, dropout_starts, dropout_ends) = detect_dropouts_rf(
+                        &self.spec,
+                        &field_obj,
+                        DOD_MERGE_THRESHOLD,
+                        DOD_MIN_LENGTH,
+                    );
                     if !dropout_lines.is_empty() {
                         drop_outs = Some(DropOuts {
                             field_line: dropout_lines,

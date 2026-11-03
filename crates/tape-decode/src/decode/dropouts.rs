@@ -131,17 +131,16 @@ pub(crate) fn detect_dropouts_rf(
     field: &DecodedField,
     merge_threshold: isize,
     min_length: isize,
-) -> (f64, Vec<usize>, Vec<usize>, Vec<usize>) {
+) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let env: &[f32] = &field.data.video.envelope;
     let linecount = field.linecount.unwrap_or(0);
     let linelocs = field
         .linelocs
         .as_ref()
         .expect("a valid field has line locations");
-    let field_average = mean_slice(env);
     let threshold = spec
         .dod_threshold_a
-        .unwrap_or(field_average as f32 * spec.dod_threshold_p);
+        .unwrap_or_else(|| mean_slice(env) as f32 * spec.dod_threshold_p);
 
     let start_line = field.lineoffset + 1;
     let end_line = (linelocs.len() - 1).min(linecount + start_line + 1);
@@ -168,5 +167,5 @@ pub(crate) fn detect_dropouts_rf(
         field.lineoffset,
     );
 
-    (field_average, rv_lines, rv_starts, rv_ends)
+    (rv_lines, rv_starts, rv_ends)
 }
