@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::optimized::{
     atan2_precise, boxcar_same, exp_fast, f32_from_total_order_key, f32_total_order_key,
-    narrow_sos, powf_fast_nonneg, scale_field, select_ranks_by_key, sosfilt_f32,
-    sosfiltfilt_f32, sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
+    powf_fast_nonneg, scale_field, select_ranks_by_key, sosfilt_f32, sosfiltfilt_f32,
+    sum_algebraic, unwrap_angles, ScaleFieldParams, SincLut,
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
@@ -232,11 +232,12 @@ fn analytic_spectrum(half: &[Complex32], n: usize) -> Vec<Complex32> {
     spectrum
 }
 
-fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> {
-    if data.len() < 3 {
-        bail!("cafc_fft_center_freq requires at least three samples");
-    }
-
+/// The color-under carrier in Hz nearest the nominal one in the field's
+/// narrowband-filtered chroma `data`: the strict local maximum of the power
+/// spectrum, clipped from below at a third of its peak so only the lines
+/// above that stand out, fine-tuned to steps of a fraction of the line
+/// frequency. `None` when nothing stands out of the spectrum.
+fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Option<f64> {
     let sig_fft = fft_real_f32(data, spec.fft_field_forward_f32.as_ref());
     // Real input, so only the DC..Nyquist half of the spectrum is searched.
     // The squared magnitudes stay f32: they only feed a local-peak search over
@@ -272,26 +273,15 @@ fn cafc_fft_center_freq(spec: &DecoderSpec, data: &[f32]) -> Result<(f64, f64)> 
         }
     }
 
-    let peak_index = peak_index.context("cafc_fft_center_freq found no local peak")?;
-    let peak_freq = peak_index as f64 * scale;
-
+    let peak_freq = peak_index? as f64 * scale;
     let fine_tune_threshold = spec.chroma_afc_fh() * spec.chroma_afc_fine_tune_fh_ratio;
-
-    let carrier_freq = fine_tune_frequency(
+    Some(fine_tune_frequency(
         peak_freq,
         spec.decoder_color_under_carrier,
         fine_tune_threshold,
-    );
-
-    // The phase is only known when the tuned carrier lands exactly on a bin.
-    let cc_phase = (0..half_bins)
-        .find(|&index| index as f64 * scale == carrier_freq)
-        .map_or(0.0, |index| {
-            f64::from(sig_fft[index].im).atan2(f64::from(sig_fft[index].re))
-        });
-
-    Ok((carrier_freq, cc_phase))
+    ))
 }
+
 fn fine_tune_frequency(freq: f64, color_under: f64, max_step: f64) -> f64 {
     let specs_distance = |frequency: f64| (frequency - color_under).abs();
     let mut tune_freq = freq;
@@ -315,6 +305,41 @@ fn fine_tune_frequency(freq: f64, color_under: f64, max_step: f64) -> f64 {
     } else {
         one_step_less
     }
+}
+
+/// The field's color-under carrier in Hz under chroma AFC, measured from its
+/// TBC'd chroma as the spectral peak nearest the nominal carrier after the
+/// narrowband chain, held within the band tolerance; the nominal carrier when
+/// the spectrum has no peak.
+fn chroma_afc_carrier(spec: &DecoderSpec, chroma: &[f32]) -> f64 {
+    let nominal = spec.decoder_color_under_carrier;
+    let mut sections = spec.chroma_afc_narrowband.iter();
+    let first = sections
+        .next()
+        .expect("chroma AFC without its narrowband chain");
+    let filtered = sections.fold(sosfiltfilt_f32(first, chroma), |data, sos| {
+        sosfiltfilt_f32(sos, &data)
+    });
+    let Some(measured) = cafc_fft_center_freq(spec, &filtered) else {
+        tracing::warn!(
+            "no color-under carrier peak in the chroma spectrum, taking the nominal carrier"
+        );
+        return nominal;
+    };
+    let (min_f, max_f) = spec.chroma_afc_band_tolerance();
+    let carrier = measured.clamp(nominal * min_f, nominal * max_f);
+    if carrier != measured {
+        tracing::warn!(clipped = carrier, measured, "Chroma PLL range clipped");
+    }
+    tracing::debug!(carrier, "chroma AFC carrier");
+    carrier
+}
+
+/// The heterodyne that brings a color-under carrier of `carrier_hz` up to
+/// the subcarrier, over the field.
+fn color_under_heterodyne(spec: &DecoderSpec, carrier_hz: f64) -> Vec<Vec<f32>> {
+    let het_wave_scale = (spec.sys_fsc_mhz + carrier_hz / 1e6) / (spec.sys_fsc_mhz * 4.0);
+    gen_chroma_heterodyne(het_wave_scale, 0.0, spec.fieldlen())
 }
 
 /// The four quadrature phases of a heterodyne carrier of `het_wave_scale`
@@ -647,120 +672,6 @@ impl<T: Float + std::iter::Sum> StackableMa<T> {
     }
 }
 
-// Mutable ChromaAFC carrier-tracking state; immutable filters and constants live
-// in DecoderSpec.
-
-#[derive(Clone)]
-struct ChromaAfcState {
-    cc_phase: f64,
-    cc_freq_mhz: f64,
-    chroma_heterodyne: Vec<Vec<f32>>,
-    // CAFC-only drift stacks (None when CAFC is disabled).
-    meas_stack: Option<StackableMa<f64>>,
-    chroma_log_drift: Option<StackableMa<f64>>,
-}
-
-fn chroma_afc_chainfiltfilt(config: &DecoderSpec, data: &[f32]) -> Vec<f32> {
-    // The narrowband SOS chain keeps its field-sized output in f32. This only
-    // feeds the cafc center-frequency measurement.
-    let mut iter = config.chroma_afc_narrowband.iter();
-    let Some(sos0) = iter.next() else {
-        return data.to_vec();
-    };
-    let mut filtered = sosfiltfilt_f32(sos0, data);
-    for sos in iter {
-        filtered = sosfiltfilt_f32(sos, &filtered);
-    }
-    filtered
-}
-
-impl ChromaAfcState {
-    fn new(config: &DecoderSpec) -> Self {
-        let mut state = ChromaAfcState {
-            cc_phase: 0.0,
-            cc_freq_mhz: 0.0,
-            chroma_heterodyne: Vec::new(),
-            meas_stack: None,
-            chroma_log_drift: None,
-        };
-        if config.chroma_afc_enabled() {
-            state.meas_stack = Some(StackableMa::new(0, 8192));
-            state.chroma_log_drift = Some(StackableMa::new(0, 8192));
-        }
-        state.set_cc(config, config.decoder_color_under_carrier);
-        state
-    }
-
-    // fcc in Hz (the current dwc subcarrier freq)
-    fn set_cc(&mut self, config: &DecoderSpec, fcc_hz: f64) {
-        self.cc_freq_mhz = fcc_hz / 1e6;
-        self.gen_het_c(config);
-    }
-
-    // Generates the heterodyning carrier. The resulting signal is a
-    // -cosine of (fcc + fsc) frequency with cc_phase phase.
-    fn gen_het_c(&mut self, config: &DecoderSpec) {
-        let het_freq = config.sys_fsc_mhz + self.cc_freq_mhz;
-        let het_wave_scale = het_freq / (config.sys_fsc_mhz * 4.0);
-        self.chroma_heterodyne = gen_chroma_heterodyne(
-            het_wave_scale,
-            // This is the last cc phase measured as it comes from the tape
-            self.cc_phase,
-            config.fieldlen(),
-        );
-    }
-
-    fn measure_center_freq(&mut self, config: &DecoderSpec, data: &[f32]) -> Result<f64> {
-        let filtered = chroma_afc_chainfiltfilt(config, data);
-        let (carrier_freq, cc_phase) = cafc_fft_center_freq(config, &filtered)?;
-        self.cc_phase = cc_phase;
-        Ok(carrier_freq)
-    }
-
-    // returns the downconverted chroma carrier offset
-    fn freq_offset(&mut self, config: &DecoderSpec, chroma: &[f32], adjustf: bool) -> Result<()> {
-        let (min_f, max_f) = config.chroma_afc_band_tolerance();
-        let measured = self.measure_center_freq(config, chroma)?;
-        let freq_cc_x = measured.clamp(
-            config.decoder_color_under_carrier * min_f,
-            config.decoder_color_under_carrier * max_f,
-        );
-
-        if measured != freq_cc_x {
-            tracing::warn!(clipped = freq_cc_x, measured, "Chroma PLL range clipped");
-        }
-        let freq_cc = if adjustf {
-            self.meas_stack.as_mut().unwrap().push(freq_cc_x);
-            freq_cc_x
-        } else {
-            self.cc_freq_mhz * 1e6
-        };
-        self.set_cc(config, freq_cc);
-        let drift_stack = self.chroma_log_drift.as_mut().unwrap();
-        drift_stack.push(freq_cc - config.decoder_color_under_carrier);
-        // Advance the drift window for its trimming side effect; value unused.
-        drift_stack.pull();
-        Ok(())
-    }
-
-    // Filter to pick out color-under chroma component (about twice the carrier).
-    // Note: the effective order doubles since it is applied forward and backward.
-    fn get_chroma_bandpass(&self, config: &DecoderSpec) -> Result<Vec<Sos<f32>>> {
-        let freq_hz_half = config.freq_hz() / 2.0;
-        let chroma_bpf_under_ratio =
-            config.decoder_chroma_bpf_upper / config.decoder_color_under_carrier;
-        let sos = butter_sos(
-            config.decoder_chroma_bpf_order,
-            &[
-                config.decoder_chroma_bpf_lower / freq_hz_half,
-                self.cc_freq_mhz * 1e6 * chroma_bpf_under_ratio / freq_hz_half,
-            ],
-            FilterBandType::Bandpass,
-        )?;
-        Ok(narrow_sos(&sos))
-    }
-}
-
 // Mutable state of the ME-SECAM chroma up-conversion: the carrier servo's
 // smoothed rest carrier pair offset trims the conversion LO, and the
 // heterodyne carries its phase on from field to field.
@@ -826,8 +737,6 @@ impl ConversionLoState {
     }
 }
 
-type ChromaArray = Vec<f32>;
-
 fn roll<T>(values: &mut [T], shift: isize) {
     if values.is_empty() {
         return;
@@ -835,17 +744,6 @@ fn roll<T>(values: &mut [T], shift: isize) {
     let len = values.len() as isize;
     let shift = shift.rem_euclid(len) as usize;
     values.rotate_right(shift);
-}
-
-fn active_chroma_heterodyne<'a>(
-    spec: &'a DecoderSpec,
-    chroma_afc_state: &'a ChromaAfcState,
-) -> &'a [Vec<f32>] {
-    if spec.chroma_afc_enabled() {
-        &chroma_afc_state.chroma_heterodyne
-    } else {
-        &spec.rf_chroma_heterodyne
-    }
 }
 
 #[derive(Clone)]
@@ -925,6 +823,11 @@ struct DecodedField {
     /// The chroma track phase the burst lock read this field with, which
     /// selects the track IRE0 offset.
     track_phase: Option<i64>,
+    /// The color-under carrier the chroma is heterodyned at, in Hz: measured
+    /// from the field under chroma AFC, otherwise the format's nominal one.
+    chroma_carrier: f64,
+    /// The heterodyne at the measured carrier, under chroma AFC.
+    chroma_heterodyne: Option<Vec<Vec<f32>>>,
     /// Cached `(median, mad)` of the field's wow-factor distribution. These
     /// depend only on the line-location spline, so they are identical for every
     /// channel; `downscale_raw_vec` fills this on the first call and reuses it.
@@ -949,6 +852,14 @@ impl DecodedField {
         line_number
             .checked_sub(self.lineoffset + 1)
             .expect("the line lies in the output rows")
+    }
+
+    /// The heterodyne the chroma is upconverted with: the field's own under
+    /// chroma AFC, otherwise the format's nominal one.
+    fn heterodyne<'a>(&'a self, spec: &'a DecoderSpec) -> &'a [Vec<f32>] {
+        self.chroma_heterodyne
+            .as_deref()
+            .unwrap_or(&spec.rf_chroma_heterodyne)
     }
 }
 
@@ -1064,28 +975,6 @@ impl WriteableField {
 struct MetadataFieldState {
     out_scale: f64,
     outlinecount: usize,
-}
-
-fn demod_chroma_filt_array(
-    data: &[f32],
-    spec: &DecoderSpec,
-    filter: &[Sos<f32>],
-    blocklen: usize,
-    move_by: Option<isize>,
-) -> ChromaArray {
-    let end = data.len().min(blocklen);
-    // The chroma is f32 throughout this block-sized buffer; feed the input slice
-    // straight to the SOS filters and keep the output f32 for the downstream
-    // chroma pipeline.
-    let mut out_chroma = sosfiltfilt_f32(filter, &data[..end]);
-    if let Some(sos) = spec.chroma_filter_audio_notch.as_ref() {
-        out_chroma = sosfiltfilt_f32(sos, &out_chroma);
-    }
-    // f_video_notch is populated exactly when the user passed --notch.
-    if let Some(sos) = spec.chroma_filter_video_notch.as_ref() {
-        out_chroma = sosfiltfilt_f32(sos, &out_chroma);
-    }
-    shift_chroma_and_remove_dc(out_chroma, move_by.unwrap_or_else(|| spec.chroma_offset()))
 }
 
 /// One phase of the rational cubic resampler: the integer tap base for output
@@ -1365,7 +1254,6 @@ pub struct Decoder {
     fdoffset: u64,
     fdoffset_frac: f64,
     inter_field_state: InterFieldState,
-    chroma_afc_state: ChromaAfcState,
     conversion_lo: Option<ConversionLoState>,
     output: OutputSequence,
     metadata_field: Option<MetadataFieldState>,
@@ -1378,7 +1266,6 @@ pub struct Decoder {
 impl Decoder {
     pub fn new(spec: Arc<DecoderSpec>, fdoffset: u64) -> Self {
         let inter_field_state = InterFieldState::new(&spec);
-        let chroma_afc_state = ChromaAfcState::new(&spec);
         let conversion_lo = spec
             .chroma_phase_continuous()
             .then(|| ConversionLoState::new(&spec));
@@ -1387,7 +1274,6 @@ impl Decoder {
             fdoffset,
             fdoffset_frac: 0.0,
             inter_field_state,
-            chroma_afc_state,
             conversion_lo,
             output: OutputSequence::default(),
             metadata_field: None,
@@ -1506,7 +1392,6 @@ impl Decoder {
                         scheduled_prevfield,
                         &mut self.inter_field_state,
                         scheduled_readloc_value,
-                        &self.chroma_afc_state,
                     )?)
                 } else {
                     None
@@ -1601,12 +1486,8 @@ impl Decoder {
                             outlinecount: field_obj.outlinecount,
                         });
 
-                        picture_chroma = decode_chroma(
-                            &mut field_obj,
-                            &self.spec,
-                            &mut self.chroma_afc_state,
-                            self.conversion_lo.as_mut(),
-                        )?;
+                        picture_chroma =
+                            decode_chroma(&mut field_obj, &self.spec, self.conversion_lo.as_mut())?;
 
                         field_done = true;
                     }

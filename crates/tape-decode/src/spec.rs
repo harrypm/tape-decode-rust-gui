@@ -62,9 +62,6 @@ pub struct DecoderSpec {
     pub(crate) sys_nonlinear_deviation: Option<f32>,
 
     pub(crate) decoder_color_under_carrier: f64,
-    pub(crate) decoder_chroma_bpf_upper: f64,
-    pub(crate) decoder_chroma_bpf_order: usize,
-    pub(crate) decoder_chroma_bpf_lower: f64,
     pub(crate) decoder_chroma_conversion_lo: Option<f64>,
     pub(crate) decoder_chroma_carrier_mult: Option<u32>,
     pub(crate) decoder_chroma_rotation: Option<[i64; 2]>,
@@ -121,12 +118,9 @@ pub struct DecoderSpec {
     pub(crate) cti_width: u32,
 
     /// Zero-phase gain of the block-level burst chain over the unique block
-    /// bins; `None` when the burst channel is the raw RF (under chroma AFC)
-    /// or not produced at all (no chroma processing).
+    /// bins; `None` without chroma processing.
     pub(crate) chroma_burst_block_fft_gain: Option<Vec<f32>>,
-    pub(crate) chroma_filter_video_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_deemphasis: Option<Vec<Sos<f32>>>,
-    pub(crate) chroma_filter_audio_notch: Option<Vec<Sos<f32>>>,
     pub(crate) chroma_filter_final: Vec<Sos<f32>>,
     // fsc-anchored field-wide band-pass of the upconverted chroma; the SECAM
     // variants restore their block elsewhere and keep the block-anchored
@@ -510,15 +504,7 @@ impl DecoderSpec {
                 blocklen,
                 true,
             ));
-            let chroma_filter_video_notch = if do_cafc {
-                biquad_sos(iirnotch(
-                    notch.freq / chroma_afc_out_frequency_half,
-                    notch.q,
-                )?)
-            } else {
-                biquad_sos(video_notch_raw)
-            };
-            (Some(video_notch_filter), Some(chroma_filter_video_notch))
+            (Some(video_notch_filter), Some(biquad_sos(video_notch_raw)))
         } else {
             (None, None)
         };
@@ -536,14 +522,8 @@ impl DecoderSpec {
         };
 
         let chroma_filter_audio_notch = if decoder_params.chroma_audio_notch_freq > f64::EPSILON {
-            let nyquist = if do_cafc {
-                chroma_afc_out_frequency_half * 1e6
-            } else {
-                freq_hz_half
-            };
-
             Some(biquad_sos(iirnotch(
-                decoder_params.chroma_audio_notch_freq / nyquist,
+                decoder_params.chroma_audio_notch_freq / freq_hz_half,
                 CHROMA_AUDIO_NOTCH_Q,
             )?))
         } else {
@@ -552,11 +532,8 @@ impl DecoderSpec {
         // Combined zero-phase response of the block-level chroma burst chain
         // (the burst bandpass plus the optional audio/video notches): each
         // filtfilt transfer is the purely real |H|^2, so the whole chain
-        // collapses into one spectrum gain over the unique block bins. Under
-        // chroma AFC the burst channel is instead filtered at field level
-        // against the tracked carrier, and without chroma processing it is
-        // not produced at all.
-        let chroma_burst_block_fft_gain = (rf_write_chroma && !do_cafc)
+        // collapses into one spectrum gain over the unique block bins.
+        let chroma_burst_block_fft_gain = rf_write_chroma
             .then(|| -> Result<Vec<f32>> {
                 let burst_bandpass = butter_sos(
                     decoder_params.chroma_bpf_order,
@@ -691,9 +668,6 @@ impl DecoderSpec {
             sys_nonlinear_deviation: sys_params.nonlinear_deviation,
 
             decoder_color_under_carrier: decoder_params.color_under_carrier,
-            decoder_chroma_bpf_upper: decoder_params.chroma_bpf_upper,
-            decoder_chroma_bpf_order: decoder_params.chroma_bpf_order,
-            decoder_chroma_bpf_lower: decoder_params.chroma_bpf_lower,
             decoder_chroma_conversion_lo: conversion_lo,
             decoder_chroma_carrier_mult: carrier_mult,
             decoder_chroma_rotation: decoder_params.chroma_rotation,
@@ -738,9 +712,7 @@ impl DecoderSpec {
             cti_width: request.cti_width,
 
             chroma_burst_block_fft_gain,
-            chroma_filter_video_notch: chroma_filter_video_notch.map(store_sos_filter),
             chroma_filter_deemphasis: chroma_filter_deemphasis.map(store_sos_filter),
-            chroma_filter_audio_notch: chroma_filter_audio_notch.map(store_sos_filter),
             chroma_filter_final: store_sos_filter(chroma_filter_final),
             chroma_fft_filter,
             secam_under_filter: secam_under_filter.map(store_sos_filter),

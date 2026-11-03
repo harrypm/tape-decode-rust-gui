@@ -220,7 +220,7 @@ fn upconvert_chroma_phase_comp(
 
     // Phase advance per output sample of the heterodyne (the sum of the
     // subcarrier, a quarter turn per sample, and the color-under carrier).
-    let step = FRAC_PI_2 * (1.0 + spec.decoder_color_under_carrier / (spec.sys_fsc_mhz * 1e6));
+    let step = FRAC_PI_2 * (1.0 + field.chroma_carrier / (spec.sys_fsc_mhz * 1e6));
     let phasor_step = Complex64::from_polar(1.0, step);
 
     for entry in phase_sequence {
@@ -383,7 +383,6 @@ fn comb_c(data: &mut [f32], line_len: usize, line_distance: usize) {
 fn process_chroma_internal(
     field: &mut DecodedField,
     spec: &DecoderSpec,
-    chroma_afc_state: &mut ChromaAfcState,
     mut conversion_lo: Option<&mut ConversionLoState>,
 ) -> Result<Vec<u16>> {
     let burst_start_line = field.burst_start_line();
@@ -391,7 +390,14 @@ fn process_chroma_internal(
         return Ok(vec![ZERO_LEVEL; field.outlinecount * field.outlinelen]);
     }
 
-    let mut chroma = tracked_chroma(field, spec, chroma_afc_state)?;
+    // Color-framed chroma is resampled fsc / (2 pi color_under) * 4 samples
+    // late to undo the group delay of the color-under heterodyne filtering.
+    let shift = if color_framed(spec, field) {
+        spec.sys_fsc_mhz * 1e6 / (std::f64::consts::TAU * spec.decoder_color_under_carrier) * 4.0
+    } else {
+        0.0
+    };
+    let mut chroma = downscale_raw_vec(field, &spec.sinc_lut, true, shift, None)?;
     if let Some(lo) = conversion_lo
         .as_deref_mut()
         .filter(|_| spec.rf_secam_carrier_servo)
@@ -422,9 +428,6 @@ fn process_chroma_internal(
         .expect("valid field without a burst lock")
         .phase_sequence;
     let mut uphet = if color_framed(spec, field) {
-        // Heterodynes with the nominal carrier even under chroma AFC, which
-        // measured the burst phases against the tracked carrier; the
-        // compensation is then off by the two carriers' phase difference.
         upconvert_chroma_phase_comp(
             &mut chroma,
             field,
@@ -439,7 +442,7 @@ fn process_chroma_internal(
                 spec,
                 field.field_number * (field.outlinecount * field.outlinelen) as i64,
             ),
-            None => active_chroma_heterodyne(spec, chroma_afc_state),
+            None => field.heterodyne(spec),
         };
         upconvert_chroma(&chroma, field, phase_sequence, chroma_heterodyne)
     };
@@ -492,54 +495,15 @@ fn process_chroma_internal(
     Ok(encode_chroma(&uphet))
 }
 
-// The TBC'd chroma, with the carrier re-measured from it under chroma AFC.
-fn tracked_chroma(
-    field: &mut DecodedField,
-    spec: &DecoderSpec,
-    chroma_afc_state: &mut ChromaAfcState,
-) -> Result<Vec<f32>> {
-    // Color-framed chroma is resampled fsc / (2 pi color_under) * 4 samples
-    // late to undo the group delay of the color-under heterodyne filtering.
-    let shift = if color_framed(spec, field) {
-        spec.sys_fsc_mhz * 1e6 / (std::f64::consts::TAU * spec.decoder_color_under_carrier) * 4.0
-    } else {
-        0.0
-    };
-    let chroma_downscaled = downscale_raw_vec(field, &spec.sinc_lut, true, shift, None)?;
-    if !spec.chroma_afc_enabled() {
-        return Ok(chroma_downscaled);
-    }
-    let bandpass = chroma_afc_state.get_chroma_bandpass(spec)?;
-    let chroma_len = chroma_downscaled.len();
-    let chroma = demod_chroma_filt_array(
-        &chroma_downscaled,
-        spec,
-        &bandpass,
-        chroma_len,
-        Some((10.0 * (spec.sys_outfreq / 40.0)) as isize),
-    );
-    chroma_afc_state.freq_offset(spec, &chroma, true)?;
-    Ok(chroma)
-}
-
 pub(crate) fn decode_chroma(
     field: &mut DecodedField,
     spec: &DecoderSpec,
-    chroma_afc_state: &mut ChromaAfcState,
     conversion_lo: Option<&mut ConversionLoState>,
 ) -> Result<Option<Vec<u16>>> {
-    if spec.color_system == ColorSystem::Monochrome {
+    if spec.color_system == ColorSystem::Monochrome || !spec.chroma_output {
         return Ok(None);
     }
-    if !spec.chroma_output {
-        // The burst lock of the following fields heterodynes with the tracked
-        // carrier, so luma must not depend on whether chroma is written.
-        if spec.chroma_afc_enabled() && field.burst_start_line() != -1 {
-            tracked_chroma(field, spec, chroma_afc_state)?;
-        }
-        return Ok(None);
-    }
-    let upconverted = process_chroma_internal(field, spec, chroma_afc_state, conversion_lo)?;
+    let upconverted = process_chroma_internal(field, spec, conversion_lo)?;
     Ok(Some(upconverted))
 }
 

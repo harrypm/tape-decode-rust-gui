@@ -274,34 +274,19 @@ pub(crate) fn decode_video_block(
     let mut indata_fft = rfft_f32(&rawdata[..BLOCKSIZE], spec.fft_block_r2c_f32.as_ref());
     let half_bins = indata_fft.len();
 
-    // The color-under burst channel is the raw RF, through the zero-phase
-    // burst chain unless chroma AFC filters it at field level against the
-    // tracked carrier. The chain is a real gain on the spectrum just taken,
-    // applied before the RF filters below rewrite that spectrum in place.
-    if spec.rf_write_chroma {
-        match &spec.chroma_burst_block_fft_gain {
-            Some(gain) => {
-                let spectrum = indata_fft
-                    .iter()
-                    .zip(gain)
-                    .map(|(&bin, &gain)| bin * gain)
-                    .collect();
-                let filtered = irfft_owned_f32(spectrum, None, spec.fft_block_c2r_f32.as_ref());
-                let burst = shift_chroma_and_remove_dc(filtered, spec.chroma_offset());
-                out.demod_burst.extend_from_slice(slice_vec(
-                    &burst,
-                    BLOCKCUT,
-                    BLOCKCUT_END,
-                    "chroma",
-                ));
-            }
-            None => out.demod_burst.extend_from_slice(slice_vec(
-                rawdata,
-                BLOCKCUT,
-                BLOCKCUT_END,
-                "chroma",
-            )),
-        }
+    // The color-under burst channel is the raw RF through the zero-phase
+    // burst chain, a real gain on the spectrum just taken, applied before the
+    // RF filters below rewrite that spectrum in place.
+    if let Some(gain) = &spec.chroma_burst_block_fft_gain {
+        let spectrum = indata_fft
+            .iter()
+            .zip(gain)
+            .map(|(&bin, &gain)| bin * gain)
+            .collect();
+        let filtered = irfft_owned_f32(spectrum, None, spec.fft_block_c2r_f32.as_ref());
+        let burst = shift_chroma_and_remove_dc(filtered, spec.chroma_offset());
+        out.demod_burst
+            .extend_from_slice(slice_vec(&burst, BLOCKCUT, BLOCKCUT_END, "chroma"));
     }
 
     if let Some(video_notch_f) = &spec.video_notch_filter {

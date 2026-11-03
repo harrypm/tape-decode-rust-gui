@@ -658,29 +658,37 @@ fn apply_burst_lock(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     inter_field_state: &mut InterFieldState,
-    chroma_afc_state: &ChromaAfcState,
 ) -> Result<()> {
-    let chroma_heterodyne = active_chroma_heterodyne(spec, chroma_afc_state);
     let prev_burst_start_line = field
         .prevfield
         .as_ref()
         .map_or(0, |prev| prev.burst_start_line);
 
-    // The burst lock reads each line only as far past the burst as the
-    // burst sits from the line start (see `get_upconverted_burst`).
     let (burst_start, burst_end) = burst_area(spec);
-    let burst_downscaled = downscale_raw_vec(
-        field,
-        &spec.sinc_lut,
-        true,
-        0.0,
-        Some(burst_start + burst_end),
-    )?;
+    let chroma = if spec.chroma_afc_enabled() {
+        // The carrier is measured over the whole field's chroma and the
+        // field's heterodyne generated at it.
+        let chroma = downscale_raw_vec(field, &spec.sinc_lut, true, 0.0, None)?;
+        let carrier = chroma_afc_carrier(spec, &chroma);
+        field.chroma_carrier = carrier;
+        field.chroma_heterodyne = Some(color_under_heterodyne(spec, carrier));
+        chroma
+    } else {
+        // The burst lock reads each line only as far past the burst as the
+        // burst sits from the line start (see `get_upconverted_burst`).
+        downscale_raw_vec(
+            field,
+            &spec.sinc_lut,
+            true,
+            0.0,
+            Some(burst_start + burst_end),
+        )?
+    };
     let (track_phase, next_track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
         field,
-        &burst_downscaled,
-        chroma_heterodyne,
+        &chroma,
+        field.heterodyne(spec),
         inter_field_state.track_phase,
         (burst_start, burst_end),
         prev_burst_start_line,
@@ -705,7 +713,6 @@ pub(crate) fn predecode_field_from_rawdecode(
     scheduled_prevfield: Option<PrevFieldState>,
     inter_field_state: &mut InterFieldState,
     scheduled_readloc: u64,
-    chroma_afc_state: &ChromaAfcState,
 ) -> Result<DecodeFieldResult> {
     // Build and classify the next DecodedField from coalesced block data. This is
     // the sync/line-location half of the speculative predecode step; output/TBC
@@ -738,6 +745,8 @@ pub(crate) fn predecode_field_from_rawdecode(
         levels: inter_field_state.levels,
         burst_lock: None,
         track_phase: None,
+        chroma_carrier: spec.decoder_color_under_carrier,
+        chroma_heterodyne: None,
         wow_analysis: None,
     };
     if let Some(prevfield) = &pending_field.prevfield {
@@ -867,12 +876,7 @@ pub(crate) fn predecode_field_from_rawdecode(
 
                 pending_field.linelocs = Some(linelocs2_vec);
                 if spec.rf_write_chroma {
-                    apply_burst_lock(
-                        &mut pending_field,
-                        spec,
-                        inter_field_state,
-                        chroma_afc_state,
-                    )?;
+                    apply_burst_lock(&mut pending_field, spec, inter_field_state)?;
                     if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
                         pending_field.linelocs = Some(refined);
                     }
