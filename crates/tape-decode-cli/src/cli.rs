@@ -461,6 +461,15 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
             bail!("--mt-trim-fraction must be in [0.0, 1.0)");
         }
     }
+    if cli
+        .metadata_out
+        .as_deref()
+        .is_some_and(|path| path.as_os_str() == "-")
+    {
+        bail!("metadata output cannot be standard output");
+    }
+    // Every option is checked before an output file is created.
+    let mut spec = Arc::new(DecoderSpec::new(&request)?);
 
     let input_file = if cli.infile.as_os_str() == "-" {
         os::stdin_file()?
@@ -470,6 +479,17 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
             .open(&cli.infile)
             .with_context(|| format!("failed to open input {}", cli.infile.display()))?
     };
+    let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
+    let start_offset = cli.offset.unwrap_or(0);
+    // The SECAM servo calibration decodes a bounded stretch first to converge
+    // the carrier servo, then seeds the real decode with its trim so it applies
+    // from the very first field. That needs the input read twice.
+    let calibrate_secam = cli.secam_servo_passes == 2
+        && request.secam_lo_trim.is_none()
+        && spec.chroma_phase_continuous();
+    if calibrate_secam && !reader.is_seekable() {
+        bail!("--secam-servo-passes 2 decodes the input twice, which a pipe cannot be; use a file, or seed --secam-lo-trim from a previous run");
+    }
 
     let mut open_options = OpenOptions::new();
     if cli.overwrite {
@@ -500,31 +520,18 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
         _ => None,
     };
 
-    let metadata_out = match cli.metadata_out {
-        Some(path) if path.as_os_str() != "-" => {
-            Some(open_options.clone().open(&path).with_context(|| {
-                format!("failed to open metadata output file {}", path.display())
-            })?)
-        }
-        Some(_) => bail!("metadata output cannot be standard output"),
-        _ => None,
-    };
+    let metadata_out =
+        cli.metadata_out
+            .map(|path| {
+                open_options.clone().open(&path).with_context(|| {
+                    format!("failed to open metadata output file {}", path.display())
+                })
+            })
+            .transpose()?;
 
-    let mut spec = Arc::new(DecoderSpec::new(&request)?);
-    let mut reader = DecodeReader::new(open_source(input_file, cli.input_format.into())?);
     let mut writer = DecodeWriter::new(luma_out, chroma_out, metadata_out)?;
-    let start_offset = cli.offset.unwrap_or(0);
 
-    if cli.secam_servo_passes == 2
-        && request.secam_lo_trim.is_none()
-        && spec.chroma_phase_continuous()
-    {
-        // First pass: decode a bounded stretch to converge the carrier servo,
-        // then seed the real decode with its trim so it applies from the very
-        // first field. That needs the input read twice.
-        if !reader.is_seekable() {
-            bail!("--secam-servo-passes 2 decodes the input twice, which a pipe cannot be; use a file, or seed --secam-lo-trim from a previous run");
-        }
+    if calibrate_secam {
         tracing::info!(
             "SECAM servo two-pass: calibration decode of up to {} fields...",
             SECAM_CALIBRATION_FIELDS
