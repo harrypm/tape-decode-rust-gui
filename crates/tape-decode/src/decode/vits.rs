@@ -17,12 +17,12 @@ fn lineslice_tbc_bounds(spec: &DecoderSpec, loc: &[usize; 3], keepphase: bool) -
 }
 
 fn encoded_output_to_ire(field: &DecodedField, spec: &DecoderSpec, output: &[u16]) -> Vec<f64> {
-    let output_zero = spec.sys_output_zero as u16;
+    let output_zero = spec.sys_output_zero;
     let out_scale = field.out_scale.unwrap();
     let vsync_ire = f64::from(spec.sys_vsync_ire);
     output
         .iter()
-        .map(|&value| (value.wrapping_sub(output_zero) as f64 / out_scale) + vsync_ire)
+        .map(|&value| ((i64::from(value) - output_zero) as f64 / out_scale) + vsync_ire)
         .collect()
 }
 
