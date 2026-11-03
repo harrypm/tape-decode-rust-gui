@@ -211,9 +211,6 @@ fn upconvert_chroma(
 
 /// Upconvert each line with its heterodyne rotated so that the line's burst
 /// lands on `target_phase` (degrees), instead of one rotation for the field.
-/// The heterodyne runs at the line's fitted subcarrier frequency and chirps
-/// towards the next line's, so a slowly drifting carrier is tracked without
-/// phase steps at the line boundaries.
 fn upconvert_chroma_phase_comp(
     chroma: &mut [f32],
     field: &DecodedField,
@@ -223,38 +220,24 @@ fn upconvert_chroma_phase_comp(
 ) {
     use std::f64::consts::FRAC_PI_2;
 
-    let fsc_hz = spec.sys_fsc_mhz * 1e6;
-    let color_under = spec.decoder_color_under_carrier;
-    // Phase advance per output sample of the nominal heterodyne (the sum of
-    // the subcarrier, a quarter turn per sample, and the color-under carrier).
-    let nominal_step = FRAC_PI_2 * (1.0 + color_under / fsc_hz);
-    // Each line's carrier scaled by its measured subcarrier error.
-    let het_hz = |entry: &PhaseSequenceEntry| entry.burst.frequency / fsc_hz * color_under;
+    // Phase advance per output sample of the heterodyne (the sum of the
+    // subcarrier, a quarter turn per sample, and the color-under carrier).
+    let step = FRAC_PI_2 * (1.0 + spec.decoder_color_under_carrier / (spec.sys_fsc_mhz * 1e6));
+    let phasor_step = Complex64::from_polar(1.0, step);
 
-    for (idx, entry) in phase_sequence.iter().enumerate() {
+    for entry in phase_sequence {
         let (start, end) = line_bounds(field, entry.line_number);
-
-        let het_hz_current = het_hz(entry);
-        let het_hz_next = phase_sequence.get(idx + 1).map_or(het_hz_current, het_hz);
-        let theta_0 = nominal_step * start as f64
+        let theta_0 = step * start as f64
             + entry.heterodyne_phase as f64 * FRAC_PI_2
             + f64::from(target_phase + entry.burst.phase).to_radians();
-        let step = FRAC_PI_2 * (1.0 + het_hz_current / fsc_hz);
-        // Half the per-sample step change that reaches the next line's rate by
-        // the end of the line: theta_k = theta_0 + step k + chirp k^2.
-        let chirp = 0.5 * (het_hz_next - het_hz_current) * FRAC_PI_2 / (fsc_hz * field.outlinelen as f64);
         let dc = f64::from(entry.burst.dc);
 
         // Walk the phasor exp(i theta_k) instead of evaluating the cosine per
-        // sample: the step between samples grows by a constant 2 chirp, so both
-        // are complex multiplications.
+        // sample.
         let mut phasor = Complex64::from_polar(1.0, theta_0);
-        let mut phasor_step = Complex64::from_polar(1.0, step + chirp);
-        let phasor_step_step = Complex64::from_polar(1.0, 2.0 * chirp);
         for sample in &mut chroma[start..end] {
             *sample = (f64::from(*sample) * -phasor.re - dc) as f32;
             phasor *= phasor_step;
-            phasor_step *= phasor_step_step;
         }
     }
 }

@@ -509,7 +509,7 @@ fn demod_mean(data: &[f32], start: i64, end: i64) -> f32 {
 }
 
 /// Color burst of one line after the chroma heterodyne, fitted as
-/// `amplitude * cos(2 pi frequency t - phase) + dc` against the reference
+/// `amplitude * cos(2 pi fsc t - phase) + dc` against the reference
 /// subcarrier, with `t` counted from the start of the field buffer.
 #[derive(Clone, Copy)]
 struct BurstMeasurement {
@@ -520,11 +520,7 @@ struct BurstMeasurement {
     /// length times the amplitude), which the color killer threshold and the
     /// phase averages are set against.
     magnitude: f32,
-    /// Fitted subcarrier frequency in Hz.
-    frequency: f64,
     dc: f32,
-    /// Burst center in output samples from the line start.
-    center: f64,
     /// Correlation sums against the reference cosine and sine.
     i: f32,
     q: f32,

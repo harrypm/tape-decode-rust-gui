@@ -1,17 +1,9 @@
 use super::sync::{refine_levels_from_vsync, try_get_pulses};
 use super::*;
-use std::f64::consts::{PI, TAU};
 
 /// Measures the burst kept at output sample `burst_start` of the field
-/// buffer, on the line starting at `line_start`, against the reference
-/// subcarrier table.
-fn demod_burst(
-    burst: &[f32],
-    burst_start: usize,
-    line_start: usize,
-    burst_wave: &[(f32, f32)],
-    fsc_hz: f64,
-) -> BurstMeasurement {
+/// buffer against the reference subcarrier table.
+fn demod_burst(burst: &[f32], burst_start: usize, burst_wave: &[(f32, f32)]) -> BurstMeasurement {
     let reference = burst_wave
         .get(burst_start..burst_start + burst.len())
         .expect("the reference subcarrier table spans the field");
@@ -25,136 +17,22 @@ fn demod_burst(
         q += sample * sin;
     }
 
+    // Over whole subcarrier cycles the reference cosine and sine are
+    // orthogonal to each other and to a constant, so the correlations are
+    // the least-squares amplitude, phase and dc of the burst.
     let len = burst.len() as f64;
-    let seed = BurstFit {
-        amplitude: 2.0 * f64::from(i.hypot(q)) / len,
-        phase: f64::from(q.atan2(i)),
-        dc: f64::from(sum) / len,
-        frequency: fsc_hz,
-    };
-    let fit = fit_burst(burst, burst_start, fsc_hz, seed);
-    // The phase as a sample offset, four samples per cycle.
-    let phase_samples = fit.phase.rem_euclid(TAU) * (2.0 / PI);
+    let magnitude = f64::from(i).hypot(f64::from(q));
     BurstMeasurement {
-        phase: (fit.phase.to_degrees().rem_euclid(360.0)) as f32,
-        amplitude: fit.amplitude as f32,
-        magnitude: (fit.amplitude * len / 2.0) as f32,
-        frequency: fit.frequency,
-        dc: fit.dc as f32,
-        center: (burst_start - line_start) as f64 + (len - 1.0) / 2.0 + phase_samples,
+        phase: f64::from(q)
+            .atan2(f64::from(i))
+            .to_degrees()
+            .rem_euclid(360.0) as f32,
+        amplitude: (2.0 * magnitude / len) as f32,
+        magnitude: magnitude as f32,
+        dc: (f64::from(sum) / len) as f32,
         i,
         q,
     }
-}
-
-/// Parameters of the burst model `amplitude * cos(2 pi frequency t - phase) + dc`.
-#[derive(Clone, Copy)]
-struct BurstFit {
-    amplitude: f64,
-    /// Radians.
-    phase: f64,
-    dc: f64,
-    /// Hz.
-    frequency: f64,
-}
-
-/// Refines the correlation estimate `seed` by a Gauss-Newton fit of the burst
-/// model, with `t` in seconds from the start of the field buffer (the
-/// reference table's origin) at four samples per subcarrier cycle. The
-/// frequency is pulled towards `fsc_hz` by a prior, so a noisy burst cannot
-/// trade frequency against phase along the model's near-degenerate valley.
-fn fit_burst(burst: &[f32], burst_start: usize, fsc_hz: f64, seed: BurstFit) -> BurstFit {
-    const FREQUENCY_PRIOR_WEIGHT: f64 = 1e4;
-    const REGULARIZATION: f64 = 1e-6;
-    const MAX_ITERATIONS: usize = 32;
-    const PRECISION: f64 = 1e-10;
-
-    let mut fit = seed;
-    let time_at = |k: usize| (k + burst_start) as f64 / (4.0 * fsc_hz);
-    for _ in 0..MAX_ITERATIONS {
-        // Normal equations (J^T J) delta = J^T r of the residual r = burst -
-        // model, with the Jacobian columns in the parameter order
-        // (amplitude, phase, dc, frequency).
-        let mut jtj = [[0.0f64; 4]; 4];
-        let mut jtr = [0.0f64; 4];
-        // The model phase advances by a constant per sample, so its sine and
-        // cosine are walked as a rotating phasor from the first sample's.
-        let (mut sin, mut cos) = (TAU * fit.frequency * time_at(0) - fit.phase).sin_cos();
-        let (step_sin, step_cos) = (TAU * fit.frequency / (4.0 * fsc_hz)).sin_cos();
-        for (k, &sample) in burst.iter().enumerate() {
-            let t = time_at(k);
-            let residual = f64::from(sample) - (fit.amplitude * cos + fit.dc);
-            let d_phase = fit.amplitude * sin;
-            let jacobian = [cos, d_phase, 1.0, -TAU * t * d_phase];
-            for ((jtj_row, jtr_row), &j_row) in jtj.iter_mut().zip(&mut jtr).zip(&jacobian) {
-                for (cell, &j_col) in jtj_row.iter_mut().zip(&jacobian) {
-                    *cell += j_row * j_col;
-                }
-                *jtr_row += j_row * residual;
-            }
-            (sin, cos) = (
-                sin.mul_add(step_cos, cos * step_sin),
-                cos.mul_add(step_cos, -(sin * step_sin)),
-            );
-        }
-        jtj[3][3] += FREQUENCY_PRIOR_WEIGHT;
-        jtr[3] += FREQUENCY_PRIOR_WEIGHT * (fsc_hz - fit.frequency);
-        for (row, jtj_row) in jtj.iter_mut().enumerate() {
-            jtj_row[row] += REGULARIZATION;
-        }
-
-        let Some(delta) = solve_4x4(jtj, jtr) else {
-            break;
-        };
-        fit.amplitude += delta[0];
-        fit.phase += delta[1];
-        fit.dc += delta[2];
-        fit.frequency += delta[3];
-        if delta.iter().all(|step| step.abs() < PRECISION) {
-            break;
-        }
-    }
-    fit.phase = (fit.phase + PI).rem_euclid(TAU) - PI;
-    fit
-}
-
-/// Gaussian elimination with partial pivoting; `None` when a pivot vanishes.
-fn solve_4x4(a: [[f64; 4]; 4], b: [f64; 4]) -> Option<[f64; 4]> {
-    let mut m = [[0.0f64; 5]; 4];
-    for (row, a_row) in m.iter_mut().zip(&a) {
-        row[..4].copy_from_slice(a_row);
-    }
-    for (row, &b_row) in m.iter_mut().zip(&b) {
-        row[4] = b_row;
-    }
-
-    for i in 0..4 {
-        let mut pivot = i;
-        for row in i + 1..4 {
-            if m[row][i].abs() > m[pivot][i].abs() {
-                pivot = row;
-            }
-        }
-        m.swap(i, pivot);
-        if m[i][i].abs() < 1e-12 {
-            return None;
-        }
-        let (upper, lower) = m.split_at_mut(i + 1);
-        let pivot_row = &upper[i];
-        for row in lower {
-            let factor = row[i] / pivot_row[i];
-            for col in i..5 {
-                row[col] -= factor * pivot_row[col];
-            }
-        }
-    }
-
-    let mut x = [0.0f64; 4];
-    for i in (0..4).rev() {
-        let sum: f64 = (i + 1..4).map(|j| m[i][j] * x[j]).sum();
-        x[i] = (m[i][4] - sum) / m[i][i];
-    }
-    Some(x)
 }
 
 fn calczc_do(
@@ -431,7 +309,6 @@ fn get_upconverted_burst(
     current_phase: usize,
     burst_area: (usize, usize),
     burst_wave: &[(f32, f32)],
-    fsc_hz: f64,
     line_number: usize,
 ) -> BurstMeasurement {
     // Upconvert and filter from the line start to as far past the burst as
@@ -447,13 +324,7 @@ fn get_upconverted_burst(
         .collect::<Vec<f32>>();
     let filtered = sosfiltfilt_f32(chroma_filter, &upconverted);
 
-    demod_burst(
-        &filtered[burst_start..burst_end],
-        line_start + burst_start,
-        line_start,
-        burst_wave,
-        fsc_hz,
-    )
+    demod_burst(&filtered[burst_start..burst_end], line_start + burst_start, burst_wave)
 }
 
 fn get_phase_sequence(
@@ -496,7 +367,6 @@ fn get_phase_sequence(
             phase,
             burst_area,
             &spec.rf_fsc_wave,
-            spec.sys_fsc_mhz * 1e6,
             linenumber,
         )
     };
@@ -708,7 +578,6 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     // Output samples per subcarrier cycle: a phase error maps to that many
     // output samples, scaled back to the line's input length.
     let fsc_ratio = spec.sys_outfreq / spec.sys_fsc_mhz;
-    let fsc_hz = spec.sys_fsc_mhz * 1e6;
     // The vertical interval's lines, up to 9, carry no burst; after a
     // mid-field burst turn-on only the lines with color are refined.
     let first_line = (lock.burst_start_line as usize).max(10);
@@ -726,11 +595,8 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
         };
         let phase_delta = (target - burst.phase + 180.0).rem_euclid(360.0) - 180.0;
         let line_adjust = f64::from(phase_delta) / 360.0 * fsc_ratio;
-        // Less the subcarrier drift the fitted frequency accumulates between
-        // the line start and the burst center.
-        let drift = (burst.frequency - fsc_hz) * burst.center / fsc_hz;
         let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
-        linelocs[line] += (line_adjust - drift) * scale;
+        linelocs[line] += line_adjust * scale;
     }
     Some(linelocs)
 }
