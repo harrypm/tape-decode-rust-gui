@@ -241,6 +241,13 @@ fn measure_vblank_sections(
     (vblank_pulses, field_order_lengths)
 }
 
+/// Signature indexes: the spacings from the last hsync to the first
+/// equalizing pulse and from the last post-equalizing pulse to the first
+/// hsync, of the vertical interval opening the field and of the one closing it.
+const FIRST_HSYNC_LENGTH: usize = 0;
+const FIRST_EQPL2_LENGTH: usize = 1;
+const LAST_HSYNC_LENGTH: usize = 2;
+
 /// Expected field-order signatures, each [first HSYNC, first EQPL2, last HSYNC,
 /// last EQPL2], returned as (first field, second field).
 fn field_order_signatures(is_ntsc: bool) -> ([f64; 4], [f64; 4]) {
@@ -249,6 +256,17 @@ fn field_order_signatures(is_ntsc: bool) -> ([f64; 4], [f64; 4]) {
     } else {
         ([0.5, 0.5, 1.0, 1.0], [1.0, 1.0, 0.5, 0.5])
     }
+}
+
+/// The field line of the first hsync after the vertical interval, whose three
+/// sections of `num_eq_pulses / 2` lines each start half a line or a line
+/// after line 0 and end half a line or a line before it, by the field order.
+fn hsync_start_line(is_ntsc: bool, first_field: bool, num_eq_pulses: f64) -> f64 {
+    let (first, second) = field_order_signatures(is_ntsc);
+    let lengths = if first_field { first } else { second };
+    let section_lines = num_eq_pulses / 2.0;
+    // The last post-equalizing pulse starts half a line before its section ends.
+    lengths[FIRST_HSYNC_LENGTH] + 3.0 * section_lines - 0.5 + lengths[FIRST_EQPL2_LENGTH]
 }
 
 /// Decide the field order by scoring the measured `field_order_lengths`
@@ -363,9 +381,6 @@ fn get_first_hsync_loc(
     const LAST_VBLANK_VSYNC_START: usize = 5;
     const LAST_VBLANK_VSYNC_END: usize = 6;
     const LAST_VBLANK_EQ_2_END: usize = 7;
-    const FIRST_HSYNC_LENGTH: usize = 0;
-    const FIRST_EQPL2_LENGTH: usize = 1;
-    const LAST_HSYNC_LENGTH: usize = 2;
 
     let mut prev_hsync_diff = inter_field_state.prev_first_hsync_diff;
 
@@ -407,8 +422,7 @@ fn get_first_hsync_loc(
     vblank_lines[FIRST_VBLANK_EQ_2_END] =
         vblank_lines[FIRST_VBLANK_VSYNC_END] + vsync_section_lines - 0.5;
 
-    let hsync_start_line =
-        vblank_lines[FIRST_VBLANK_EQ_2_END] + current_field_lengths[FIRST_EQPL2_LENGTH];
+    let hsync_start_line = hsync_start_line(is_ntsc, first_field, num_eq_pulses);
 
     vblank_lines[LAST_VBLANK_EQ_1_START] =
         current_field_lines + current_field_lengths[LAST_HSYNC_LENGTH];
@@ -1503,16 +1517,24 @@ fn try_get_pulses_core(
         let mut expected_line0 = None;
         let mut expected_first_field = None;
         if inter_field_state.prev_first_hsync_readloc != -1 {
-            let prev_abs = inter_field_state.prev_first_hsync_readloc as f64
-                + inter_field_state.prev_first_hsync_loc;
-            let lines_per_field = frame_lines as f64 / 2.0;
-            let target_abs = prev_abs + (lines_per_field * meanlinelen);
-            // Target VSYNC area approx 8 lines before active video (Start of VSYNC block).
-            let expected_line0_abs = target_abs - (8.0 * meanlinelen);
-            expected_line0 = Some(expected_line0_abs - field.readloc as f64);
-            if inter_field_state.prev_first_field != -1 {
-                expected_first_field = Some(1 - inter_field_state.prev_first_field);
-            }
+            let prev_first_field = match inter_field_state.prev_first_field {
+                0 => false,
+                1 => true,
+                _ => unreachable!("an accepted field's first hsync comes with its order"),
+            };
+            // The field after the previous one starts its line count after
+            // the previous line 0, with the opposite order.
+            let prev_line0_abs = inter_field_state.prev_first_hsync_readloc as f64
+                + inter_field_state.prev_first_hsync_loc
+                - hsync_start_line(is_ntsc, prev_first_field, num_pulses) * meanlinelen;
+            let prev_field_lines = if prev_first_field {
+                field_lines.0
+            } else {
+                field_lines.1
+            } as f64;
+            expected_line0 =
+                Some(prev_line0_abs + prev_field_lines * meanlinelen - field.readloc as f64);
+            expected_first_field = Some(i64::from(!prev_first_field));
         }
 
         fallback = get_line0_fallback(
@@ -2020,6 +2042,14 @@ mod tests {
         .expect("the broad pulses and the hsyncs before them locate line 0");
         assert_eq!(result.line0, 14.0 * LINE_LEN);
         assert_eq!(result.first_field, 1);
+    }
+
+    #[test]
+    fn hsync_start_line_by_system_and_order() {
+        assert_eq!(hsync_start_line(false, true, 5.0), 8.0);
+        assert_eq!(hsync_start_line(false, false, 5.0), 9.0);
+        assert_eq!(hsync_start_line(true, true, 6.0), 10.0);
+        assert_eq!(hsync_start_line(true, false, 6.0), 10.0);
     }
 
     #[test]
