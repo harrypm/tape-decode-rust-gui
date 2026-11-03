@@ -1261,6 +1261,10 @@ pub struct Decoder {
     pending_result: Option<DecodeFieldResult>,
     has_pending: bool,
     duplicate_prev_field: bool,
+    /// Set while the detected field order runs one field out of step with
+    /// the written sequence (a skipped field under `FieldOrderAction::None`):
+    /// the written order is then the detected one inverted.
+    order_inverted: bool,
 }
 
 impl Decoder {
@@ -1281,6 +1285,7 @@ impl Decoder {
             pending_result: None,
             has_pending: false,
             duplicate_prev_field: true,
+            order_inverted: false,
         }
     }
 
@@ -1511,9 +1516,13 @@ impl Decoder {
             if self.output.len != 0 || field_obj.is_first_field.unwrap_or(false) {
                 let [prevfi_1, prevfi_2] = self.output.last;
 
-                // --- Seed values (may be mutated below) ---
-                let mut is_first_field = field_obj.is_first_field.unwrap_or(false);
-                let detected_first_field = is_first_field;
+                let detected_first_field = field_obj.is_first_field.unwrap_or(false);
+                // How many fields an invalid stretch lost is unknown, so the
+                // inversion established before it no longer holds.
+                if field_obj.prevfield.is_none() {
+                    self.order_inverted = false;
+                }
+                let mut is_first_field = detected_first_field ^ self.order_inverted;
                 let mut is_duplicate_field = false;
                 let mut sync_conf = sync_confidence_from_linelocs(&field_obj);
                 let seq_no = self.output.len + 1;
@@ -1599,7 +1608,8 @@ impl Decoder {
                         decode_faults |= 4;
                         sync_conf = 0;
                         if self.spec.field_order_action == FieldOrderAction::None {
-                            tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), manually flipping the field order to compensate");
+                            tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), inverting the detected field order to compensate");
+                            self.order_inverted = !self.order_inverted;
                             is_first_field = !prevfi.is_first_field;
                         } else if self.duplicate_prev_field {
                             tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), duplicating the last field to compensate...");
