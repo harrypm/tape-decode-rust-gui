@@ -1,10 +1,11 @@
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tape_decode::{Decoder, DecoderMetadata, DecoderSpec, LumaOutput, WriteableField, BLOCKSIZE};
 
 use crate::reader::DecodeReader;
@@ -491,6 +492,16 @@ fn decode_segment(
     Ok(decoder.metadata())
 }
 
+/// The error for a worker thread's panic payload, carrying its message.
+fn panic_error(payload: Box<dyn Any + Send>) -> anyhow::Error {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    anyhow!("decoder thread panicked: {message}")
+}
+
 /// Orchestrator-side handle for one worker thread, with a small look-ahead
 /// buffer so fields can be peeked (for `file_loc` alignment) before being taken.
 struct Worker {
@@ -584,8 +595,17 @@ impl Worker {
                     self.finished = true;
                     return false;
                 }
-                // Channel closed without a Done (e.g. the thread panicked).
+                // Only a panic closes the channel without a Done: a stopped
+                // worker is never polled, and every other exit sends one.
                 Err(_) => {
+                    let handle = self
+                        .handle
+                        .take()
+                        .expect("the worker thread is joined once");
+                    let payload = handle.join().expect_err(
+                        "a worker that is not stopped sends its outcome before exiting",
+                    );
+                    self.outcome = Some(Err(panic_error(payload)));
                     self.finished = true;
                     return false;
                 }
@@ -610,8 +630,9 @@ impl Worker {
     }
 
     /// Signal the worker to stop and join it. Dropping the receiver also unblocks
-    /// a worker parked on a full channel.
-    fn shutdown(mut self) {
+    /// a worker parked on a full channel. A panic, or a failed outcome nothing
+    /// absorbed, is the error.
+    fn shutdown(mut self) -> Result<()> {
         self.stop.store(true, Ordering::Relaxed);
         // Wake the worker if it is parked in the tape waiting for samples; the
         // dropped receiver below only unblocks one parked on a full send.
@@ -621,7 +642,11 @@ impl Worker {
         // a full send so the join below cannot hang.
         drop(self.rx);
         if let Some(handle) = handle {
-            let _ = handle.join();
+            handle.join().map_err(panic_error)?;
+        }
+        match self.outcome.take() {
+            Some(Err(error)) => Err(error),
+            _ => Ok(()),
         }
     }
 }
@@ -761,9 +786,10 @@ impl<'a> MtOrchestrator<'a> {
         Ok(())
     }
 
-    fn shutdown_worker(&mut self, seg: u64) {
-        if let Some(worker) = self.pool.remove(&seg) {
-            worker.shutdown();
+    fn shutdown_worker(&mut self, seg: u64) -> Result<()> {
+        match self.pool.remove(&seg) {
+            Some(worker) => worker.shutdown(),
+            None => Ok(()),
         }
     }
 
@@ -803,11 +829,14 @@ impl<'a> MtOrchestrator<'a> {
     /// error), and writing the output only on success.
     fn run(&mut self) -> Result<()> {
         let result = self.decode_loop();
-        // Tear down every still-running worker regardless of outcome.
+        // Tear down every still-running worker regardless of outcome; a
+        // failure found there fails a decode that otherwise succeeded.
+        let mut teardown = Ok(());
         for (_, worker) in std::mem::take(&mut self.pool) {
-            worker.shutdown();
+            teardown = teardown.and(worker.shutdown());
         }
         result?;
+        teardown?;
         self.write_output()
     }
 
@@ -893,7 +922,7 @@ impl<'a> MtOrchestrator<'a> {
                 // The next decoder, already past the matched fields, takes over.
                 // Shut down (join) the old decoder before advancing the drop
                 // point past it, so the tape never drops input it is still reading.
-                self.shutdown_worker(current_seg);
+                self.shutdown_worker(current_seg)?;
                 current_seg = next_seg;
                 next_seg += 1;
                 self.update_drop_threshold();
@@ -902,7 +931,7 @@ impl<'a> MtOrchestrator<'a> {
                 // authoritative and the later decoder's work is thrown away.
                 let produced = self.pool.get(&next_seg).is_some_and(|w| w.produced_any);
                 let start = self.seg_start(next_seg);
-                self.shutdown_worker(next_seg);
+                self.shutdown_worker(next_seg)?;
                 if produced {
                     tracing::warn!(
                         segment_start_sample = start,
