@@ -881,44 +881,45 @@ fn get_line0_fallback(
             let measured_linelen =
                 (dis_ppspp + disp_pspp + dispp_spp + dispps_pp) * (linelen / 2.0);
             let mut line_offset = None;
-            // count "half lines" for detecting top/bottom field:
-            let mut half_lines = 0;
-            let mut j = i;
-            while j < i + 9 {
+            // Half-line spacings of the short pulses after the broad ones up
+            // to the first whole-line one, which tell the field order; the
+            // count is unknown when the pulses end before that.
+            let mut half_lines = None;
+            let mut count = 0;
+            for j in i..(i + 9).min(filtered_pulses.len() - 1) {
                 let dis = pulse_distance(&filtered_pulses, j + 1, j, linelen);
-                if distance_matches(dis, 0.5)
-                    && (filtered_pulses[j].len as f64) < short_pulse_max
-                    && (filtered_pulses[j + 1].len as f64) < short_pulse_max
-                {
-                    half_lines += 1;
-                } else if distance_matches(dis, 1.0)
-                    && (filtered_pulses[j].len as f64) < short_pulse_max
-                    && (filtered_pulses[j + 1].len as f64) < short_pulse_max
-                {
-                    break;
+                let short = (filtered_pulses[j].len as f64) < short_pulse_max
+                    && (filtered_pulses[j + 1].len as f64) < short_pulse_max;
+                if short && distance_matches(dis, 0.5) {
+                    count += 1;
                 } else {
-                    half_lines = 0;
+                    if short && distance_matches(dis, 1.0) {
+                        half_lines = Some(count);
+                    }
                     break;
                 }
-                j += 1;
             }
-            if half_lines == 4 && frame_lines == 625 {
-                first_field = 0;
-                first_field_confidence = 100;
-                line_offset = Some(5.0);
-            } else if half_lines == 5 {
-                if frame_lines == 625 {
+            match (half_lines, frame_lines) {
+                (Some(4), 625) => {
+                    first_field = 0;
+                    first_field_confidence = 100;
+                    line_offset = Some(5.0);
+                }
+                (Some(5), 625) => {
                     first_field = 1;
                     first_field_confidence = 100;
                     line_offset = Some(4.5);
-                } else {
+                }
+                (Some(5), _) => {
                     first_field = 0;
                     first_field_confidence = 100;
                     line_offset = Some(5.5);
                 }
-            } else if half_lines == 6 && frame_lines == 525 {
-                first_field = 1;
-                line_offset = Some(6.0);
+                (Some(6), 525) => {
+                    first_field = 1;
+                    line_offset = Some(6.0);
+                }
+                _ => {}
             }
 
             // if we couldn't detect field type based on half lines check phase
@@ -1956,4 +1957,49 @@ pub(crate) fn refine_levels_from_vsync(
         refine(sync_level, &sync, sync_mean),
         refine(blank_level, &blank, blank_mean),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line0_fallback_with_the_pulses_ending_in_the_post_vsync_equalizing_pulses() {
+        const LINE_LEN: f64 = 2560.0;
+        let pulse = |line: f64, len: i64| PulseSample {
+            start: (line * LINE_LEN) as i64,
+            len,
+        };
+        // A 625-line first field: hsyncs, then the equalizing pulses from
+        // half a line after line 14, the broad pulses, and only three of the
+        // post-equalizing pulses before the pulses end.
+        let mut raw = Vec::new();
+        for line in 0..15 {
+            raw.push(pulse(f64::from(line), 188));
+        }
+        for k in 0..5 {
+            raw.push(pulse(14.5 + 0.5 * f64::from(k), 94));
+        }
+        for k in 0..5 {
+            raw.push(pulse(17.0 + 0.5 * f64::from(k), 1092));
+        }
+        for k in 0..3 {
+            raw.push(pulse(19.5 + 0.5 * f64::from(k), 94));
+        }
+
+        let result = get_line0_fallback(
+            &[],
+            &raw,
+            &[],
+            (900.0, 1200.0),
+            LINE_LEN,
+            625,
+            false,
+            None,
+            None,
+        )
+        .expect("the broad pulses and the hsyncs before them locate line 0");
+        assert_eq!(result.line0, 14.0 * LINE_LEN);
+        assert_eq!(result.first_field, 1);
+    }
 }
