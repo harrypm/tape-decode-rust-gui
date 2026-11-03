@@ -753,8 +753,6 @@ struct FieldData {
 
 #[derive(Clone)]
 struct PrevFieldState {
-    readloc: u64,
-    field_number: i64,
     burst_start_line: i64,
 }
 
@@ -800,7 +798,6 @@ struct DecodedField {
     validpulses: Vec<i64>,
     is_first_field: Option<bool>,
     vblank_next: Option<f64>,
-    field_number: i64,
     linelocs: Option<Vec<f64>>,
     lineoffset: usize,
     linecount: Option<usize>,
@@ -875,15 +872,10 @@ pub struct WriteableField {
     /// follows the field's position in the output instead (see
     /// [`Self::set_sequence_position`]).
     field_phase_id_raw: Option<i64>,
-    /// The decoder's count of consecutive valid fields up to this one, which
-    /// keys the NTSC color-frame sequence.
-    pub field_number: i64,
-    /// Set when this field restarted that count (its predecessor was invalid).
-    pub field_number_reset: bool,
     /// Set when the chroma was phase-compensated onto the NTSC color-frame
-    /// sequence: the phase ID then follows `field_number`, and the second
-    /// color frame is written with the chroma inverted.
-    pub color_framed: bool,
+    /// sequence: the second color frame is then written with the chroma
+    /// inverted.
+    color_framed: bool,
 }
 
 struct WriteablePicture {
@@ -891,24 +883,23 @@ struct WriteablePicture {
     chroma: Option<Vec<u16>>,
 }
 
-/// Whether a field falls in the second half of the NTSC four-field color
-/// sequence, counting consecutive valid fields.
-fn ntsc_second_color_frame(field_number: i64) -> bool {
-    (field_number / 2) % 2 == 1
+/// Whether the field at 1-based output position `seq_no` falls in the
+/// second frame of the NTSC four-field color sequence. The output starts on
+/// a first field and alternates, so its fields pair into frames from the
+/// first one.
+fn ntsc_second_color_frame(seq_no: usize) -> bool {
+    seq_no.div_ceil(2).is_multiple_of(2)
 }
 
-/// fieldPhaseID of a field without a signal-derived one: color-framed NTSC
-/// chroma follows the field count, anything else the output sequence number.
-fn sequence_field_phase_id(
-    first_field: bool,
-    color_framed: bool,
-    seq_no: usize,
-    field_number: i64,
-) -> i64 {
-    if color_framed {
-        field_phase_id(first_field, !ntsc_second_color_frame(field_number))
-    } else {
-        field_phase_id(first_field, (seq_no / 2).is_multiple_of(2))
+/// fieldPhaseID of a field without a signal-derived one, from its written
+/// order and output position: first fields odd, second fields even, 3 and 4
+/// in the second color frame.
+fn sequence_field_phase_id(first_field: bool, seq_no: usize) -> i64 {
+    match (first_field, ntsc_second_color_frame(seq_no)) {
+        (true, false) => 1,
+        (false, false) => 2,
+        (true, true) => 3,
+        (false, true) => 4,
     }
 }
 
@@ -924,8 +915,6 @@ impl WriteableField {
             info,
             picture: Arc::new(WriteablePicture { luma, chroma }),
             field_phase_id_raw: field.field_phase_id,
-            field_number: field.field_number,
-            field_number_reset: field.prevfield.is_none(),
             color_framed,
         }
     }
@@ -933,16 +922,10 @@ impl WriteableField {
     /// Renumber the field for its position in the output and re-derive the
     /// metadata that follows from it. Multithreaded stitching uses this to map
     /// a worker's local numbering onto the global sequence.
-    pub fn set_sequence_position(&mut self, seq_no: usize, field_number: i64) {
+    pub fn set_sequence_position(&mut self, seq_no: usize) {
         self.info.seq_no = seq_no;
-        self.field_number = field_number;
         if self.field_phase_id_raw.is_none() {
-            self.info.field_phase_id = sequence_field_phase_id(
-                self.info.detected_first_field,
-                self.color_framed,
-                seq_no,
-                field_number,
-            );
+            self.info.field_phase_id = sequence_field_phase_id(self.info.is_first_field, seq_no);
         }
     }
 
@@ -952,7 +935,7 @@ impl WriteableField {
     }
 
     /// The chroma as decoded: color-framed fields carry the first color
-    /// frame's phase regardless of `field_number`.
+    /// frame's phase regardless of their position.
     #[inline]
     pub fn chroma(&self) -> Option<&[u16]> {
         self.picture.chroma.as_deref()
@@ -962,7 +945,7 @@ impl WriteableField {
     pub fn chroma_output(&self) -> Option<std::borrow::Cow<'_, [u16]>> {
         let chroma = self.chroma()?;
         Some(
-            if self.color_framed && ntsc_second_color_frame(self.field_number) {
+            if self.color_framed && ntsc_second_color_frame(self.info.seq_no) {
                 chroma.iter().copied().map(chroma::invert).collect()
             } else {
                 std::borrow::Cow::Borrowed(chroma)
@@ -1193,16 +1176,6 @@ fn downscale_raw_vec(
     Ok(dsout)
 }
 
-/// Map a (first-field, second-phase) pair to the 1..=4 fieldPhaseID metadata value.
-fn field_phase_id(first_field: bool, second_phase: bool) -> i64 {
-    match (first_field, second_phase) {
-        (true, true) => 1,
-        (false, false) => 2,
-        (true, false) => 3,
-        (false, true) => 4,
-    }
-}
-
 // Color burst window in output samples from the line start, padded a little
 // past the nominal burst, used by both the burst lock and the chroma
 // upconvert. Its length is a whole number of subcarrier cycles (four samples
@@ -1330,8 +1303,6 @@ impl Decoder {
                     .as_ref()
                     .filter(|field_obj| field_obj.valid)
                     .map(|field_obj| PrevFieldState {
-                        readloc: field_obj.readloc,
-                        field_number: field_obj.field_number,
                         burst_start_line: field_obj.burst_start_line(),
                     });
                 let pending_frac = self.fdoffset_frac + decoded_offset.unwrap_or(0.0);
@@ -1530,14 +1501,6 @@ impl Decoder {
                 let disk_loc = roundfloat(file_loc as f64 / bytes_per_field as f64, 1);
 
                 let color_framed = color_framed(&self.spec, &field_obj);
-                let field_phase_id = field_obj.field_phase_id.unwrap_or_else(|| {
-                    sequence_field_phase_id(
-                        is_first_field,
-                        color_framed,
-                        seq_no,
-                        field_obj.field_number,
-                    )
-                });
                 let mut write_field = true;
 
                 // Dropout detection.
@@ -1621,6 +1584,9 @@ impl Decoder {
                     }
                 }
 
+                let field_phase_id = field_obj
+                    .field_phase_id
+                    .unwrap_or_else(|| sequence_field_phase_id(is_first_field, seq_no));
                 let info = FieldInfoEntry {
                     is_first_field,
                     detected_first_field,

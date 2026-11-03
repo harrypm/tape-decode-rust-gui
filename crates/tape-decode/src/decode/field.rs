@@ -735,7 +735,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         validpulses: Vec::new(),
         is_first_field: None,
         vblank_next: None,
-        field_number: 0,
         linelocs: None,
         lineoffset: 0,
         linecount: None,
@@ -749,15 +748,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         chroma_heterodyne: None,
         wow_analysis: None,
     };
-    if let Some(prevfield) = &pending_field.prevfield {
-        if pending_field.readloc > prevfield.readloc {
-            pending_field.field_number = prevfield.field_number + 1;
-        } else {
-            pending_field.field_number = prevfield.field_number;
-            tracing::debug!("readloc loc didn't advance.");
-        }
-    }
-
     let do_level_detect = !spec.rf_saved_levels || inter_field_state.compute_linelocs_issues;
     let mut res = try_get_pulses(&mut pending_field, spec, inter_field_state, do_level_detect);
     let needs_level_retry = res.as_ref().is_none_or(|res| res.first_hsync.is_none());

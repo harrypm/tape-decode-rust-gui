@@ -650,11 +650,6 @@ struct MtOrchestrator<'a> {
     next_unassigned_needed: u64,
     /// Fields committed to the output so far (the running global sequence count).
     committed: usize,
-    /// Offset from the authoritative worker's field count to the global one (the
-    /// count a serial decode would have reached), re-derived at every stitch.
-    field_number_delta: i64,
-    /// `field_number_delta` of the next worker, from its latest matched field.
-    next_field_number_delta: i64,
     /// Decoder metadata to embed in the JSON sidecar while decoding runs, taken
     /// from the first worker to report it (it is the same for every worker). The
     /// final, authoritative metadata is written from `final_metadata` at close.
@@ -750,20 +745,10 @@ impl<'a> MtOrchestrator<'a> {
         Ok(())
     }
 
-    /// Global field count of one of the authoritative worker's fields. A field
-    /// that restarted its worker's count (after an invalid field) restarts the
-    /// global one too, as a serial decode would have.
-    fn global_field_number(&mut self, field: &WriteableField) -> i64 {
-        if field.field_number_reset {
-            self.field_number_delta = 0;
-        }
-        field.field_number + self.field_number_delta
-    }
-
     /// Renumber a field's sequence-derived metadata against its global position
     /// and write it out.
-    fn commit(&mut self, mut field: WriteableField, field_number: i64) -> Result<()> {
-        field.set_sequence_position(self.committed + 1, field_number);
+    fn commit(&mut self, mut field: WriteableField) -> Result<()> {
+        field.set_sequence_position(self.committed + 1);
         if self.metadata.is_none() {
             self.metadata = self
                 .pool
@@ -783,15 +768,9 @@ impl<'a> MtOrchestrator<'a> {
     }
 
     /// Advance `next`'s buffer to the field aligned with `file_loc` and report
-    /// whether it matches `current_field` (whose global field count is
-    /// `field_number`). The aligned field is consumed so the later decoder, if
-    /// it takes over, resumes immediately after it.
-    fn compare_with_next(
-        &mut self,
-        next_seg: u64,
-        current_field: &WriteableField,
-        field_number: i64,
-    ) -> bool {
+    /// whether it matches `current_field`. The aligned field is consumed so
+    /// the later decoder, if it takes over, resumes immediately after it.
+    fn compare_with_next(&mut self, next_seg: u64, current_field: &WriteableField) -> bool {
         let tol = self.spf / 2;
         let file_loc = current_field.info.file_loc;
         let aligned = {
@@ -812,18 +791,12 @@ impl<'a> MtOrchestrator<'a> {
                 _ => return false,
             }
         };
-        let matched = fields_match(
+        fields_match(
             current_field,
             &aligned,
             &self.mt,
             !self.spec.chroma_phase_continuous(),
-        );
-        if matched {
-            // The aligned field is the same field, so this maps `next`'s count
-            // onto the global one.
-            self.next_field_number_delta = field_number - aligned.field_number;
-        }
-        matched
+        )
     }
 
     /// Run the decode, always tearing down workers before returning (even on
@@ -861,8 +834,7 @@ impl<'a> MtOrchestrator<'a> {
             // authority; drain it to end of input.
             if !self.pool.contains_key(&next_seg) {
                 while let Some(field) = self.pool.get_mut(&current_seg).unwrap().pop() {
-                    let field_number = self.global_field_number(&field);
-                    self.commit(field, field_number)?;
+                    self.commit(field)?;
                 }
                 self.absorb_outcome(current_seg)?;
                 return Ok(());
@@ -884,8 +856,7 @@ impl<'a> MtOrchestrator<'a> {
                     break;
                 }
                 let field = self.pool.get_mut(&current_seg).unwrap().pop().unwrap();
-                let field_number = self.global_field_number(&field);
-                self.commit(field, field_number)?;
+                self.commit(field)?;
             }
 
             // Phase 2: in the overlap window, commit the current decoder's fields
@@ -905,9 +876,8 @@ impl<'a> MtOrchestrator<'a> {
                     break;
                 }
                 let field = self.pool.get_mut(&current_seg).unwrap().pop().unwrap();
-                let field_number = self.global_field_number(&field);
-                let matched = self.compare_with_next(next_seg, &field, field_number);
-                self.commit(field, field_number)?;
+                let matched = self.compare_with_next(next_seg, &field);
+                self.commit(field)?;
                 if matched {
                     run += 1;
                     if run >= self.mt.overlap_count {
@@ -926,7 +896,6 @@ impl<'a> MtOrchestrator<'a> {
                 self.shutdown_worker(current_seg);
                 current_seg = next_seg;
                 next_seg += 1;
-                self.field_number_delta = self.next_field_number_delta;
                 self.update_drop_threshold();
             } else {
                 // The whole overlap disagreed: the earlier decoder stays
@@ -1004,8 +973,6 @@ pub fn decode_all_mt(
         next_unassigned: 0,
         next_unassigned_needed,
         committed: 0,
-        field_number_delta: 0,
-        next_field_number_delta: 0,
         metadata: None,
         final_metadata: None,
     };
