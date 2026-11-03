@@ -11,7 +11,7 @@ const NTSC_TARGET_BURST_PHASE: f32 = -33.0;
 
 /// Mirror an output sample around the zero level.
 pub(super) fn invert(sample: u16) -> u16 {
-    (2 * ZERO_LEVEL).wrapping_sub(sample)
+    (2 * ZERO_LEVEL).saturating_sub(sample)
 }
 
 /// Whether the field's chroma follows the NTSC color-frame sequence: every
@@ -24,11 +24,11 @@ pub(super) fn color_framed(spec: &DecoderSpec, field: &DecodedField) -> bool {
         && field.burst_start_line() != -1
 }
 
-/// Signed chroma to the unsigned 16-bit output.
+/// Signed chroma to the unsigned 16-bit output, clamped to its range.
 fn encode_chroma(chroma: &[f32]) -> Vec<u16> {
     chroma
         .iter()
-        .map(|&sample| (sample + SIGNED_SAMPLE_MAX) as i64 as u16)
+        .map(|&sample| (sample + SIGNED_SAMPLE_MAX).round().clamp(0.0, f32::from(u16::MAX)) as u16)
         .collect()
 }
 
