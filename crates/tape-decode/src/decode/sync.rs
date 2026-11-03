@@ -1671,25 +1671,77 @@ fn crossing(i: usize, y0: f32, y1: f32) -> f64 {
     i as f64 + f64::from(y0 / (y0 - y1))
 }
 
+/// Speed tolerance of the line spacing, in one direction.
+const SYNC_SPACING_TOLERANCE: f64 = 0.15;
+/// Lines within which pulses on the hsync grid support each other; more
+/// than a vertical interval, so the hsyncs on both sides of one do.
+const GRID_REACH_LINES: usize = 16;
+/// Pulses whose spacing fits fewer pulses than this (themselves included)
+/// are not on a grid.
+const MIN_GRID_LENGTH: usize = 8;
+/// Tolerance of a pulse's position on the grid, in lines.
+const GRID_JITTER_LINES: f64 = 0.05;
+
+/// The line length the hsync candidates at `falls` (ascending) run at: the
+/// median spacing of consecutive candidates within the speed tolerance of
+/// the nominal `line_len`, or the nominal one without any.
+fn measured_line_len(falls: &[usize], line_len: f64) -> f64 {
+    let tolerance = line_len * SYNC_SPACING_TOLERANCE;
+    let mut spacings: Vec<f64> = falls
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]) as f64)
+        .filter(|spacing| (spacing - line_len).abs() <= tolerance)
+        .collect();
+    if spacings.is_empty() {
+        line_len
+    } else {
+        median_from_values(&mut spacings)
+    }
+}
+
+/// Whether `distance` is within `jitter` of a multiple of `step` from
+/// `min_multiple` to `max_multiple`.
+fn on_grid(distance: f64, step: f64, min_multiple: f64, max_multiple: f64, jitter: f64) -> bool {
+    let multiple = (distance / step).round_ties_even();
+    (min_multiple..=max_multiple).contains(&multiple) && (distance - multiple * step).abs() < jitter
+}
+
+/// How many candidates at `falls` (ascending) the grid of each one fits:
+/// itself and those within `GRID_REACH_LINES` lines of it at whole-line
+/// spacings of `line_len`.
+fn grid_support(falls: &[usize], line_len: f64) -> Vec<usize> {
+    let jitter = line_len * GRID_JITTER_LINES;
+    let reach = line_len * GRID_REACH_LINES as f64 + jitter;
+    let mut support = vec![1usize; falls.len()];
+    for i in 0..falls.len() {
+        for j in i + 1..falls.len() {
+            let distance = (falls[j] - falls[i]) as f64;
+            if distance > reach {
+                break;
+            }
+            if on_grid(distance, line_len, 1.0, GRID_REACH_LINES as f64, jitter) {
+                support[i] += 1;
+                support[j] += 1;
+            }
+        }
+    }
+    support
+}
+
 /// Locates the sync pulses of a field by slicing the smoothed `demod_05`
 /// between the sync tip and blanking levels.
 ///
 /// The levels are estimated first (`estimates`, else from the field's
-/// percentiles), measured on the pulses of hsync width whose spacing fits
-/// enough other such pulses, and the field is then sliced halfway between the
-/// measured levels keeping only the pulses that fit the spacing of those, so
-/// the pulses of another recording across a gap or an overlap are dropped.
+/// percentiles) and measured on the pulses of hsync width whose spacing fits
+/// enough other such pulses; the field is then sliced halfway between the
+/// measured levels, keeping the pulses at half-line spacings from the
+/// hsync-width pulses that fit each other's grid, so the pulses of another
+/// recording across a gap or an overlap are dropped.
 fn find_sync_pulses(
     spec: &DecoderSpec,
     field: &DecodedField,
     estimates: Option<(f32, f32)>,
 ) -> SyncPulses {
-    // Speed tolerance of the line spacing, in one direction.
-    const SYNC_SPACING_TOLERANCE: f64 = 0.15;
-    // Pulses whose spacing fits fewer pulses than this (themselves included)
-    // are not on a grid.
-    const MIN_GRID_LENGTH: usize = 8;
-
     let to_inpx = |us: f64| usectoinpx(spec, us);
     let hsync_len = to_inpx(spec.sys_hsync_pulse_us);
     // The porch between the sync pulse and the active video, less 2 us of
@@ -1704,14 +1756,14 @@ fn find_sync_pulses(
 
     let (sync_est, blank_est) = estimates.unwrap_or_else(|| level_estimates(&smoothed));
 
-    let width_range = (hsync_len * 0.6, hsync_len * 1.4);
+    let hsync_width = |&(fall, rise): &(usize, usize)| {
+        let width = (rise - fall) as f64;
+        width > hsync_len * 0.6 && width < hsync_len * 1.4
+    };
     let mut candidates: Vec<HsyncCandidate> =
         sliced_pulses(&smoothed, (sync_est + blank_est) / 2.0)
             .into_iter()
-            .filter(|&(fall, rise)| {
-                let width = (rise - fall) as f64;
-                width > width_range.0 && width < width_range.1
-            })
+            .filter(hsync_width)
             .map(|(fall, rise)| HsyncCandidate {
                 fall,
                 sync_level: window_median(&smoothed, (fall + rise) / 2).unwrap_or(sync_est),
@@ -1729,29 +1781,11 @@ fn find_sync_pulses(
         candidates.retain(|c| (c.sync_level - median).abs() <= 2.5 * mad);
     }
 
-    // Two falling edges fit when their distance, modulo the stretched line
-    // length, lands within the jitter window at either end.
-    let eff_line_len = line_len * (1.0 + SYNC_SPACING_TOLERANCE);
-    let inv_eff_line_len = 1.0 / eff_line_len;
-    let jitter = line_len * 0.1;
-    let on_grid = |a: usize, b: usize| {
-        let distance = a.abs_diff(b) as f64;
-        let rem = distance - (distance * inv_eff_line_len).floor() * eff_line_len;
-        rem < jitter || rem > eff_line_len - jitter
-    };
-    let mut support = vec![1usize; candidates.len()];
-    for i in 0..candidates.len() {
-        for j in i + 1..candidates.len() {
-            if on_grid(candidates[i].fall, candidates[j].fall) {
-                support[i] += 1;
-                support[j] += 1;
-            }
-        }
-    }
+    let falls: Vec<usize> = candidates.iter().map(|c| c.fall).collect();
     let grid: Vec<HsyncCandidate> = candidates
         .iter()
-        .zip(&support)
-        .filter(|&(_, &count)| count >= MIN_GRID_LENGTH)
+        .zip(grid_support(&falls, measured_line_len(&falls, line_len)))
+        .filter(|&(_, count)| count >= MIN_GRID_LENGTH)
         .map(|(&candidate, _)| candidate)
         .collect();
 
@@ -1764,11 +1798,40 @@ fn find_sync_pulses(
         (mean(|c| c.sync_level), mean(|c| c.porch_level))
     };
 
+    // Every sync pulse sits at a half-line spacing from the hsyncs around
+    // it: a pulse is kept when an hsync-width pulse that fits the grid of
+    // the others lies within reach at such a spacing.
     let midpoint = (sync_level + blank_level) / 2.0;
-    let pulses: Vec<PulseSample> = sliced_pulses(&smoothed, midpoint)
-        .into_iter()
-        .filter(|&(fall, _)| grid.iter().any(|c| on_grid(fall, c.fall)))
-        .map(|(fall, rise)| {
+    let sliced = sliced_pulses(&smoothed, midpoint);
+    let hsync_falls: Vec<usize> = sliced
+        .iter()
+        .filter(|pulse| hsync_width(pulse))
+        .map(|&(fall, _)| fall)
+        .collect();
+    let grid_line_len = measured_line_len(&hsync_falls, line_len);
+    let grid_falls: Vec<usize> = hsync_falls
+        .iter()
+        .zip(grid_support(&hsync_falls, grid_line_len))
+        .filter(|&(_, count)| count >= MIN_GRID_LENGTH)
+        .map(|(&fall, _)| fall)
+        .collect();
+    let half_line = grid_line_len / 2.0;
+    let half_lines_reach = 2.0 * GRID_REACH_LINES as f64;
+    let jitter = grid_line_len * GRID_JITTER_LINES;
+    let pulses: Vec<PulseSample> = sliced
+        .iter()
+        .filter(|&&(fall, _)| {
+            grid_falls.iter().any(|&grid_fall| {
+                on_grid(
+                    fall.abs_diff(grid_fall) as f64,
+                    half_line,
+                    0.0,
+                    half_lines_reach,
+                    jitter,
+                )
+            })
+        })
+        .map(|&(fall, rise)| {
             let edge = |i: usize| crossing(i, smoothed[i] - midpoint, smoothed[i + 1] - midpoint);
             let start = edge(fall);
             let len = edge(rise) - start;
@@ -1957,5 +2020,42 @@ mod tests {
         .expect("the broad pulses and the hsyncs before them locate line 0");
         assert_eq!(result.line0, 14.0 * LINE_LEN);
         assert_eq!(result.first_field, 1);
+    }
+
+    #[test]
+    fn grid_support_fits_the_hsyncs_and_not_random_pulses() {
+        const LINE_LEN: f64 = 2560.0;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut random = move |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % bound
+        };
+        // 300 hsyncs within six samples of the grid and 30 pulses at least a
+        // tenth of a line off it.
+        let mut pulses: Vec<(usize, bool)> = (0..300)
+            .map(|line| (line * LINE_LEN as usize + random(7), true))
+            .collect();
+        pulses.extend((0..30).map(|_| {
+            let line = random(299) * LINE_LEN as usize;
+            (
+                line + LINE_LEN as usize / 10 + random(LINE_LEN as usize * 4 / 5),
+                false,
+            )
+        }));
+        pulses.sort_unstable();
+        let falls: Vec<usize> = pulses.iter().map(|&(fall, _)| fall).collect();
+
+        // The nominal line length is a tenth off the one the pulses run at.
+        let line_len = measured_line_len(&falls, LINE_LEN * 1.1);
+        assert!((line_len - LINE_LEN).abs() <= 6.0, "measured {line_len}");
+        for (&(fall, hsync), &count) in pulses.iter().zip(&grid_support(&falls, line_len)) {
+            assert_eq!(
+                count >= MIN_GRID_LENGTH,
+                hsync,
+                "pulse at {fall} has support {count}"
+            );
+        }
     }
 }
