@@ -605,6 +605,8 @@ pub struct FieldInfoEntry {
     #[serde(default)]
     pub burst_start_line: i64,
     pub sync_conf: i64,
+    /// 1-based position in the output, assigned when the field is placed in
+    /// the sequence (see [`WriteableField::set_sequence_position`]).
     pub seq_no: usize,
     pub disk_loc: f32,
     pub file_loc: u64,
@@ -919,14 +921,15 @@ impl WriteableField {
         }
     }
 
-    /// Renumber the field for its position in the output and re-derive the
-    /// metadata that follows from it. Multithreaded stitching uses this to map
-    /// a worker's local numbering onto the global sequence.
+    /// Number the field for its position in the output and derive the
+    /// metadata that follows from it: the decoder numbers each field as it
+    /// emits it, and the multithreaded stitch renumbers a worker's fields
+    /// onto the global sequence.
     pub fn set_sequence_position(&mut self, seq_no: usize) {
         self.info.seq_no = seq_no;
-        if self.field_phase_id_raw.is_none() {
-            self.info.field_phase_id = sequence_field_phase_id(self.info.is_first_field, seq_no);
-        }
+        self.info.field_phase_id = self
+            .field_phase_id_raw
+            .unwrap_or_else(|| sequence_field_phase_id(self.info.is_first_field, seq_no));
     }
 
     #[inline]
@@ -1494,9 +1497,9 @@ impl Decoder {
                     self.order_inverted = false;
                 }
                 let mut is_first_field = detected_first_field ^ self.order_inverted;
-                let mut is_duplicate_field = false;
+                // A field of the other order written before this one.
+                let mut duplicate: Option<WriteableField> = None;
                 let mut sync_conf = sync_confidence_from_linelocs(&field_obj);
-                let seq_no = self.output.len + 1;
                 let file_loc = field_obj.output_start_sample().round() as u64;
                 let disk_loc = roundfloat(file_loc as f64 / bytes_per_field as f64, 1);
 
@@ -1575,8 +1578,12 @@ impl Decoder {
                             self.order_inverted = !self.order_inverted;
                             is_first_field = !prevfi.is_first_field;
                         } else if self.duplicate_prev_field {
-                            tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), duplicating the last field to compensate...");
-                            is_duplicate_field = true;
+                            duplicate = self.lastvalidfield[usize::from(!is_first_field)].clone();
+                            if duplicate.is_some() {
+                                tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), duplicating the last field of the other order to compensate...");
+                            } else {
+                                tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), no field of the other order to duplicate, writing the field as it is");
+                            }
                         } else {
                             tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), dropping the last field to compensate...");
                             write_field = false;
@@ -1584,27 +1591,22 @@ impl Decoder {
                     }
                 }
 
-                let field_phase_id = field_obj
-                    .field_phase_id
-                    .unwrap_or_else(|| sequence_field_phase_id(is_first_field, seq_no));
                 let info = FieldInfoEntry {
                     is_first_field,
                     detected_first_field,
-                    is_duplicate_field,
+                    is_duplicate_field: duplicate.is_some(),
                     burst_start_line: field_obj.burst_start_line(),
                     sync_conf,
-                    seq_no,
+                    // Numbered when emitted.
+                    seq_no: 0,
                     disk_loc: disk_loc as f32,
                     file_loc,
-                    field_phase_id,
+                    field_phase_id: 0,
                     vits_metrics,
                     drop_outs,
                     decode_faults: (decode_faults != 0).then_some(decode_faults),
                 };
 
-                // Slot fields by their detected order so the duplicate path can pair
-                // the current field with the most recent opposite-order field.
-                let idx = usize::from(field_obj.is_first_field.unwrap_or(false));
                 if write_field {
                     let dataset = WriteableField::new(
                         info,
@@ -1615,23 +1617,25 @@ impl Decoder {
                         &field_obj,
                         color_framed,
                     );
-                    self.lastvalidfield[idx] = Some(dataset.clone());
-                    if is_duplicate_field {
-                        if let Some(other) = self.lastvalidfield[1 - idx].clone() {
-                            self.output.push(OutputFieldOrder::of(&other.info));
-                            output.push(other);
-                            self.output.push(OutputFieldOrder::of(&dataset.info));
-                            output.push(dataset);
-                        }
-                    } else {
-                        self.output.push(OutputFieldOrder::of(&dataset.info));
-                        output.push(dataset);
+                    // Kept by written order: the duplicate written before a
+                    // repeated field is the latest field of the other order.
+                    self.lastvalidfield[usize::from(is_first_field)] = Some(dataset.clone());
+                    if let Some(other) = duplicate {
+                        self.emit(&mut output, other);
                     }
+                    self.emit(&mut output, dataset);
                 }
             }
         }
 
         Ok((self.fdoffset, output))
+    }
+
+    /// Place `field` at the next position of the output sequence.
+    fn emit(&mut self, output: &mut Vec<WriteableField>, mut field: WriteableField) {
+        field.set_sequence_position(self.output.len + 1);
+        self.output.push(OutputFieldOrder::of(&field.info));
+        output.push(field);
     }
 
     /// The ME-SECAM carrier servo's current estimate of the conversion LO
