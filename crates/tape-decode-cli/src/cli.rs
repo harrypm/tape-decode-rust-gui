@@ -274,7 +274,7 @@ struct DecodeArgs {
     /// Hysteresis ratio used by RF dropout detection.
     #[arg(long, default_value_t = DEFAULT_HYSTERESIS)]
     dod_hysteresis: f32,
-    /// Smoothing window, in lines, for wow level adjustment.
+    /// Smoothing window, in lines, for the wow level adjustment, by default half the frame's lines; 0 disables the smoothing.
     #[arg(long)]
     wow_level_adjust_smoothing: Option<f32>,
     /// Interpolation method for wow correction.

@@ -298,6 +298,9 @@ impl DecoderSpec {
         let rf_disable_burst_hsync =
             request.rf_disable_burst_hsync || rf_color_system == ColorSystem::Secam;
         let rf_fallback_vsync = request.fallback_vsync;
+        if request.y_comb.is_nan() || request.y_comb < 0.0 {
+            bail!("--y-comb must be a non-negative IRE clamp");
+        }
         let rf_y_comb = request.y_comb * sys_params.hz_ire;
 
         // Filter for rf before demodulating.
@@ -500,6 +503,14 @@ impl DecoderSpec {
 
         // --- Build luma notch filter for the RF/video path ---
         let (video_notch_filter, chroma_filter_video_notch) = if let Some(notch) = &request.notch {
+            if !(0.0 < notch.freq && notch.freq < freq_half) {
+                bail!(
+                    "--notch must be above 0 and below the input's Nyquist frequency, {freq_half} MHz"
+                );
+            }
+            if notch.q.is_nan() || notch.q <= 0.0 {
+                bail!("--notch-q must be positive");
+            }
             let video_notch_raw = iirnotch(notch.freq / freq_half, notch.q)?;
             let video_notch_ba = ba_to_vec(video_notch_raw);
             let video_notch_filter = abs_complex_owned(filtfft(
@@ -637,6 +648,19 @@ impl DecoderSpec {
         let wow_level_adjust_smoothing = request
             .wow_level_adjust_smoothing
             .unwrap_or(sys_params.frame_lines.line_count() as f32 / 2.0);
+        // The level smoothing is a first-order IIR over the window in output
+        // samples, stable only for a window of at least one sample; 0 disables
+        // it.
+        let smoothing_window_samples =
+            f64::from(wow_level_adjust_smoothing) * sys_params.outlinelen as f64;
+        if wow_level_adjust_smoothing.is_nan()
+            || (wow_level_adjust_smoothing != 0.0 && smoothing_window_samples < 1.0)
+        {
+            bail!(
+                "--wow-level-adjust-smoothing must be 0 (no smoothing) or at least one output sample, 1/{} lines",
+                sys_params.outlinelen
+            );
+        }
 
         Ok(Self {
             field_order_action: request.field_order_action,
@@ -878,7 +902,7 @@ fn gen_wave_at_frequency(
 }
 
 fn iirnotch(w0: f64, q: f64) -> Result<([f64; 3], [f64; 3])> {
-    if !(0.0..1.0).contains(&w0) {
+    if !(0.0 < w0 && w0 < 1.0) {
         bail!("notch frequency must be greater than 0 and less than Nyquist");
     }
     if q <= 0.0 {
