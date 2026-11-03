@@ -162,7 +162,7 @@
       "video_lpf_freq": 5000000.0,
       "video_rf_peak": {
         "bandwidth": 20000000.0,
-        "freq": 6.7
+        "freq": 6700000.0
       }
     }
   },
@@ -827,7 +827,7 @@
       "video_lpf_supergauss": false,
       "video_rf_peak": {
         "bandwidth": 12000000.0,
-        "freq": 4.8,
+        "freq": 4800000.0,
         "gain": 2.0
       }
     }
