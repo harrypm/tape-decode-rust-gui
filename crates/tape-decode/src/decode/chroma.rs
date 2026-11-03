@@ -88,24 +88,16 @@ fn chroma_automatic_gain(
         })
         .collect();
 
-    let len = chroma.len();
-    let line_start = |entry: &PhaseSequenceEntry| line_bounds(field, len, entry.line_number).0;
     let mut noise_sum = 0.0f32;
     let mut noise_lines = 0usize;
     for (i, entry) in phase_sequence.iter().enumerate() {
-        let start = line_start(entry);
-        let (end, gain_end) = match phase_sequence.get(i + 1) {
-            Some(next) => (line_start(next), smoothed_gains[i + 1]),
-            None => (len, smoothed_gains[i]),
-        };
-        if start >= end {
-            continue;
-        }
+        let (start, end) = line_bounds(field, entry.line_number);
         if !has_color(entry) {
             chroma[start..end].fill(0.0);
             continue;
         }
         let gain_start = smoothed_gains[i];
+        let gain_end = smoothed_gains.get(i + 1).copied().unwrap_or(gain_start);
         let gain_step = (gain_end - gain_start) / (end - start) as f32;
         for (j, sample) in chroma[start..end].iter_mut().enumerate() {
             *sample *= gain_start + j as f32 * gain_step;
@@ -185,18 +177,10 @@ fn chroma_transient_improvement(
     }
 }
 
-/// Output sample range of a field line, clamped to the buffer: empty for
-/// the lines before the first output line, which the PAL burst lock
-/// measures too.
-fn line_bounds(field: &DecodedField, len: usize, line_number: usize) -> (usize, usize) {
-    let lineoffset = field.lineoffset + 1;
-    let linestart = (line_number as isize - lineoffset as isize) * field.outlinelen as isize;
-    let lineend = linestart + field.outlinelen as isize;
-    let len = len as isize;
-    (
-        linestart.clamp(0, len) as usize,
-        lineend.clamp(0, len) as usize,
-    )
+/// Output sample range of a field line.
+fn line_bounds(field: &DecodedField, line_number: usize) -> (usize, usize) {
+    let start = field.output_row(line_number) * field.outlinelen;
+    (start, start + field.outlinelen)
 }
 
 fn upconvert_chroma(
@@ -208,10 +192,7 @@ fn upconvert_chroma(
     let mut uphet = vec![0.0f32; chroma.len()];
 
     for entry in phase_sequence {
-        let (start, end) = line_bounds(field, chroma.len(), entry.line_number);
-        if start >= end {
-            continue;
-        }
+        let (start, end) = line_bounds(field, entry.line_number);
 
         // Pair the line as slices so the loop carries no per-sample bounds
         // checks and vectorizes.
@@ -251,10 +232,7 @@ fn upconvert_chroma_phase_comp(
     let het_hz = |entry: &PhaseSequenceEntry| entry.burst.frequency / fsc_hz * color_under;
 
     for (idx, entry) in phase_sequence.iter().enumerate() {
-        let (start, end) = line_bounds(field, chroma.len(), entry.line_number);
-        if start >= end {
-            continue;
-        }
+        let (start, end) = line_bounds(field, entry.line_number);
 
         let het_hz_current = het_hz(entry);
         let het_hz_next = phase_sequence.get(idx + 1).map_or(het_hz_current, het_hz);
@@ -281,12 +259,9 @@ fn upconvert_chroma_phase_comp(
     }
 }
 
-fn burst_deemphasis(chroma: &mut [f32], field: &DecodedField, burstarea_end: usize) {
-    let lineoffset = field.lineoffset + 1;
-    for line in lineoffset..field.outlinecount + lineoffset {
-        let linestart = (line - lineoffset) * field.outlinelen;
-        let lineend = linestart + field.outlinelen;
-        for sample in &mut chroma[linestart + burstarea_end + 4..lineend] {
+fn burst_deemphasis(chroma: &mut [f32], outlinelen: usize, burstarea_end: usize) {
+    for line in chroma.chunks_exact_mut(outlinelen) {
+        for sample in &mut line[burstarea_end + 4..] {
             *sample *= 2.0;
         }
     }
@@ -451,7 +426,7 @@ fn process_chroma_internal(
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
-        burst_deemphasis(&mut chroma, field, burst_area(spec).1)
+        burst_deemphasis(&mut chroma, field.outlinelen, burst_area(spec).1)
     }
 
     let phase_sequence = &field
@@ -518,9 +493,8 @@ fn process_chroma_internal(
     tracing::debug!(noise_floor, "chroma noise floor");
 
     if spec.cti_mix != 0.0 {
-        let first_line = ((field.lineoffset + 1) * field.outlinelen).min(uphet.len());
         chroma_transient_improvement(
-            &mut uphet[first_line..],
+            &mut uphet,
             field.outlinelen,
             noise_floor,
             spec.cti_width,

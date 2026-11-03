@@ -949,6 +949,19 @@ impl DecodedField {
             .as_ref()
             .map_or(0, |lock| lock.burst_start_line)
     }
+
+    /// Field line numbers of the output rows, in order.
+    fn output_lines(&self) -> std::ops::Range<usize> {
+        let first = self.lineoffset + 1;
+        first..first + self.outlinecount
+    }
+
+    /// Output row of a field line.
+    fn output_row(&self, line_number: usize) -> usize {
+        line_number
+            .checked_sub(self.lineoffset + 1)
+            .expect("the line lies in the output rows")
+    }
 }
 
 struct DecodeFieldResult {
@@ -1525,9 +1538,10 @@ impl Decoder {
                 if let Some(mut field_obj) = field.take() {
                     if field_obj.valid {
                         // Predecode populated the wow-analysis cache before
-                        // refining linelocs/lineoffset, so it is stale now.
-                        // Drop it; the luma pass below recomputes with the final
-                        // geometry and the chroma pass then reuses that.
+                        // the burst refinement of the line locations, so it is
+                        // stale now. Drop it; the luma pass below recomputes
+                        // with the final ones and the chroma pass then reuses
+                        // that.
                         field_obj.wow_analysis = None;
                         let mut luma = downscale_raw_vec(
                             &mut field_obj,

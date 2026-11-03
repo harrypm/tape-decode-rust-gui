@@ -506,7 +506,10 @@ pub(super) fn process_chroma(
         .sys_burst_abs_ref
         .expect("chroma output without burst_abs_ref");
     let rest_amplitude = burst_abs_ref * 2f32.sqrt();
-    let first_line = STARTING_LINE.max(field.burst_start_line().max(0) as usize);
+    let first_line = match field.burst_start_line() {
+        line if line > 0 => STARTING_LINE.max(field.output_row(line as usize)),
+        _ => STARTING_LINE,
+    };
     let porch_end_px = (spec.sys_active_video_us[0] * spec.sys_outfreq) as usize;
     // The record chain's blanking-edge transient sets in slightly before the
     // nominal end of active video (the source's own blanking edge lands

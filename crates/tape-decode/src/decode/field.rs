@@ -424,6 +424,7 @@ fn rotated_phase(current_phase: usize, track_rotation: i64) -> usize {
 
 #[allow(clippy::too_many_arguments)]
 fn get_upconverted_burst(
+    field: &DecodedField,
     chroma: &[f32],
     chroma_heterodyne: &[Vec<f32>],
     chroma_filter: &[Sos<f32>],
@@ -432,14 +433,12 @@ fn get_upconverted_burst(
     burst_wave: &[(f32, f32)],
     fsc_hz: f64,
     line_number: usize,
-    lineoffset: usize,
-    outwidth: usize,
 ) -> BurstMeasurement {
     // Upconvert and filter from the line start to as far past the burst as
     // the burst sits from the line start, so the filter transients fall
     // outside the kept window.
     let (burst_start, burst_end) = burst_area;
-    let line_start = (line_number - lineoffset) * outwidth;
+    let line_start = field.output_row(line_number) * field.outlinelen;
     let window_end = line_start + burst_end + burst_start;
     let upconverted = chroma[line_start..window_end]
         .iter()
@@ -471,9 +470,8 @@ fn get_phase_sequence(
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
     let do_phase_rotation_check = spec.rf_detect_chroma_track_phase && chroma_rotation.is_some();
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
-    let lineoffset = field.lineoffset + 1;
-    let last_line = field.outlinecount + lineoffset;
-    let rotation_check_start_line = lineoffset + field.outlinecount - BURST_CHECK_SKIP_LINES;
+    let output_lines = field.output_lines();
+    let rotation_check_start_line = output_lines.end - BURST_CHECK_SKIP_LINES;
     let starting_index = chroma_rotation_starting_index.unwrap_or(0);
     let mut chroma_rotation_index;
     let mut track_rotation;
@@ -491,6 +489,7 @@ fn get_phase_sequence(
 
     let upconvert = |phase: usize, linenumber: usize| {
         get_upconverted_burst(
+            field,
             chroma,
             chroma_heterodyne,
             &spec.chroma_filter_final,
@@ -499,18 +498,15 @@ fn get_phase_sequence(
             &spec.rf_fsc_wave,
             spec.sys_fsc_mhz * 1e6,
             linenumber,
-            lineoffset,
-            field.outlinelen,
         )
     };
 
-    let mut phase_sequence: Vec<PhaseSequenceEntry> =
-        Vec::with_capacity(last_line.saturating_sub(lineoffset));
+    let mut phase_sequence: Vec<PhaseSequenceEntry> = Vec::with_capacity(output_lines.len());
     let mut current_phase = 0usize;
     // The next line's burst, when the rotation check already measured it.
     let mut next: Option<(usize, BurstMeasurement)> = None;
 
-    for linenumber in lineoffset..last_line {
+    for linenumber in output_lines.clone() {
         let current_burst = if let Some((phase, burst)) = next.take() {
             current_phase = phase;
             burst
@@ -521,7 +517,7 @@ fn get_phase_sequence(
 
         if do_phase_rotation_check
             && linenumber >= rotation_check_start_line
-            && linenumber + 1 < last_line
+            && linenumber + 1 < output_lines.end
         {
             let next_phase = rotated_phase(current_phase, track_rotation);
             let next_burst = upconvert(next_phase, linenumber + 1);
@@ -581,8 +577,7 @@ fn get_phase_rotation_sequence(
     // 32768; a healthy burst measures a few times this.
     const BURST_MAGNITUDE_THRESHOLD: f32 = 2.5e4 / 32768.0;
 
-    let lineoffset = field.lineoffset + 1;
-    let end = field.outlinecount + lineoffset;
+    let end = field.output_lines().end;
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     let (mut chroma_rotation_index, mut phase_sequence) = get_phase_sequence(
@@ -714,10 +709,14 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     // output samples, scaled back to the line's input length.
     let fsc_ratio = spec.sys_outfreq / spec.sys_fsc_mhz;
     let fsc_hz = spec.sys_fsc_mhz * 1e6;
-    // The first lines sit in vsync; after a mid-field burst turn-on only the
-    // lines with color are refined.
-    let start = lock.burst_start_line.max(9) as usize;
-    for entry in lock.phase_sequence.iter().skip(start) {
+    // The vertical interval's lines, up to 9, carry no burst; after a
+    // mid-field burst turn-on only the lines with color are refined.
+    let first_line = (lock.burst_start_line as usize).max(10);
+    for entry in lock
+        .phase_sequence
+        .iter()
+        .filter(|entry| entry.line_number >= first_line)
+    {
         let line = entry.line_number;
         let burst = entry.burst;
         let target = if line % 2 == 1 {
@@ -841,7 +840,26 @@ pub(crate) fn predecode_field_from_rawdecode(
 
     let next_field = if let Some(res) = res.as_ref() {
         let is_first_field = pending_field.is_first_field.unwrap_or(false);
-        pending_field.linecount = Some(if is_first_field { 263 } else { 262 });
+        let is_525 = spec.sys_frame_lines == LineSystem::Line525;
+        // The output geometry follows the line system and the field order.
+        if is_525 {
+            pending_field.linecount = Some(if is_first_field { 263 } else { 262 });
+            pending_field.out_scale =
+                Some(f64::from(0xC800 - 0x0400) / (100.0 - f64::from(spec.sys_vsync_ire)));
+        } else {
+            pending_field.linecount = Some(match (spec.sys_frame_lines, is_first_field) {
+                (LineSystem::Line405, true) => 203,
+                (LineSystem::Line405, false) => 202,
+                (LineSystem::Line819, true) => 410,
+                (LineSystem::Line819, false) => 409,
+                (_, true) => 312,
+                (_, false) => 313,
+            });
+            pending_field.lineoffset = if is_first_field { 2 } else { 3 };
+            pending_field.out_scale =
+                Some(f64::from(0xD300 - 0x0100) / (100.0 - f64::from(spec.sys_vsync_ire)));
+            pending_field.field_phase_id = Some(1);
+        }
 
         // Number of lines to actually process. This is set so that the entire following
         // VSYNC is processed.
@@ -928,61 +946,26 @@ pub(crate) fn predecode_field_from_rawdecode(
                 inter_field_state.compute_linelocs_issues = bad_lines >= 30;
                 inter_field_state.levels = levels;
 
-                if spec.sys_frame_lines != LineSystem::Line525 {
-                    pending_field.linelocs = Some(linelocs2_vec);
-                    pending_field.out_scale =
-                        Some(f64::from(0xD300 - 0x0100) / (100.0 - f64::from(spec.sys_vsync_ire)));
-                    if pending_field.valid {
-                        if spec.rf_write_chroma {
-                            apply_burst_lock(
-                                &mut pending_field,
-                                spec,
-                                inter_field_state,
-                                chroma_afc_state,
-                            )?;
-                            if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
-                                pending_field.linelocs = Some(refined);
-                            }
-                        }
-                        let is_first_field = pending_field.is_first_field.unwrap_or(false);
-                        let linecount = match (spec.sys_frame_lines, is_first_field) {
-                            (LineSystem::Line405, true) => 203,
-                            (LineSystem::Line405, false) => 202,
-                            (LineSystem::Line819, true) => 410,
-                            (LineSystem::Line819, false) => 409,
-                            (_, true) => 312,
-                            (_, false) => 313,
-                        };
-                        pending_field.linecount = Some(linecount);
-                        pending_field.lineoffset = if is_first_field { 2 } else { 3 };
-                        pending_field.field_phase_id = Some(1);
+                pending_field.linelocs = Some(linelocs2_vec);
+                if spec.rf_write_chroma {
+                    apply_burst_lock(
+                        &mut pending_field,
+                        spec,
+                        inter_field_state,
+                        chroma_afc_state,
+                    )?;
+                    if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
+                        pending_field.linelocs = Some(refined);
                     }
-                } else {
-                    pending_field.linelocs = Some(linelocs2_vec);
-                    pending_field.out_scale =
-                        Some(f64::from(0xC800 - 0x0400) / (100.0 - f64::from(spec.sys_vsync_ire)));
-                    if pending_field.valid {
-                        if spec.rf_write_chroma {
-                            apply_burst_lock(
-                                &mut pending_field,
-                                spec,
-                                inter_field_state,
-                                chroma_afc_state,
-                            )?;
-                            if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
-                                pending_field.linelocs = Some(refined);
-                            }
-                        }
-                        // Subcarrier phase offset that puts the downscaled image on
-                        // the I/Q colour axes (calibrated for ~147 degrees of output
-                        // burst phase).
-                        let fsc_phase_deg = 117.25;
-                        let shift = -((fsc_phase_deg / 360.0) / spec.sys_fsc_mhz * spec.freq);
-                        if let Some(linelocs) = pending_field.linelocs.as_mut() {
-                            for value in linelocs {
-                                *value += shift;
-                            }
-                        }
+                }
+                if is_525 {
+                    // Subcarrier phase offset that puts the downscaled image on
+                    // the I/Q colour axes (calibrated for ~147 degrees of output
+                    // burst phase).
+                    let fsc_phase_deg = 117.25;
+                    let shift = -((fsc_phase_deg / 360.0) / spec.sys_fsc_mhz * spec.freq);
+                    for value in pending_field.linelocs.iter_mut().flatten() {
+                        *value += shift;
                     }
                 }
                 NextField::At(nextfield)
