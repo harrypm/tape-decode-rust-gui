@@ -289,11 +289,11 @@ fn sosfiltfilt_order1(section: &Sos<f32>, input_array: &[f32]) -> Vec<f32> {
     filtered
 }
 
-/// `sosfiltfilt_order1`, with the per-sample recurrence replaced by an 8-wide
+/// `sosfiltfilt_order1`, with the per-sample recurrence replaced by a 16-wide
 /// scan. The first-order state obeys `zi0[t] = A*zi0[t-1] + bff*x[t]`, a linear
 /// recurrence whose chunk solution is the decay-weighted prefix sum
-/// `zi0[j] = A^(j+1)*zin + sum_k A^(j-k)*bff*x[k]`; three shift/multiply-add
-/// steps build the sum for all 8 lanes, so the only chunk-carried value is the
+/// `zi0[j] = A^(j+1)*zin + sum_k A^(j-k)*bff*x[k]`; four shift/multiply-add
+/// steps build the sum for all 16 lanes, so the only chunk-carried value is the
 /// leaving delay. The output stays `b0*x[t] + zi0[t-1]`, read from the lanes
 /// shifted by one. Padding, seeding, and short tails reuse the scalar step.
 #[cfg(nightly_portable_simd)]

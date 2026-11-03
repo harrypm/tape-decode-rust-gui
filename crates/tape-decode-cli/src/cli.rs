@@ -184,7 +184,7 @@ struct DecodeArgs {
     /// Treat NTSC black level as 0 IRE instead of 7.5 IRE.
     #[arg(long)]
     ntscj: bool,
-    /// MAD multiplier used when suppressing wow level-adjustment outliers.
+    /// Fraction by which the metadata's black level is lowered and its white level raised: black16bIRE * (1 - x), white16bIRE * (1 + x).
     #[arg(long, default_value_t = 0.1)]
     level_adjust: f32,
     /// Adjust the video levels from each field's sync and blanking; a bare flag selects backporch.

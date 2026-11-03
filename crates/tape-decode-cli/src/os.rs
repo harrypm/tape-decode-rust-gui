@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io;
-use std::io::{stderr, stdin, stdout};
+use std::io::{stdin, stdout};
 
 #[cfg(unix)]
 mod unix {
@@ -81,9 +81,4 @@ pub fn stdin_file() -> io::Result<File> {
 
 pub fn stdout_file() -> io::Result<File> {
     imp::dup_as_file(stdout())
-}
-
-#[allow(dead_code)]
-pub fn stderr_file() -> io::Result<File> {
-    imp::dup_as_file(stderr())
 }
