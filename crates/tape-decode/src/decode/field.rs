@@ -138,7 +138,7 @@ fn refine_linelocs_hsync(
         // refined crossing.
         let mut refined_from_right = None;
 
-        if !zc.is_nan() && linebad[i] == 0 {
+        if !zc.is_nan() {
             linelocs_refined[i] = zc;
 
             let hsync_area = signed_bounds_slice(
