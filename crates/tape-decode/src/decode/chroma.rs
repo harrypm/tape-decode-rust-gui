@@ -38,8 +38,8 @@ fn encode_chroma(chroma: &[f32]) -> Vec<u16> {
 /// to a dropout is not blown up), smoothed over the neighbouring lines and
 /// ramped linearly across the line into the next line's gain. Lines the
 /// color killer blanks are zeroed. The noise floor is the MAD-estimated
-/// standard deviation of the `sync_tip_len` samples before each gained
-/// line's successor, less four at either end, averaged over the field.
+/// standard deviation of each gained line's sync tip, its first
+/// `sync_tip_len` samples less four at either end, averaged over the field.
 fn chroma_automatic_gain(
     chroma: &mut [f32],
     burst_abs_ref: f32,
@@ -103,9 +103,7 @@ fn chroma_automatic_gain(
             *sample *= gain_start + j as f32 * gain_step;
         }
 
-        let window_end = end.saturating_sub(EDGE);
-        let window_start = (end + EDGE).saturating_sub(sync_tip_len).min(window_end);
-        let window = &chroma[window_start..window_end];
+        let window = &chroma[start + EDGE..(start + sync_tip_len).saturating_sub(EDGE).min(end)];
         if window.is_empty() {
             continue;
         }
@@ -242,9 +240,15 @@ fn upconvert_chroma_phase_comp(
     }
 }
 
-fn burst_deemphasis(chroma: &mut [f32], outlinelen: usize, burstarea_end: usize) {
+/// Undoes the burst emphasis of the recording, which put the burst 6 dB
+/// above the chroma: everything but the burst window is doubled.
+fn burst_deemphasis(chroma: &mut [f32], outlinelen: usize, burst_area: (usize, usize)) {
+    let (burst_start, burst_end) = burst_area;
     for line in chroma.chunks_exact_mut(outlinelen) {
-        for sample in &mut line[burstarea_end + 4..] {
+        for sample in &mut line[..burst_start] {
+            *sample *= 2.0;
+        }
+        for sample in &mut line[burst_end + 4..] {
             *sample *= 2.0;
         }
     }
@@ -409,7 +413,7 @@ fn process_chroma_internal(
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
-        burst_deemphasis(&mut chroma, field.outlinelen, burst_area(spec).1)
+        burst_deemphasis(&mut chroma, field.outlinelen, burst_area(spec))
     }
 
     let phase_sequence = &field
