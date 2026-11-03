@@ -30,8 +30,6 @@ fn demod_burst(burst: &[f32], burst_start: usize, burst_wave: &[(f32, f32)]) -> 
         amplitude: (2.0 * magnitude / len) as f32,
         magnitude: magnitude as f32,
         dc: (f64::from(sum) / len) as f32,
-        i,
-        q,
     }
 }
 
@@ -499,41 +497,29 @@ fn get_phase_rotation_sequence(
         );
     }
 
-    // Average burst phase per line parity (PAL bursts alternate), plus the
-    // color killer state.
-    let mut even = (0.0f32, 0.0f32);
-    let mut odd = (0.0f32, 0.0f32);
+    // The color killer state, from the lines clear of the vertical interval.
+    let measured = |entry: &PhaseSequenceEntry| {
+        let line_number = entry.line_number as isize;
+        line_number > burst_check_start
+            && line_number < burst_check_end
+            && entry.burst.magnitude != 0.0
+    };
     let mut count = 0usize;
     let mut magnitude_sum = 0.0f32;
     let mut burst_start_line = 0i64;
-    for entry in &phase_sequence {
-        let line_number = entry.line_number as isize;
-        let burst = entry.burst;
-        if line_number <= burst_check_start
-            || line_number >= burst_check_end
-            || burst.magnitude == 0.0
-        {
-            continue;
-        }
+    for entry in phase_sequence.iter().filter(|entry| measured(entry)) {
         count += 1;
-        magnitude_sum += burst.magnitude;
+        magnitude_sum += entry.burst.magnitude;
         // After a blanked field, color resumes at the first line whose burst
         // clears the threshold: broadcasts could switch the burst on
         // mid-field.
         if spec.rf_enable_color_killer
             && prev_burst_start_line == -1
             && burst_start_line == 0
-            && burst.magnitude > BURST_MAGNITUDE_THRESHOLD
+            && entry.burst.magnitude > BURST_MAGNITUDE_THRESHOLD
         {
             burst_start_line = entry.line_number as i64;
         }
-        let total = if entry.line_number % 2 == 1 {
-            &mut odd
-        } else {
-            &mut even
-        };
-        total.0 += burst.i / burst.magnitude;
-        total.1 += burst.q / burst.magnitude;
     }
     let magnitude_avg = if count == 0 {
         0.0
@@ -544,22 +530,77 @@ fn get_phase_rotation_sequence(
         burst_start_line = -1;
     }
 
-    let phase_deg = |(i, q): (f32, f32)| q.atan2(i).to_degrees().rem_euclid(360.0);
     (
         chroma_rotation_index,
         BurstLock {
             phase_sequence,
             burst_start_line,
-            phase_avg: phase_deg((even.0 + odd.0, even.1 + odd.1)),
-            even_phase_avg: phase_deg(even),
-            odd_phase_avg: phase_deg(odd),
         },
     )
 }
 
+/// Half the window of the burst phase trend, in lines: wide enough to
+/// average the line jitter out of the trend, short enough that the carrier's
+/// wander within it stays linear.
+const TREND_HALF_WINDOW: usize = 16;
+
+/// Trend of the burst phase at the reliable burst `at`, in degrees, from the
+/// `(line, phase)` pairs of the reliable bursts in line order, whose phases
+/// repeat every `stride` lines (two for the alternating bursts of the PAL
+/// family). A color-under carrier off its nominal frequency, or wandering,
+/// advances the upconverted burst against the reference subcarrier by a
+/// slowly varying amount per line, which is no timing error, while a line's
+/// departure from the trend is: the local slope is the circular mean of the
+/// advances between consecutive bursts of a parity within the window (both
+/// parities share the one carrier), and the trend the circular mean of the
+/// parity's bursts in the window carried to the line by that slope.
+fn burst_phase_trend(reliable: &[(usize, f32)], stride: usize, at: usize) -> f64 {
+    let line = reliable[at].0;
+    let near = |other: usize| other.abs_diff(line) <= TREND_HALF_WINDOW;
+    let (mut cos, mut sin) = (0.0f64, 0.0f64);
+    for (index, &(first, phase)) in reliable.iter().enumerate() {
+        if !near(first) {
+            continue;
+        }
+        let successor = reliable[index + 1..]
+            .iter()
+            .find(|&&(next, _)| next >= first + stride);
+        if let Some(&(next, next_phase)) = successor {
+            if next == first + stride && near(next) {
+                let (advance_sin, advance_cos) = f64::from(next_phase - phase).to_radians().sin_cos();
+                cos += advance_cos;
+                sin += advance_sin;
+            }
+        }
+    }
+    // Zero without a pair, which atan2 gives of the zero sums.
+    let slope = sin.atan2(cos).to_degrees() / stride as f64;
+
+    let (mut cos, mut sin) = (0.0f64, 0.0f64);
+    for &(other, phase) in reliable
+        .iter()
+        .filter(|&&(other, _)| near(other) && other % stride == line % stride)
+    {
+        let carried = f64::from(phase) + slope * (line as f64 - other as f64);
+        let (carried_sin, carried_cos) = carried.to_radians().sin_cos();
+        cos += carried_cos;
+        sin += carried_sin;
+    }
+    sin.atan2(cos).to_degrees()
+}
+
 /// Line locations refined from the burst phase, or `None` when burst hsync
-/// refinement is disabled or the color killer blanks the field.
+/// refinement is disabled, the color killer blanks the field or the field's
+/// bursts carry no timing. The lines with a reliable burst are refined by
+/// its departure from the trend; the others keep their hsync locations.
 fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Vec<f64>> {
+    // A burst this far below the field's median is blanked or in a dropout.
+    const RELIABLE_MAGNITUDE_RATIO: f32 = 0.5;
+    // Least mean resultant length of the departures' phasors for them to be
+    // timing rather than noise: random phases give about zero, a jitter of
+    // 30 degrees rms 0.87.
+    const MIN_COHERENCE: f64 = 0.5;
+
     if spec.rf_disable_burst_hsync {
         return None;
     }
@@ -568,33 +609,49 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
         .as_ref()
         .filter(|lock| lock.burst_start_line != -1)?;
     let mut linelocs = field.linelocs.clone()?;
-    // Every NTSC line targets the field-average burst phase; PAL-family bursts
-    // alternate with line parity, so each parity targets its own average.
-    let (even_target, odd_target) = if spec.color_system == ColorSystem::Ntsc {
-        (lock.phase_avg, lock.phase_avg)
-    } else {
-        (lock.even_phase_avg, lock.odd_phase_avg)
-    };
     // Output samples per subcarrier cycle: a phase error maps to that many
     // output samples, scaled back to the line's input length.
     let fsc_ratio = spec.sys_outfreq / spec.sys_fsc_mhz;
     // The vertical interval's lines, up to 9, carry no burst; after a
     // mid-field burst turn-on only the lines with color are refined.
     let first_line = (lock.burst_start_line as usize).max(10);
-    for entry in lock
+    let entries = lock
         .phase_sequence
         .iter()
-        .filter(|entry| entry.line_number >= first_line)
-    {
-        let line = entry.line_number;
-        let burst = entry.burst;
-        let target = if line % 2 == 1 {
-            odd_target
-        } else {
-            even_target
-        };
-        let phase_delta = (target - burst.phase + 180.0).rem_euclid(360.0) - 180.0;
-        let line_adjust = f64::from(phase_delta) / 360.0 * fsc_ratio;
+        .filter(|entry| entry.line_number >= first_line);
+    let mut magnitudes: Vec<f32> = entries.clone().map(|entry| entry.burst.magnitude).collect();
+    let magnitude_floor = median_from_values(&mut magnitudes) * RELIABLE_MAGNITUDE_RATIO;
+    let reliable: Vec<(usize, f32)> = entries
+        .filter(|entry| entry.burst.magnitude >= magnitude_floor)
+        .map(|entry| (entry.line_number, entry.burst.phase))
+        .collect();
+    let stride = if spec.color_system == ColorSystem::Ntsc {
+        1
+    } else {
+        2
+    };
+    // Each reliable line's departure from the trend, in degrees.
+    let departures: Vec<(usize, f64)> = (0..reliable.len())
+        .map(|at| {
+            let (line, phase) = reliable[at];
+            let trend = burst_phase_trend(&reliable, stride, at);
+            (
+                line,
+                (trend - f64::from(phase) + 180.0).rem_euclid(360.0) - 180.0,
+            )
+        })
+        .collect();
+    let (cos, sin) = departures
+        .iter()
+        .fold((0.0f64, 0.0f64), |(cos, sin), &(_, departure)| {
+            let (departure_sin, departure_cos) = departure.to_radians().sin_cos();
+            (cos + departure_cos, sin + departure_sin)
+        });
+    if cos.hypot(sin) < MIN_COHERENCE * departures.len() as f64 {
+        return None;
+    }
+    for (line, departure) in departures {
+        let line_adjust = departure / 360.0 * fsc_ratio;
         let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
         linelocs[line] += line_adjust * scale;
     }

@@ -516,14 +516,10 @@ struct BurstMeasurement {
     /// Burst phase in degrees, [0, 360).
     phase: f32,
     amplitude: f32,
-    /// Amplitude on the scale of the correlation sums below (half the burst
-    /// length times the amplitude), which the color killer threshold and the
-    /// phase averages are set against.
+    /// Amplitude on the scale of the correlation sums (half the burst length
+    /// times the amplitude), which the color killer threshold is set against.
     magnitude: f32,
     dc: f32,
-    /// Correlation sums against the reference cosine and sine.
-    i: f32,
-    q: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -542,10 +538,6 @@ struct BurstLock {
     /// when the whole field is blanked, 0 when the whole field has color,
     /// otherwise the line the burst switched on at.
     burst_start_line: i64,
-    /// Field-average burst phase in degrees over all, even and odd lines.
-    phase_avg: f32,
-    even_phase_avg: f32,
-    odd_phase_avg: f32,
 }
 
 pub const BLOCKSIZE: usize = 32 * 1024;
