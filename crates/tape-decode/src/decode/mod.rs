@@ -844,6 +844,16 @@ impl DecodedField {
             .expect("the line lies in the output rows")
     }
 
+    /// Absolute input sample the first output row starts at: buffer sample
+    /// `i` is input sample `startloc + BLOCKCUT + i`.
+    fn output_start_sample(&self) -> f64 {
+        let linelocs = self
+            .linelocs
+            .as_ref()
+            .expect("a valid field has line locations");
+        (self.data.startloc + BLOCKCUT as u64) as f64 + linelocs[self.output_lines().start]
+    }
+
     /// The heterodyne the chroma is upconverted with: the field's own under
     /// chroma AFC, otherwise the format's nominal one.
     fn heterodyne<'a>(&'a self, spec: &'a DecoderSpec) -> &'a [Vec<f32>] {
@@ -1507,8 +1517,8 @@ impl Decoder {
                 let mut is_duplicate_field = false;
                 let mut sync_conf = sync_confidence_from_linelocs(&field_obj);
                 let seq_no = self.output.len + 1;
-                let disk_loc = roundfloat(field_obj.readloc as f64 / bytes_per_field as f64, 1);
-                let file_loc = field_obj.readloc;
+                let file_loc = field_obj.output_start_sample().round() as u64;
+                let disk_loc = roundfloat(file_loc as f64 / bytes_per_field as f64, 1);
 
                 let color_framed = color_framed(&self.spec, &field_obj);
                 let field_phase_id = field_obj.field_phase_id.unwrap_or_else(|| {
@@ -1554,12 +1564,10 @@ impl Decoder {
                 if let Some(prevfi) =
                     prevfi_1.filter(|prevfi| prevfi.is_first_field == is_first_field)
                 {
-                    // Measure the field spacing against the previous field's exact
-                    // sample position rather than its rounded reported location, so
-                    // the progressive-content heuristic does not hinge on the
-                    // reported value's precision.
+                    // The spacing of the two fields' first output lines, in
+                    // fields.
                     let distance_from_previous_field =
-                        disk_loc - roundfloat(prevfi.file_loc as f64 / bytes_per_field as f64, 1);
+                        (file_loc as f64 - prevfi.file_loc as f64) / bytes_per_field as f64;
                     if prevfi.detected_first_field == detected_first_field
                         && prevfi_2.is_some_and(|prev| {
                             prev.detected_first_field == prevfi.detected_first_field
