@@ -678,10 +678,8 @@ impl<T: Float + std::iter::Sum> StackableMa<T> {
 #[derive(Clone)]
 struct ConversionLoState {
     servo_avg: StackableMa<f64>,
-    lo_trim: f64,
-    /// Output sample position of the current field's start.
-    het_sample_offset: i64,
-    chroma_heterodyne: Vec<Vec<f32>>,
+    /// Carrier phase at the start of the next field, in cycles.
+    phase: f64,
 }
 
 impl ConversionLoState {
@@ -696,30 +694,17 @@ impl ConversionLoState {
         }
         Self {
             servo_avg,
-            lo_trim: 0.0,
-            het_sample_offset: 0,
-            chroma_heterodyne: Self::gen_heterodyne(spec, 0.0, 0),
+            phase: 0.0,
         }
     }
 
-    fn gen_heterodyne(spec: &DecoderSpec, lo_trim: f64, het_sample_offset: i64) -> Vec<Vec<f32>> {
-        let conversion_lo = spec
-            .decoder_chroma_conversion_lo
-            .expect("conversion LO state without a conversion LO");
-        let het_wave_scale = (conversion_lo + lo_trim) / spec.tbc_sample_rate();
-        // Continue the carrier phase from where the previous fields left off,
-        // so the restored FM carrier has no phase step (a chroma click to a
-        // SECAM decoder) at field boundaries.
-        let phase_offset =
-            std::f64::consts::TAU * (het_wave_scale * het_sample_offset as f64).rem_euclid(1.0);
-        gen_chroma_heterodyne(het_wave_scale, phase_offset, spec.fieldlen())
-    }
-
-    /// The heterodyne for the field starting `het_sample_offset` output
-    /// samples into the stream, with the LO trimmed by the servo's settled
-    /// average, quantized to 10 Hz steps so measurement noise does not dither
-    /// it.
-    fn heterodyne(&mut self, spec: &DecoderSpec, het_sample_offset: i64) -> &[Vec<f32>] {
+    /// The heterodyne of a field of `samples` output samples, with the LO
+    /// trimmed by the servo's settled average, quantized to 10 Hz steps so
+    /// measurement noise does not dither it. The carrier phase continues
+    /// from where the previous field's ended, so a trim change only changes
+    /// the frequency; a phase step in the restored FM carrier would be a
+    /// chroma click to a SECAM decoder.
+    fn heterodyne(&mut self, spec: &DecoderSpec, samples: usize) -> Vec<Vec<f32>> {
         let lo_trim = self
             .servo_avg
             .has_values()
@@ -728,12 +713,17 @@ impl ConversionLoState {
             .map_or(0.0, |avg| {
                 ((avg / 10.0).round_ties_even() * 10.0).clamp(-10e3, 10e3)
             });
-        if lo_trim != self.lo_trim || het_sample_offset != self.het_sample_offset {
-            self.lo_trim = lo_trim;
-            self.het_sample_offset = het_sample_offset;
-            self.chroma_heterodyne = Self::gen_heterodyne(spec, lo_trim, het_sample_offset);
-        }
-        &self.chroma_heterodyne
+        let conversion_lo = spec
+            .decoder_chroma_conversion_lo
+            .expect("conversion LO state without a conversion LO");
+        let het_wave_scale = (conversion_lo + lo_trim) / spec.tbc_sample_rate();
+        let heterodyne = gen_chroma_heterodyne(
+            het_wave_scale,
+            std::f64::consts::TAU * self.phase,
+            spec.fieldlen(),
+        );
+        self.phase = (self.phase + het_wave_scale * samples as f64).rem_euclid(1.0);
+        heterodyne
     }
 }
 

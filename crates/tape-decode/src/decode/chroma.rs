@@ -437,13 +437,10 @@ fn process_chroma_internal(
         );
         chroma
     } else {
-        let chroma_heterodyne = match conversion_lo {
-            Some(lo) => lo.heterodyne(
-                spec,
-                field.field_number * (field.outlinecount * field.outlinelen) as i64,
-            ),
-            None => field.heterodyne(spec),
-        };
+        let secam_heterodyne = conversion_lo.map(|lo| lo.heterodyne(spec, chroma.len()));
+        let chroma_heterodyne = secam_heterodyne
+            .as_deref()
+            .unwrap_or_else(|| field.heterodyne(spec));
         upconvert_chroma(&chroma, field, phase_sequence, chroma_heterodyne)
     };
 
