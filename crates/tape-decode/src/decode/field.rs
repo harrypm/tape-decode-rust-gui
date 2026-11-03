@@ -330,7 +330,7 @@ fn get_phase_sequence(
     field: &DecodedField,
     chroma: &[f32],
     chroma_heterodyne: &[Vec<f32>],
-    chroma_rotation_starting_index: Option<i64>,
+    starting_index: i64,
     burst_area: (usize, usize),
     track_change_threshold: f32,
 ) -> (i64, Vec<PhaseSequenceEntry>) {
@@ -341,20 +341,13 @@ fn get_phase_sequence(
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     let output_lines = field.output_lines();
     let rotation_check_start_line = output_lines.end - BURST_CHECK_SKIP_LINES;
-    let starting_index = chroma_rotation_starting_index.unwrap_or(0);
-    let mut chroma_rotation_index;
-    let mut track_rotation;
-    if let Some(rotation) = chroma_rotation {
-        chroma_rotation_index = starting_index;
-        track_rotation = match chroma_rotation_index {
-            0 => rotation.0,
-            1 => rotation.1,
-            _ => unreachable!("track phase {chroma_rotation_index} is neither 0 nor 1"),
-        };
-    } else {
-        chroma_rotation_index = 0;
-        track_rotation = starting_index;
-    }
+    // The heterodyne phase rotation per line of the track read with `index`;
+    // none without chroma rotation.
+    let rotation_of = |index: i64| {
+        chroma_rotation.map_or(0, |(first, second)| if index == 0 { first } else { second })
+    };
+    let mut chroma_rotation_index = starting_index;
+    let mut track_rotation = rotation_of(starting_index);
 
     let upconvert = |phase: usize, linenumber: usize| {
         get_upconverted_burst(
@@ -403,13 +396,7 @@ fn get_phase_sequence(
                 ((next_burst.phase - comparison_phase + 180.0).rem_euclid(360.0) - 180.0).abs();
             if phase_delta_quadrant > track_change_threshold {
                 chroma_rotation_index = (chroma_rotation_index + 1).rem_euclid(2);
-                if let Some(rotation) = chroma_rotation {
-                    track_rotation = if chroma_rotation_index == 0 {
-                        rotation.0
-                    } else {
-                        rotation.1
-                    };
-                }
+                track_rotation = rotation_of(chroma_rotation_index);
             } else {
                 next = Some((next_phase, next_burst));
             }
@@ -422,6 +409,8 @@ fn get_phase_sequence(
         });
     }
 
+    // The heads alternate: the next field is read with the other index
+    // unless the switch was already seen mid-field.
     if chroma_rotation.is_some() && chroma_rotation_index == starting_index {
         chroma_rotation_index = (chroma_rotation_index + 1).rem_euclid(2);
     }
@@ -429,15 +418,19 @@ fn get_phase_sequence(
     (chroma_rotation_index, phase_sequence)
 }
 
+/// Locks the heterodyne to the field's bursts starting from the chroma
+/// track phase `start_index`, checking that index against the burst phase
+/// steps between lines. Returns the index the field was read with, the one
+/// the next field starts from, and the lock.
 fn get_phase_rotation_sequence(
     spec: &DecoderSpec,
     field: &DecodedField,
     chroma: &[f32],
     chroma_heterodyne: &[Vec<f32>],
-    chroma_rotation_index: Option<i64>,
+    start_index: i64,
     burst_area: (usize, usize),
     prev_burst_start_line: i64,
-) -> (i64, BurstLock) {
+) -> (i64, i64, BurstLock) {
     const TRACK_CHANGE_THRESHOLD: f32 = 90.0;
     const BURST_CHECK_SKIP_LINES: isize = 16;
     // Field-average burst magnitude below which the color killer blanks the
@@ -448,12 +441,13 @@ fn get_phase_rotation_sequence(
     let end = field.output_lines().end;
     let chroma_rotation = spec.decoder_chroma_rotation.map(|v| (v[0], v[1]));
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
-    let (mut chroma_rotation_index, mut phase_sequence) = get_phase_sequence(
+    let mut start_index = start_index;
+    let (mut next_index, mut phase_sequence) = get_phase_sequence(
         spec,
         field,
         chroma,
         chroma_heterodyne,
-        chroma_rotation_index,
+        start_index,
         burst_area,
         TRACK_CHANGE_THRESHOLD,
     );
@@ -486,12 +480,13 @@ fn get_phase_rotation_sequence(
     };
 
     if flip_track_phase {
-        (chroma_rotation_index, phase_sequence) = get_phase_sequence(
+        start_index = next_index;
+        (next_index, phase_sequence) = get_phase_sequence(
             spec,
             field,
             chroma,
             chroma_heterodyne,
-            Some(chroma_rotation_index),
+            start_index,
             burst_area,
             TRACK_CHANGE_THRESHOLD,
         );
@@ -531,7 +526,8 @@ fn get_phase_rotation_sequence(
     }
 
     (
-        chroma_rotation_index,
+        start_index,
+        next_index,
         BurstLock {
             phase_sequence,
             burst_start_line,
@@ -680,7 +676,7 @@ fn apply_burst_lock(
         0.0,
         Some(burst_start + burst_end),
     )?;
-    let (track_phase, burst_lock) = get_phase_rotation_sequence(
+    let (track_phase, next_track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
         field,
         &burst_downscaled,
@@ -689,7 +685,7 @@ fn apply_burst_lock(
         (burst_start, burst_end),
         prev_burst_start_line,
     );
-    inter_field_state.track_phase = Some(track_phase);
+    inter_field_state.track_phase = next_track_phase;
     field.track_phase = Some(track_phase);
     field.burst_lock = Some(burst_lock);
     Ok(())
@@ -741,7 +737,7 @@ pub(crate) fn predecode_field_from_rawdecode(
         valid: false,
         levels: inter_field_state.levels,
         burst_lock: None,
-        track_phase: inter_field_state.track_phase,
+        track_phase: None,
         wow_analysis: None,
     };
     if let Some(prevfield) = &pending_field.prevfield {

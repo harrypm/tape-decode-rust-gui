@@ -876,7 +876,8 @@ struct InterFieldState {
     prev_first_hsync_loc: f64,
     prev_first_hsync_diff: f64,
     prev_first_field: i64,
-    track_phase: Option<i64>,
+    /// The chroma track phase the next field's burst lock starts from.
+    track_phase: i64,
     compute_linelocs_issues: bool,
     /// The working video levels; with `--use-saved-levels` the next field is
     /// sliced between them instead of re-detecting its levels.
@@ -890,7 +891,7 @@ impl InterFieldState {
             prev_first_hsync_loc: -1.0,
             prev_first_hsync_diff: -1.0,
             prev_first_field: -1,
-            track_phase: spec.track_phase,
+            track_phase: spec.track_phase.unwrap_or(0),
             compute_linelocs_issues: false,
             levels: VideoLevels::nominal(spec),
         }
@@ -921,9 +922,8 @@ struct DecodedField {
     /// The levels the field's line locations were refined with.
     levels: VideoLevels,
     burst_lock: Option<BurstLock>,
-    /// The chroma track phase the burst lock reported for this field (and
-    /// starts the next field's lock from); with the field count it selects
-    /// the track IRE0 offset.
+    /// The chroma track phase the burst lock read this field with, which
+    /// selects the track IRE0 offset.
     track_phase: Option<i64>,
     /// Cached `(median, mad)` of the field's wow-factor distribution. These
     /// depend only on the line-location spline, so they are identical for every
@@ -1586,8 +1586,7 @@ impl Decoder {
                                 }
                             }
                             if let Some(track_phase) = field_obj.track_phase {
-                                let idx = (track_phase ^ (field_obj.field_number % 2)) as usize;
-                                ire0 += self.spec.sys_track_ire0_offset[idx];
+                                ire0 += self.spec.sys_track_ire0_offset[track_phase as usize];
                             }
                             picture_luma = Some(LumaOutput::Encoded(hz_to_output_array(
                                 &self.spec,
