@@ -648,6 +648,9 @@ impl DecoderSpec {
             if track_phase != 0 && track_phase != 1 {
                 bail!("Track phase can only be 0, 1 or None");
             }
+            if decoder_params.chroma_rotation.is_none() {
+                bail!("Track phase requires a format with chroma rotation");
+            }
         }
 
         let wow_level_adjust_smoothing = request
