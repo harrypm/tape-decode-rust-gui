@@ -419,7 +419,7 @@ fn process_chroma_internal(
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
-        burst_deemphasis(&mut chroma, field.outlinelen, burst_area(spec))
+        burst_deemphasis(&mut chroma, field.outlinelen, spec.burst_area)
     }
 
     let phase_sequence = &field

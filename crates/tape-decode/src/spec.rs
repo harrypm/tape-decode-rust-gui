@@ -10,8 +10,9 @@ use crate::decode::{
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
-    BoostRampFilter, ColorSystem, DecodeRequest, DeemphasisParams, FieldOrderAction, Ire0Adjust,
-    LineSystem, NonlinearParams, ShelfKind, VideoLumaFilter, WowInterpolation,
+    BoostRampFilter, ColorSystem, DecodeOptions, DecodeRequest, DecoderParams, DeemphasisParams,
+    FieldOrderAction, Ire0Adjust, LineSystem, NonlinearParams, ShelfKind, SysParams,
+    VideoLumaFilter, WowInterpolation,
 };
 use crate::vec_utils::convert_vec_in_place;
 
@@ -54,6 +55,12 @@ pub struct DecoderSpec {
     pub(crate) sys_hz_ire: f32,
     pub(crate) sys_vsync_ire: f32,
     pub(crate) sys_color_burst_us: [f64; 2],
+    /// Color burst window in output samples from the line start, padded a
+    /// little past the nominal burst, used by both the burst lock and the
+    /// chroma upconvert. Its length is a whole number of subcarrier cycles
+    /// (four samples each) so the correlation against the reference
+    /// subcarrier is unbiased.
+    pub(crate) burst_area: (usize, usize),
     pub(crate) sys_blacksnr_slice: [usize; 3],
     pub(crate) sys_num_pulses: usize,
     pub(crate) sys_hsync_pulse_us: f64,
@@ -189,6 +196,7 @@ impl DecoderSpec {
         } else {
             sys_params.color_system
         };
+        check_profile(sys_params, decoder_params, decode_options)?;
         // System M, 525-line NTSC-M and PAL-M alike, sets black up 7.5 IRE
         // above blanking; NTSC-J and the other standards keep it at 0 IRE.
         let black_ire = if sys_params.frame_lines == LineSystem::Line525 && !request.ntscj {
@@ -256,6 +264,16 @@ impl DecoderSpec {
         let tbc_sample_rate = sys_params.outlinelen as f64 * 1e6 / sys_params.line_period;
         let fieldlen =
             sys_params.outlinelen * *sys_params.field_lines.iter().max().unwrap() as usize;
+        let burst_area = burst_area(sys_params.color_burst_us, tbc_sample_rate);
+        // The burst lock reads each line as far past the burst window as the
+        // window sits from the line start.
+        if burst_area.0 + burst_area.1 > sys_params.outlinelen {
+            bail!(
+                "color_burst_us: the burst lock's read window of {} output samples runs past the {}-sample line",
+                burst_area.0 + burst_area.1,
+                sys_params.outlinelen
+            );
+        }
 
         // Standard frequency color carrier wave.
         let fsc_wave = gen_wave_at_frequency(sys_params.fsc_mhz, out_sample_rate_mhz, fieldlen);
@@ -512,6 +530,11 @@ impl DecoderSpec {
             None
         };
         let video_nl_high_pass_f = if request.video_nldeemp_enabled || video_subdeemp_enabled {
+            if decoder_params.nonlinear.highpass_freq <= 0.0 {
+                bail!(
+                    "the format has no nonlinear deemphasis parameters (nonlinear.highpass_freq is not set), which --nldeemp and --subdeemp need"
+                );
+            }
             Some(gen_nonlinear_bandpass(
                 &decoder_params.nonlinear,
                 freq_hz,
@@ -733,6 +756,7 @@ impl DecoderSpec {
             sys_hz_ire: sys_params.hz_ire,
             sys_vsync_ire: sys_params.vsync_ire,
             sys_color_burst_us: sys_params.color_burst_us,
+            burst_area,
             sys_blacksnr_slice: sys_params.blacksnr_slice,
             sys_num_pulses: sys_params.num_pulses,
             sys_hsync_pulse_us: sys_params.hsync_pulse_us,
@@ -947,6 +971,93 @@ fn gen_wave_at_frequency(
             (sin as f32, cos as f32)
         })
         .collect()
+}
+
+/// Checks the profile's parameters the decoder takes for granted and no
+/// filter design covers: the line geometry, and the nonlinear deemphasis
+/// and chroma AFC domains, which panic, hang or write garbage otherwise.
+fn check_profile(
+    sys_params: &SysParams,
+    decoder_params: &DecoderParams,
+    decode_options: &DecodeOptions,
+) -> Result<()> {
+    if sys_params.line_period.is_nan() || sys_params.line_period <= 0.0 {
+        bail!("line_period must be positive");
+    }
+    if sys_params.fps.is_nan() || sys_params.fps <= 0.0 {
+        bail!("fps must be positive");
+    }
+    if sys_params.fsc_mhz.is_nan() || sys_params.fsc_mhz <= 0.0 {
+        bail!("fsc_mhz must be positive");
+    }
+    if sys_params.hz_ire.is_nan() || sys_params.hz_ire <= 0.0 {
+        bail!("hz_ire must be positive");
+    }
+    if sys_params.outlinelen == 0 {
+        bail!("outlinelen must be at least one sample");
+    }
+    let frame_lines = sys_params.frame_lines.line_count() as i64;
+    let mut field_lines = sys_params.field_lines;
+    field_lines.sort_unstable();
+    if field_lines != [(frame_lines - 1) / 2, (frame_lines + 1) / 2] {
+        bail!(
+            "field_lines {:?} are not the two halves of the {frame_lines} frame lines",
+            sys_params.field_lines
+        );
+    }
+    let within_line = |what: &str, [start, end]: [f64; 2]| -> Result<()> {
+        if start.is_nan()
+            || end.is_nan()
+            || start < 0.0
+            || start >= end
+            || end > sys_params.line_period
+        {
+            bail!(
+                "{what} {start} to {end} us does not lie within the {} us line",
+                sys_params.line_period
+            );
+        }
+        Ok(())
+    };
+    within_line("color_burst_us", sys_params.color_burst_us)?;
+    within_line("active_video_us", sys_params.active_video_us)?;
+
+    let nonlinear = &decoder_params.nonlinear;
+    if nonlinear.highpass_limit_l > nonlinear.highpass_limit_h {
+        bail!(
+            "nonlinear.highpass_limit_l of {} Hz is above highpass_limit_h of {} Hz",
+            nonlinear.highpass_limit_l,
+            nonlinear.highpass_limit_h
+        );
+    }
+    // The exponent of the sub-deemphasis' amplitude root; the fast power
+    // function overflows its exponent on zero amplitude past 1.
+    let exp_scaling = nonlinear.exp_scaling;
+    if exp_scaling.is_nan() || exp_scaling <= 0.0 || exp_scaling > 1.0 {
+        bail!(
+            "nonlinear.exp_scaling of {exp_scaling} is not within 0 (exclusive) to 1"
+        );
+    }
+    // The chroma AFC fine-tunes the carrier in steps of this fraction of
+    // the line frequency, stepping until it is within one of the nominal
+    // carrier.
+    let fh_ratio = decode_options.chroma_afc_fine_tune_fh_ratio;
+    if fh_ratio.is_nan() || fh_ratio <= 0.0 {
+        bail!(
+            "chroma_afc_fine_tune_fh_ratio of {} is not positive",
+            decode_options.chroma_afc_fine_tune_fh_ratio
+        );
+    }
+    Ok(())
+}
+
+/// The color burst window of `color_burst_us` in output samples at
+/// `tbc_sample_rate` (see [`DecoderSpec::burst_area`]).
+fn burst_area(color_burst_us: [f64; 2], tbc_sample_rate: f64) -> (usize, usize) {
+    let to_outpx = |us: f64| us * tbc_sample_rate / 1e6;
+    let start = (to_outpx(color_burst_us[0]).floor() as isize - 4).max(0) as usize;
+    let end = to_outpx(color_burst_us[1]).ceil() as usize + 8;
+    (start, end - (end - start) % 4)
 }
 
 /// A frequency in hertz as megahertz with hertz resolution, for messages.

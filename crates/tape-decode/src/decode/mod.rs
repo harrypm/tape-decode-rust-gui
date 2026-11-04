@@ -1160,16 +1160,6 @@ fn downscale_raw_vec(
     dsout
 }
 
-// Color burst window in output samples from the line start, padded a little
-// past the nominal burst, used by both the burst lock and the chroma
-// upconvert. Its length is a whole number of subcarrier cycles (four samples
-// each) so the correlation against the reference subcarrier is unbiased.
-fn burst_area(spec: &DecoderSpec) -> (usize, usize) {
-    let start = (usectooutpx(spec, spec.sys_color_burst_us[0]).floor() as isize - 4).max(0) as usize;
-    let end = usectooutpx(spec, spec.sys_color_burst_us[1]).ceil() as usize + 8;
-    (start, end - (end - start) % 4)
-}
-
 /// What the field-order check keeps of a decoded field.
 #[derive(Clone, Copy)]
 struct DecodedFieldOrder {

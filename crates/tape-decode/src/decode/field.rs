@@ -709,7 +709,7 @@ fn apply_burst_lock(
         .as_ref()
         .map_or(0, |prev| prev.burst_start_line);
 
-    let (burst_start, burst_end) = burst_area(spec);
+    let (burst_start, burst_end) = spec.burst_area;
     let chroma = if spec.chroma_afc_enabled() {
         // The carrier is measured over the whole field's chroma and the
         // field's heterodyne generated at it.
