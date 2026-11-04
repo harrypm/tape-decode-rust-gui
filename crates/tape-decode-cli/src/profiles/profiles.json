@@ -813,7 +813,7 @@
         },
         "color_under_carrier": 688374.125874126,
         "nonlinear": {
-          "highpass_limit_l": 20000.0
+          "highpass_limit_l": -20000.0
         },
         "video_lpf_extra": 7000000.0,
         "video_lpf_extra_order": 16,
