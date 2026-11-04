@@ -1,4 +1,4 @@
-use super::sync::{refine_levels_from_vsync, try_get_pulses};
+use super::sync::{refine_levels_from_vsync, try_get_pulses, PulseType, ValidPulseSample};
 use super::*;
 
 /// Measures the burst kept at output sample `burst_start` of the field
@@ -231,63 +231,69 @@ fn refine_linelocs_hsync(
     linelocs_refined
 }
 
+/// Lines within which a pulse is taken for a line's start. An hsync is the
+/// nearest to the line's place on the field's grid, however far a head
+/// switch stepped the timing; the vertical interval's pulses come at
+/// half-line spacing, so only one nearer than a quarter line is the line's
+/// rather than the half-line's.
+const HSYNC_REACH_LINES: f64 = 1.0 / 1.5;
+const VBLANK_PULSE_REACH_LINES: f64 = 0.25;
+
+/// The start of each of the `proclines` lines from line 0. The field's
+/// grid runs at mean lines through the first hsync, at `reference_line`;
+/// a line's start is expected a mean line on from the pulse the line
+/// before it found, which carries a head switch's timing step to the next
+/// line, else on the grid. The line takes, of the pulses no earlier line
+/// took, the hsync nearest its grid place within reach (judged on the
+/// grid, so a stray pulse can never carry the lines after it onto the
+/// next line's pulses), else the vertical interval pulse nearest its
+/// expected start within reach; without either it keeps the expected
+/// start.
 fn valid_pulses_to_linelocs(
-    mut validpulses: Vec<f64>,
+    validpulses: &[ValidPulseSample],
     reference_pulse: f64,
     reference_line: i64,
     meanlinelen: f64,
     proclines: usize,
 ) -> Vec<f64> {
-    validpulses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
-
+    debug_assert!(
+        validpulses.windows(2).all(|pair| pair[0].start <= pair[1].start),
+        "the valid pulses are in order"
+    );
     let mut line_locations = vec![0.0; proclines];
-    let validpulses_len = validpulses.len();
-    let max_allowed_distance_between_pulse_and_line = meanlinelen / 1.5;
-    let reference_line = reference_line as f64;
-    let mut current_pulse_index = 0usize;
+    let mut previous = None;
+    let mut next_pulse = 0usize;
 
     for (line_index, line_location) in line_locations.iter_mut().enumerate() {
-        let expected_line_location =
-            reference_pulse + meanlinelen * (line_index as f64 - reference_line);
-        *line_location = expected_line_location;
+        let grid = reference_pulse + meanlinelen * (line_index as f64 - reference_line as f64);
+        let expected = previous.take().map_or(grid, |pulse| pulse + meanlinelen);
+        *line_location = expected;
 
-        if current_pulse_index < validpulses_len {
-            let mut current_distance_from_pulse_to_line =
-                (validpulses[current_pulse_index] - expected_line_location).abs();
-            let mut smallest_distance_observed_from_pulse_to_line =
-                max_allowed_distance_between_pulse_and_line;
-            let mut current_pulse_sample_location = -1.0;
-
-            let mut pulse_search_index = current_pulse_index;
-            loop {
-                if current_distance_from_pulse_to_line
-                    <= smallest_distance_observed_from_pulse_to_line
-                {
-                    smallest_distance_observed_from_pulse_to_line =
-                        current_distance_from_pulse_to_line;
-                    current_pulse_index = pulse_search_index;
-                    current_pulse_sample_location = validpulses[pulse_search_index];
-                }
-
-                let Some(next_pulse) = validpulses.get(pulse_search_index + 1) else {
-                    break;
-                };
-                let next_observed_distance_between_pulse_and_line =
-                    (next_pulse - expected_line_location).abs();
-                if next_observed_distance_between_pulse_and_line
-                    > current_distance_from_pulse_to_line
-                {
-                    break;
-                }
-
-                current_distance_from_pulse_to_line = next_observed_distance_between_pulse_and_line;
-                pulse_search_index += 1;
+        // The pulses ascend, so the nearest to a position is where the
+        // distance to it stops falling.
+        let nearest = |position: f64| {
+            let distance = |index: usize| (validpulses[index].start as f64 - position).abs();
+            let mut nearest = next_pulse;
+            while nearest + 1 < validpulses.len() && distance(nearest + 1) <= distance(nearest) {
+                nearest += 1;
             }
-
-            if current_pulse_sample_location != -1.0 {
-                *line_location = current_pulse_sample_location;
-                current_pulse_index += 1;
-            }
+            validpulses
+                .get(nearest)
+                .map(|pulse| (nearest, pulse, distance(nearest) / meanlinelen))
+        };
+        let taken = nearest(grid)
+            .filter(|&(_, pulse, distance)| {
+                pulse.pulse_type == PulseType::Hsync && distance <= HSYNC_REACH_LINES
+            })
+            .or_else(|| {
+                nearest(expected).filter(|&(_, pulse, distance)| {
+                    pulse.pulse_type != PulseType::Hsync && distance <= VBLANK_PULSE_REACH_LINES
+                })
+            });
+        if let Some((index, pulse, _)) = taken {
+            *line_location = pulse.start as f64;
+            previous = Some(pulse.start as f64);
+            next_pulse = index + 1;
         }
     }
 
@@ -827,13 +833,8 @@ pub(crate) fn predecode_field_from_rawdecode(
                 }
                 NextField::At((line0loc - (res.meanlinelen * 20.0)).max(pending_field.inlinelen))
             } else {
-                let validpulses = pending_field
-                    .validpulses
-                    .iter()
-                    .map(|&start| start as f64)
-                    .collect::<Vec<_>>();
                 let linelocs_vec = valid_pulses_to_linelocs(
-                    validpulses,
+                    &pending_field.validpulses,
                     (first_hsync.loc as i64) as f64,
                     first_hsync.line as i64,
                     res.meanlinelen,
@@ -933,5 +934,60 @@ pub(crate) fn predecode_field_from_rawdecode(
     DecodeFieldResult {
         field: pending_field,
         offset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_take_their_own_pulses_across_a_step_but_not_the_half_line_ones() {
+        const LINE_LEN: f64 = 2560.0;
+        let pulse = |line: f64, pulse_type: PulseType| ValidPulseSample {
+            pulse_type,
+            start: (line * LINE_LEN) as i64,
+        };
+        // Hsyncs on lines 0 to 4, a vertical interval of pulses at
+        // half-line spacing from line 4.5 to 8 with the pulse at the start
+        // of line 6 missing, the first hsync on line 9, the hsyncs from
+        // line 12 to 19 stepped 0.6 lines late by a head switch, no pulses
+        // on lines 20 to 24, hsyncs on the grid from line 25 but for line
+        // 30, which has only a stray hsync half a line late, to line 39.
+        let mut pulses: Vec<ValidPulseSample> = (0..5)
+            .map(|line| pulse(f64::from(line), PulseType::Hsync))
+            .collect();
+        for k in 0..8 {
+            let line = 4.5 + 0.5 * f64::from(k);
+            if line != 6.0 {
+                pulses.push(pulse(line, PulseType::Eqpl1));
+            }
+        }
+        for line in 9..12 {
+            pulses.push(pulse(f64::from(line), PulseType::Hsync));
+        }
+        for line in 12..20 {
+            pulses.push(pulse(f64::from(line) + 0.6, PulseType::Hsync));
+        }
+        for line in 25..40 {
+            let offset = if line == 30 { 0.5 } else { 0.0 };
+            pulses.push(pulse(f64::from(line) + offset, PulseType::Hsync));
+        }
+
+        let linelocs = valid_pulses_to_linelocs(&pulses, 9.0 * LINE_LEN, 9, LINE_LEN, 40);
+        // Line 6 keeps its expected start rather than the pulse half a line
+        // off, and the gap's lines theirs on the grid but for line 20,
+        // expected from line 19's pulse. Every other line found its own
+        // pulse: the stepped hsyncs, the hsync after the gap, which the
+        // step does not carry across it, and line 30's stray, which does
+        // not carry line 31 onto line 32's hsync.
+        for (line, &location) in linelocs.iter().enumerate() {
+            let expected = match line {
+                12..=20 => line as f64 + 0.6,
+                30 => 30.5,
+                _ => line as f64,
+            };
+            assert_eq!(location, expected * LINE_LEN, "line {line}");
+        }
     }
 }

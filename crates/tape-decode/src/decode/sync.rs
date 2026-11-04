@@ -3,7 +3,7 @@ use super::*;
 /// Vertical-sync pulse classification. State order across a field boundary is
 /// HSYNC -> EQPL1 -> VSYNC -> EQPL2 -> HSYNC.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PulseType {
+pub(super) enum PulseType {
     Hsync,
     Eqpl1,
     Vsync,
@@ -684,10 +684,12 @@ struct PulseSample {
     len: i64,
 }
 
+/// A sync pulse classified as one of the field's: an hsync, or one of the
+/// vertical interval's.
 #[derive(Clone, Copy)]
-struct ValidPulseSample {
-    pulse_type: PulseType,
-    start: i64,
+pub(super) struct ValidPulseSample {
+    pub(super) pulse_type: PulseType,
+    pub(super) start: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -698,7 +700,7 @@ struct Line0FallbackResult {
 }
 
 struct PulseClassificationResult {
-    valid_starts: Vec<i64>,
+    valid_pulses: Vec<ValidPulseSample>,
     meanlinelen: f64,
     line0loc: Option<f64>,
     first_hsync_loc: Option<f64>,
@@ -1618,7 +1620,7 @@ fn try_get_pulses_core(
     );
 
     PulseClassificationResult {
-        valid_starts,
+        valid_pulses: valid_samples,
         meanlinelen,
         line0loc: first_hsync.line0loc,
         first_hsync_loc: first_hsync.first_hsync_loc,
@@ -1949,7 +1951,7 @@ pub(crate) fn try_get_pulses(
 
     let result = try_get_pulses_core(spec, &found.pulses, field, inter_field_state);
 
-    field.validpulses = result.valid_starts;
+    field.validpulses = result.valid_pulses;
     field.vblank_next = result.vblank_next;
     field.is_first_field = Some(result.is_first_field);
     Some(PulseResult {

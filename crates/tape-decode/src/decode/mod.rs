@@ -781,7 +781,7 @@ struct DecodedField {
     outlinecount: usize,
     wow_level_adjust_smoothing: f32,
     wow_interpolation_method: WowInterpolation,
-    validpulses: Vec<i64>,
+    validpulses: Vec<sync::ValidPulseSample>,
     is_first_field: Option<bool>,
     vblank_next: Option<f64>,
     linelocs: Option<Vec<f64>>,
