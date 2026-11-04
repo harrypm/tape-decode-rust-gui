@@ -185,7 +185,7 @@ struct DecodeArgs {
     #[arg(long)]
     ntscj: bool,
     /// Fraction by which the metadata's black level is lowered and its white level raised: black16bIRE * (1 - x), white16bIRE * (1 + x).
-    #[arg(long, default_value_t = 0.1)]
+    #[arg(long, default_value_t = 0.1, allow_negative_numbers = true)]
     level_adjust: f32,
     /// Adjust the video levels from each field's sync and blanking: backporch, hsync, or both separated by a comma.
     #[arg(
@@ -236,7 +236,7 @@ struct DecodeArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=2), default_value_t = 1)]
     secam_servo_passes: u8,
     /// Seed the SECAM chroma conversion LO trim in Hz (e.g. a converged servo value from a previous run) so it applies from the first field; with --secam-servo-passes 0 it is a fixed trim (ME-SECAM only).
-    #[arg(long, value_name = "HZ")]
+    #[arg(long, value_name = "HZ", allow_negative_numbers = true)]
     secam_lo_trim: Option<f64>,
     /// Chroma transient improvement mix (color-under only); 0 disables it.
     #[arg(long, default_value_t = 1.0)]
