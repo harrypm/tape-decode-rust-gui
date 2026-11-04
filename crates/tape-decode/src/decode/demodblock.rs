@@ -81,8 +81,7 @@ fn irfft_owned_f32(
     // (half-length inner FFT) instead of mirroring out the full Hermitian
     // spectrum and running a full-length complex inverse. It rejects residual
     // imaginary parts on the DC/Nyquist bins, which the filters can leave
-    // behind; the full-spectrum path simply dropped them (only the real part
-    // was kept), so zero them to match.
+    // behind and which carry no signal.
     spectrum[0].im = 0.0;
     spectrum[n / 2].im = 0.0;
     let mut output = c2r.make_output_vec();
@@ -376,8 +375,7 @@ pub(crate) fn decode_video_block(rawdata: &[f32], spec: &DecoderSpec, out: &mut 
             .expect("the nonlinear high-pass is built with the nonlinear deemphasis");
         let hf_spectrum = spectrum_times_filter(&out_video_fft, highpass);
         let hf_part = irfft_owned_f32(hf_spectrum, None, spec.fft_block_c2r_f32.as_ref());
-        // Clamp and subtract in a single pass so `hf_part` is read once instead
-        // of being rewritten by a separate clamp pass and then read again.
+        // Clamped and subtracted in one pass, so `hf_part` is read once.
         for (sample, hf) in out_video.iter_mut().zip(hf_part) {
             *sample -= hf.clamp(
                 spec.decoder_nonlinear_highpass_limit_l,

@@ -1035,7 +1035,6 @@ fn get_line0_fallback(
                             || candidate_confidence > first_field_confidence
                         {
                             first_field = candidate_first_field;
-                            // This branch updates the field candidate while leaving confidence unchanged.
                         }
                         line_0 = Some(pulse.start as f64);
                         break;
@@ -1132,7 +1131,6 @@ fn get_line0_fallback(
                             || candidate_confidence > first_field_confidence
                         {
                             first_field = candidate_first_field;
-                            // This branch updates the field candidate while leaving confidence unchanged.
                         }
                         line_0 = Some(pulse.start as f64);
                         break;

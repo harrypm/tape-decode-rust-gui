@@ -368,7 +368,6 @@ impl DecoderSpec {
             video_rf_filter = multiply(&video_rf_filter, &abs_complex_owned(peaking_fft));
         }
 
-        // Make sure this is an int in case it could be passed in as a string via the gui.
         if fm_audio_notch > f64::EPSILON {
             if let Some(fm_audio_channels) = &decoder_params.fm_audio_channels {
                 let notch0 = gen_fft_notch(
@@ -635,8 +634,6 @@ impl DecoderSpec {
             })
             .transpose()?;
 
-        // Increase the cutoff at the end of blocks to avoid edge distortion from filters making it through.
-
         let video_chroma_trap = if request.chroma_trap {
             Some(ChromaSepClass::new(freq_hz, sys_params.fsc_mhz))
         } else {
@@ -877,9 +874,6 @@ impl DecoderSpec {
         self.rf_write_chroma
     }
 }
-
-// Filter-design helpers, moved here from decode.rs because spec.rs
-// (DecoderSpec construction) is their sole consumer.
 
 /// Smallest 5-smooth length at or above `n`, which the FFT runs with only
 /// small radices.

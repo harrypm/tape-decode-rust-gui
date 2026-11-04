@@ -351,9 +351,9 @@ fn comb_c(data: &mut [f32], line_len: usize, line_distance: usize) {
     // `line_distance` ahead, and the line `line_distance` behind. The current
     // and ahead lines are never overwritten before they are read (lines are
     // processed in increasing order), so they read straight from `data`. Only
-    // the behind line may already be overwritten, so keep just the last
-    // `line_distance` original lines in a small ring instead of copying the
-    // whole field as the previous `data.to_vec()` did.
+    // the behind line may already be overwritten, so just the last
+    // `line_distance` original lines are kept in a small ring rather than a
+    // copy of the whole field.
     let mut ring = vec![0.0f32; line_distance * line_len];
     for line_num in 16..numlines - 2 {
         let line_start = line_num * line_len;

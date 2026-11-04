@@ -15,7 +15,6 @@ use rustfft::Fft;
 use sci_rs::signal::filter::design::{FilterBandType, Sos};
 use serde::{Deserialize, Serialize};
 
-// Submodules split out of the original monolithic decode.rs.
 mod chroma;
 mod demodblock;
 mod dropouts;
@@ -969,8 +968,8 @@ struct MetadataFieldState {
 }
 
 /// One phase of the rational cubic resampler: the integer tap base for output
-/// `i` and the four Catmull-Rom weights, exactly as `cubic_resample` derived
-/// them (the fractional offset narrows to f32 before the weight polynomial).
+/// `i` and the four Catmull-Rom weights (the fractional offset narrows to f32
+/// before the weight polynomial).
 fn resample_phase_taps(input_rate: usize, output_rate: usize, i: usize) -> (isize, [f32; 4]) {
     let scale = input_rate as f64 / output_rate as f64;
     let pos = (i % output_rate) as f64 * scale;
@@ -1342,9 +1341,8 @@ impl Decoder {
                 }
 
                 // Every block contributes exactly `usable_blocksize` samples per
-                // channel, so size the field buffers up front and let each block
-                // append straight into them. This drops the per-block channel
-                // Vecs and the field-wide concatenation copy that followed.
+                // channel, so the field buffers are sized up front and each
+                // block appends straight into them.
                 let field_capacity = (requested_end - requested_begin) * usable_blocksize;
                 let mut video = VideoChannels {
                     demod: Vec::with_capacity(field_capacity),
