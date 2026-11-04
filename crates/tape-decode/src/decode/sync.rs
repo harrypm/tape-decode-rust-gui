@@ -29,110 +29,135 @@ fn pulse_qualitycheck(
     inrange(linelen, exprange.0, exprange.1)
 }
 
+/// A pulse the vertical interval state machine classified: its index among
+/// the pulses the machine ran over, and whether its spacing from the pulse
+/// classified before it is plausible for the two types.
+#[derive(Clone, Copy)]
+struct VblankPulse {
+    index: usize,
+    pulse_type: PulseType,
+    good: bool,
+}
+
+/// Classifies the pulses of a vertical interval: the hsync `pulses` opens
+/// on, the equalizing, broad and post-equalizing pulses, and the hsync
+/// closing it. A pulse whose width fits no state is passed over. `None`
+/// when the interval does not close within `pulses`.
 fn run_vblank_state_machine(
-    raw_pulse_starts: &[i64],
-    raw_pulse_lengths: &[i64],
+    pulses: &[PulseSample],
     hsync: (f64, f64),
     eq: (f64, f64),
     vsync: (f64, f64),
     num_pulses: f64,
     in_line_len: f64,
-) -> (bool, Vec<PulseType>, Vec<i64>, Vec<bool>) {
-    // Look though raw_pulses for a set valid vertical sync pulse series.
-    // num_pulses_half: number of equalization pulses per section / 2
-    let mut done = false;
-    let num_pulses_half = num_pulses / 2.0;
-
-    let mut valid_types = Vec::new();
-    let mut valid_starts = Vec::new();
-    let mut valid_good = Vec::new();
-
-    // state_end tracks the earliest expected phase transition...
+) -> Option<Vec<VblankPulse>> {
+    // Each section of the interval runs half the equalizing pulse count of
+    // lines.
+    let section_lines = num_pulses / 2.0;
+    let mut valid: Vec<VblankPulse> = Vec::new();
+    // The earliest start the next section may open at, set from the pulse
+    // that opened the last one once that pulse is accepted.
     let mut state_end = 0.0;
-    // ... and state length is set by the phase transition to set above (in H)
-    let mut state_length: Option<f64> = None;
+    let mut section_opened = false;
 
-    for (&start, &length) in raw_pulse_starts.iter().zip(raw_pulse_lengths.iter()) {
-        let mut spulse_type = None;
+    for (index, &pulse) in pulses.iter().enumerate() {
         // `None` is the start state, before any valid pulse has been classified.
-        let state = valid_types.last().copied();
-        let length_f = length as f64;
+        let state = valid.last().map(|pulse| pulse.pulse_type);
+        let start = pulse.start as f64;
+        let length = pulse.len as f64;
+        let is_hsync = inrange(length, hsync.0, hsync.1);
+        let is_eq = inrange(length, eq.0, eq.1);
+        let is_vsync = inrange(length, vsync.0, vsync.1);
 
-        if state.is_none() {
+        let mut pulse_type = match state {
             // First valid pulse must be a regular HSYNC
-            if inrange(length_f, hsync.0, hsync.1) {
-                spulse_type = Some(PulseType::Hsync);
-            }
-        } else if state == Some(PulseType::Hsync) {
-            // HSYNC can transition to EQPUL/pre-vsync at the end of a field
-            if inrange(length_f, hsync.0, hsync.1) {
-                spulse_type = Some(PulseType::Hsync);
-            } else if inrange(length_f, eq.0, eq.1) {
-                spulse_type = Some(PulseType::Eqpl1);
-                state_length = Some(num_pulses_half);
-            } else if inrange(length_f, vsync.0, vsync.1) {
-                // should not happen(tm)
-                spulse_type = Some(PulseType::Vsync);
-            }
-        } else if state == Some(PulseType::Eqpl1) {
-            if inrange(length_f, eq.0, eq.1) {
-                spulse_type = Some(PulseType::Eqpl1);
-            } else if inrange(length_f, vsync.0, vsync.1) {
-                // transition to the first VSYNC pulse
-                spulse_type = Some(PulseType::Vsync);
-                state_length = Some(num_pulses_half);
-            } else if inrange(length_f, hsync.0, hsync.1) {
-                // previous state transition was likely in error!
-                spulse_type = Some(PulseType::Hsync);
-            }
-        } else if state == Some(PulseType::Vsync) {
-            if inrange(length_f, eq.0, eq.1) {
-                // transition to the first EQ pulse after VSYNC
-                spulse_type = Some(PulseType::Eqpl2);
-                state_length = Some(num_pulses_half);
-            } else if inrange(length_f, vsync.0, vsync.1) {
-                spulse_type = Some(PulseType::Vsync);
-            } else if start as f64 > state_end && inrange(length_f, hsync.0, hsync.1) {
-                spulse_type = Some(PulseType::Hsync);
-            }
-        } else if state == Some(PulseType::Eqpl2) {
-            if inrange(length_f, eq.0, eq.1) {
-                spulse_type = Some(PulseType::Eqpl2);
-            } else if inrange(length_f, hsync.0, hsync.1) {
-                spulse_type = Some(PulseType::Hsync);
-                done = true;
-            }
-        }
-
-        if let Some(pulse_type) = spulse_type {
-            if Some(pulse_type) != state {
-                if (start as f64) < state_end {
-                    spulse_type = None;
-                } else if let Some(length) = state_length.take() {
-                    state_end = start as f64 + ((length - 0.1) * in_line_len);
+            None => is_hsync.then_some(PulseType::Hsync),
+            Some(PulseType::Hsync) => {
+                // HSYNC can transition to EQPUL/pre-vsync at the end of a field
+                if is_hsync {
+                    Some(PulseType::Hsync)
+                } else if is_eq {
+                    section_opened = true;
+                    Some(PulseType::Eqpl1)
+                } else if is_vsync {
+                    // should not happen(tm)
+                    Some(PulseType::Vsync)
+                } else {
+                    None
                 }
             }
+            Some(PulseType::Eqpl1) => {
+                if is_eq {
+                    Some(PulseType::Eqpl1)
+                } else if is_vsync {
+                    // transition to the first VSYNC pulse
+                    section_opened = true;
+                    Some(PulseType::Vsync)
+                } else if is_hsync {
+                    // previous state transition was likely in error!
+                    Some(PulseType::Hsync)
+                } else {
+                    None
+                }
+            }
+            Some(PulseType::Vsync) => {
+                if is_eq {
+                    // transition to the first EQ pulse after VSYNC
+                    section_opened = true;
+                    Some(PulseType::Eqpl2)
+                } else if is_vsync {
+                    Some(PulseType::Vsync)
+                } else if start > state_end && is_hsync {
+                    Some(PulseType::Hsync)
+                } else {
+                    None
+                }
+            }
+            Some(PulseType::Eqpl2) => {
+                if is_eq {
+                    Some(PulseType::Eqpl2)
+                } else if is_hsync {
+                    Some(PulseType::Hsync)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if pulse_type.is_some() && pulse_type != state {
+            if start < state_end {
+                pulse_type = None;
+            } else if section_opened {
+                section_opened = false;
+                state_end = start + ((section_lines - 0.1) * in_line_len);
+            }
         }
+        let Some(pulse_type) = pulse_type else {
+            continue;
+        };
 
         // Quality check
-        if let Some(pulse_type) = spulse_type {
-            let good = valid_types.last().zip(valid_starts.last()).is_some_and(
-                |(&prev_type, &prev_start)| {
-                    pulse_qualitycheck(prev_type, prev_start, pulse_type, start, in_line_len)
-                },
-            );
+        let good = valid.last().is_some_and(|prev| {
+            pulse_qualitycheck(
+                prev.pulse_type,
+                pulses[prev.index].start,
+                pulse_type,
+                pulse.start,
+                in_line_len,
+            )
+        });
+        valid.push(VblankPulse {
+            index,
+            pulse_type,
+            good,
+        });
 
-            valid_types.push(pulse_type);
-            valid_starts.push(start);
-            valid_good.push(good);
-        }
-
-        if done {
-            return (done, valid_types, valid_starts, valid_good);
+        if state == Some(PulseType::Eqpl2) && pulse_type == PulseType::Hsync {
+            return Some(valid);
         }
     }
 
-    (done, valid_types, valid_starts, valid_good)
+    None
 }
 
 fn round_nearest_line_loc(line_number: f64) -> f64 {
@@ -1414,7 +1439,12 @@ fn try_get_pulses_core(
     let mut valid_starts = Vec::new();
     let mut valid_good = Vec::new();
 
+    // The hsyncs are taken as they come. An equalizing pulse after one has
+    // the vertical interval classified from that hsync on, and the walk
+    // resumes after the hsync closing it; an interval that does not close
+    // leaves the pulse unclassified.
     let mut i = 0usize;
+    let mut last_hsync = None;
     while i < raw_pulses.len() {
         let curpulse = raw_pulses[i];
         if inrange(curpulse.len as f64, hsync.0, hsync.1) {
@@ -1432,45 +1462,45 @@ fn try_get_pulses_core(
             valid_types.push(PulseType::Hsync);
             valid_starts.push(curpulse.start);
             valid_good.push(good);
+            last_hsync = Some(i);
             i += 1;
-        } else if i > 2
-            && inrange(raw_pulses[i].len as f64, eq.0, eq.1)
-            && valid_types
-                .last()
-                .is_some_and(|&pulse_type| pulse_type == PulseType::Hsync)
-        {
-            let start = i - 2;
-            let end = (i + 24).min(raw_pulses.len());
-            let starts = raw_pulses[start..end]
-                .iter()
-                .map(|pulse| pulse.start)
-                .collect::<Vec<_>>();
-            let lengths = raw_pulses[start..end]
-                .iter()
-                .map(|pulse| pulse.len)
-                .collect::<Vec<_>>();
-            let (done, pulse_types, starts, good_flags) = run_vblank_state_machine(
-                &starts,
-                &lengths,
-                hsync,
-                eq,
-                vsync,
-                num_pulses,
-                field.inlinelen,
-            );
-            if done {
-                for j in 2..pulse_types.len() {
-                    valid_types.push(pulse_types[j]);
-                    valid_starts.push(starts[j]);
-                    valid_good.push(good_flags[j]);
-                }
-                i += pulse_types.len().saturating_sub(2);
-            } else {
-                i += 1;
-            }
-        } else {
-            i += 1;
+            continue;
         }
+        let interval = last_hsync
+            .filter(|_| inrange(curpulse.len as f64, eq.0, eq.1))
+            .and_then(|opening| {
+                let end = (i + 24).min(raw_pulses.len());
+                let pulses = run_vblank_state_machine(
+                    &raw_pulses[opening..end],
+                    hsync,
+                    eq,
+                    vsync,
+                    num_pulses,
+                    field.inlinelen,
+                )?;
+                Some((opening, pulses))
+            });
+        let Some((opening, pulses)) = interval else {
+            i += 1;
+            continue;
+        };
+        // The interval opens on the hsync its window starts at, pushed above.
+        let (first, rest) = pulses
+            .split_first()
+            .expect("a closed interval holds its opening and closing hsyncs");
+        assert_eq!(first.index, 0, "the interval opens on the window's hsync");
+        for pulse in rest {
+            valid_types.push(pulse.pulse_type);
+            valid_starts.push(raw_pulses[opening + pulse.index].start);
+            valid_good.push(pulse.good);
+        }
+        let closing = opening
+            + rest
+                .last()
+                .expect("a closed interval holds its opening and closing hsyncs")
+                .index;
+        last_hsync = Some(closing);
+        i = closing + 1;
     }
 
     // Determine longest run of hsync pulses.
