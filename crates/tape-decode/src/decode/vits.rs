@@ -12,33 +12,13 @@ fn lineslice_tbc_bounds(spec: &DecoderSpec, loc: &[usize; 3]) -> (usize, usize) 
     )
 }
 
-fn encoded_output_to_ire(field: &DecodedField, spec: &DecoderSpec, output: &[u16]) -> Vec<f64> {
-    let output_zero = spec.sys_output_zero;
-    let out_scale = field.out_scale.unwrap();
-    let vsync_ire = f64::from(spec.sys_vsync_ire);
-    output
-        .iter()
-        .map(|&value| ((i64::from(value) - output_zero) as f64 / out_scale) + vsync_ire)
-        .collect()
-}
-
-fn raw_output_to_ire<T>(field: &DecodedField, spec: &DecoderSpec, output: &[T]) -> Vec<f64>
-where
-    T: Float,
-{
-    let output_zero = spec.sys_output_zero as f64;
-    let out_scale = field.out_scale.unwrap();
-    let vsync_ire = f64::from(spec.sys_vsync_ire);
-    output
-        .iter()
-        .map(|&value| ((value.to_f64().unwrap() - output_zero) / out_scale) + vsync_ire)
-        .collect()
-}
-
 fn clamped_slice<T>(values: &[T], start: usize, end: usize) -> &[T] {
     &values[start.min(values.len())..end.min(values.len())]
 }
 
+/// IRE values of the luma samples `start..end` of the field: the encoded
+/// output's codes through the field's output scale, the raw export's hertz
+/// through the format's nominal levels.
 fn luma_slice_to_ire(
     field: &DecodedField,
     spec: &DecoderSpec,
@@ -48,24 +28,22 @@ fn luma_slice_to_ire(
 ) -> Vec<f64> {
     match luma {
         LumaOutput::Encoded(values) => {
-            encoded_output_to_ire(field, spec, clamped_slice(values, start, end))
+            let output_zero = spec.sys_output_zero;
+            let out_scale = field.out_scale.expect("a valid field has its output scale");
+            let vsync_ire = f64::from(spec.sys_vsync_ire);
+            clamped_slice(values, start, end)
+                .iter()
+                .map(|&value| ((i64::from(value) - output_zero) as f64 / out_scale) + vsync_ire)
+                .collect()
         }
         LumaOutput::Raw(values) => {
-            raw_output_to_ire(field, spec, clamped_slice(values, start, end))
+            let ire0 = f64::from(spec.sys_ire0);
+            let hz_ire = f64::from(spec.sys_hz_ire);
+            clamped_slice(values, start, end)
+                .iter()
+                .map(|&hz| (f64::from(hz) - ire0) / hz_ire)
+                .collect()
         }
-    }
-}
-
-fn luma_slice_samples(luma: &LumaOutput, start: usize, end: usize) -> Vec<f64> {
-    fn to_f64<T: Into<f64> + Copy>(values: &[T], start: usize, end: usize) -> Vec<f64> {
-        clamped_slice(values, start, end)
-            .iter()
-            .map(|&v| v.into())
-            .collect()
-    }
-    match luma {
-        LumaOutput::Encoded(values) => to_f64(values, start, end),
-        LumaOutput::Raw(values) => to_f64(values, start, end),
     }
 }
 
@@ -78,7 +56,7 @@ fn snr_at(
     start: usize,
     end: usize,
 ) -> f64 {
-    let data = raw_output_to_ire(field, spec, &luma_slice_samples(luma, start, end));
+    let data = luma_slice_to_ire(field, spec, luma, start, end);
     let noise = rms(&data);
     if noise == 0.0 {
         0.0

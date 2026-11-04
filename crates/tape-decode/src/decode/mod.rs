@@ -453,11 +453,9 @@ fn usectooutpx(spec: &DecoderSpec, x: f64) -> f64 {
     x * spec.tbc_sample_rate() / 1e6
 }
 
+/// The 16-bit output code the demod frequency `input` is encoded as, at the
+/// field output scale `out_scale`.
 fn hz_to_output_scalar(spec: &DecoderSpec, input: f64, out_scale: f64) -> f64 {
-    if spec.rf_export_raw_tbc {
-        return input;
-    }
-
     let mut reduced = (input - f64::from(spec.sys_ire0)) / f64::from(spec.sys_hz_ire);
     reduced -= f64::from(spec.sys_vsync_ire);
     (((reduced * out_scale) + spec.sys_output_zero as f64).clamp(0.0, 65535.0) + 0.5) as u16 as f64
@@ -1626,16 +1624,28 @@ impl Decoder {
     pub fn metadata(&self) -> Option<DecoderMetadata> {
         let spec: &DecoderSpec = &self.spec;
         let metadata_field = self.metadata_field?;
-        let ire_to_output = |ire: f32| {
+        let code_of_ire = |ire: f32| {
             hz_to_output_scalar(
                 spec,
                 f64::from(iretohz(spec.sys_ire0, spec.sys_hz_ire, ire)),
                 metadata_field.out_scale,
             )
         };
-        let black = ire_to_output(spec.black_ire as f32);
-        let white = ire_to_output(100.0);
-        let blanking = ire_to_output(0.0);
+        // The levels are set in the 16-bit output's codes, where the level
+        // adjustment widens black and white; the raw export, written in
+        // hertz, has them mapped back through IRE to hertz.
+        let level = |code: f64| {
+            if spec.rf_export_raw_tbc {
+                let ire = (code - spec.sys_output_zero as f64) / metadata_field.out_scale
+                    + f64::from(spec.sys_vsync_ire);
+                f64::from(spec.sys_ire0) + f64::from(spec.sys_hz_ire) * ire
+            } else {
+                code
+            }
+        };
+        let black = level(code_of_ire(spec.black_ire as f32) * (1.0 - spec.level_adjust as f64));
+        let white = level(code_of_ire(100.0) * (1.0 + spec.level_adjust as f64));
+        let blanking = level(code_of_ire(0.0));
         let to_sample = |us: f64| (usectooutpx(spec, us) + BADJ).round_ties_even() as i64;
         let system = match (spec.sys_frame_lines, spec.color_system) {
             (LineSystem::Line525, ColorSystem::Pal) => "PAL-M",
@@ -1646,8 +1656,8 @@ impl Decoder {
             system,
             field_width: spec.sys_outlinelen,
             sample_rate: spec.tbc_sample_rate(),
-            black_16b_ire: black * (1.0 - spec.level_adjust as f64),
-            white_16b_ire: white * (1.0 + spec.level_adjust as f64),
+            black_16b_ire: black,
+            white_16b_ire: white,
             blanking_16b_ire: blanking,
             field_height: metadata_field.outlinecount,
             colour_burst_start: to_sample(spec.sys_color_burst_us[0]),
