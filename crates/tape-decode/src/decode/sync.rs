@@ -1210,9 +1210,9 @@ fn get_line0_fallback(
                     {
                         first_field_confidence = candidate_confidence;
                         if frame_lines == 625 {
-                            first_field = 0;
-                        } else {
                             first_field = 1;
+                        } else {
+                            first_field = 0;
                         }
                     }
                     line_0 = Some(filtered_pulses[i].start as f64);
