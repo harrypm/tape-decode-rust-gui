@@ -605,9 +605,12 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
         .as_ref()
         .filter(|lock| lock.burst_start_line != -1)?;
     let mut linelocs = field.linelocs.clone()?;
-    // Output samples per subcarrier cycle: a phase error maps to that many
-    // output samples, scaled back to the line's input length.
-    let fsc_ratio = spec.tbc_sample_rate() / (spec.sys_fsc_mhz * 1e6);
+    // Output samples per colour-under carrier cycle. The recorded burst sits
+    // at the colour-under carrier and the heterodyne runs on across the
+    // field, so a line timing error moves the upconverted burst's phase by
+    // the carrier's phase over it: a phase error maps to that many output
+    // samples per cycle, scaled back to the line's input length.
+    let carrier_ratio = spec.tbc_sample_rate() / field.chroma_carrier;
     // The vertical interval's lines, up to 9, carry no burst; after a
     // mid-field burst turn-on only the lines with color are refined.
     let first_line = (lock.burst_start_line as usize).max(10);
@@ -647,7 +650,7 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
         return None;
     }
     for (line, departure) in departures {
-        let line_adjust = departure / 360.0 * fsc_ratio;
+        let line_adjust = departure / 360.0 * carrier_ratio;
         let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
         linelocs[line] += line_adjust * scale;
     }
