@@ -1268,13 +1268,18 @@ impl Decoder {
         }
     }
 
-    // Decode as many fields as the window `data` allows. `data` is a window of the
-    // input samples starting at absolute sample offset `data_start`;
-    // `final_chunk` is set only when it reaches the true end of input. Returns the
-    // absolute offset before which input is no longer needed (so the caller can drop
-    // or skip past it) together with the fields produced. When more input is needed
-    // mid-field, decoding pauses with state intact so a later call with an extended
-    // window resumes it bit-identically.
+    /// Decode as many fields as the window `data` allows. `data` is a window
+    /// of the input samples starting at absolute sample offset `data_start`;
+    /// `final_chunk` is set only when it reaches the true end of input.
+    /// Returns the absolute offset before which input is no longer needed
+    /// (so the caller can drop or skip past it) together with the fields
+    /// produced. When more input is needed mid-field, decoding pauses with
+    /// state intact so a later call with an extended window resumes it
+    /// bit-identically.
+    ///
+    /// The window must start at or before the first sample the decoder
+    /// reads: the offset the previous call returned, or for the first call
+    /// the one a call with an empty window reports.
     pub fn decode(
         &mut self,
         data: &[f32],
@@ -1351,6 +1356,11 @@ impl Decoder {
                     envelope: Vec::with_capacity(field_capacity),
                 };
                 let mut completed_blocks = true;
+                assert!(
+                    data_start <= requested_begin * usable_blocksize,
+                    "the data window starts at sample {data_start}, past the first needed block at {}",
+                    requested_begin * usable_blocksize
+                );
                 for b in requested_begin..requested_end {
                     // Only decode a full BLOCKSIZE window; a short tail at the true
                     // end of input leaves the sequence incomplete and ends decoding.
