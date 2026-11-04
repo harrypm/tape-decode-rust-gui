@@ -226,8 +226,6 @@ struct Tape {
     /// Signalled when a worker raises `demand` (or on shutdown); waited on by the
     /// forerunner once it has read far enough ahead of demand.
     more_demand: Condvar,
-    /// Tells the forerunner to stop reading and exit.
-    stop: AtomicBool,
     /// The forerunner's join handle, taken and joined by `shutdown`.
     forerunner: Mutex<Option<JoinHandle<()>>>,
 }
@@ -244,6 +242,12 @@ struct BufState {
     /// The input error that ended the stream, rendered with its cause chain
     /// so every worker whose read runs into it can report it.
     error: Option<String>,
+    /// Tells the forerunner to stop reading and exit. Raised under the lock,
+    /// like every stop flag a waiter on the tape's condvars checks: the waiter
+    /// checks it with the lock held and parks releasing the lock atomically,
+    /// so it either sees the flag before parking or is parked when the notify
+    /// that follows the raise arrives.
+    stop: bool,
     /// The progress of the live readers: the first sample each still needs,
     /// which only ever advances, and which each reads at or beyond. A counter
     /// whose handles are all dropped belongs to a reader that has finished
@@ -272,13 +276,13 @@ impl Tape {
                 eof: false,
                 len: None,
                 error: None,
+                stop: false,
                 readers: Vec::new(),
                 reserve: Some(reserve),
                 demand: 0,
             }),
             data_ready: Condvar::new(),
             more_demand: Condvar::new(),
-            stop: AtomicBool::new(false),
             forerunner: Mutex::new(None),
         });
         let runner = Arc::clone(&tape);
@@ -399,7 +403,7 @@ impl Tape {
             let to_read = {
                 let mut state = self.state.lock().unwrap();
                 loop {
-                    if self.stop.load(Ordering::Relaxed) || state.eof {
+                    if state.stop || state.eof {
                         return;
                     }
                     let frontier = state.start + state.buf.len() as u64;
@@ -435,8 +439,11 @@ impl Tape {
     /// finished (the workers, which hold their own `Arc<Tape>`, are joined first),
     /// so the thread releases its reference and the tape can be dropped.
     fn shutdown(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.more_demand.notify_all();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.stop = true;
+            self.more_demand.notify_all();
+        }
         let handle = self.forerunner.lock().unwrap().take();
         if let Some(handle) = handle {
             let _ = handle.join();
@@ -678,10 +685,15 @@ impl Worker {
     /// a worker parked on a full channel. A panic, or a failed outcome nothing
     /// absorbed, is the error.
     fn shutdown(mut self) -> Result<()> {
-        self.stop.store(true, Ordering::Relaxed);
-        // Wake the worker if it is parked in the tape waiting for samples; the
-        // dropped receiver below only unblocks one parked on a full send.
-        self.tape.data_ready.notify_all();
+        // Raised under the tape lock and followed by the wake-up, so a worker
+        // checking the flag before parking in the tape sees it, and one already
+        // parked is woken (see `BufState::stop`); the dropped receiver below
+        // only unblocks one parked on a full send.
+        {
+            let _state = self.tape.state.lock().unwrap();
+            self.stop.store(true, Ordering::Relaxed);
+            self.tape.data_ready.notify_all();
+        }
         let handle = self.handle.take();
         // Dropping the receiver closes the channel, unblocking a worker parked on
         // a full send so the join below cannot hang.
