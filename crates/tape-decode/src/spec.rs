@@ -945,14 +945,14 @@ impl DecoderSpec {
         self.chroma_output && self.decoder_chroma_conversion_lo.is_some()
     }
 
+    /// Input samples read for a field: the longer field and the lines
+    /// around it the field decode reaches, before its vertical interval and
+    /// past its last line.
     #[inline]
     pub fn readlen(&self) -> usize {
-        let linelen = self.linelen();
-        match self.sys_frame_lines {
-            LineSystem::Line819 => linelen * 500,
-            LineSystem::Line525 => ((linelen * 350) / 16384) * 16384,
-            _ => linelen * 400,
-        }
+        const MARGIN_LINES: usize = 87;
+        let field_lines = self.sys_field_lines[0].max(self.sys_field_lines[1]) as usize;
+        self.linelen() * (field_lines + MARGIN_LINES)
     }
 
     #[inline]
