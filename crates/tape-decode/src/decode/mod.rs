@@ -1486,10 +1486,6 @@ impl Decoder {
                 done = true;
                 continue;
             };
-            if !field_obj.valid {
-                done = true;
-                continue;
-            }
 
             let detected_first_field = field_obj.is_first_field.unwrap_or(false);
             let file_loc = field_obj.output_start_sample().round() as u64;

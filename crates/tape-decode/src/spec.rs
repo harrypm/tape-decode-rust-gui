@@ -362,8 +362,7 @@ impl DecoderSpec {
             let peaking_filter = peaking(
                 dp_video_rf_peak.freq / freq_hz_half,
                 dp_video_rf_peak.gain,
-                None,
-                Some(dp_video_rf_peak.bandwidth / freq_hz_half),
+                dp_video_rf_peak.bandwidth / freq_hz_half,
             )?;
             let peaking_fft = filtfft(&peaking_filter.0, &peaking_filter.1, blocklen, true);
             video_rf_filter = multiply(&video_rf_filter, &abs_complex_owned(peaking_fft));
@@ -419,7 +418,7 @@ impl DecoderSpec {
         };
 
         let filter_deemp = if let Some(deemph) = &decoder_params.deemph {
-            gen_video_main_deemp_fft(deemph, freq_hz, blocklen)?
+            gen_video_main_deemp_fft(deemph, freq_hz, blocklen)
         } else {
             vec![Complex64::new(1.0, 0.0); blocklen / 2 + 1]
         };
@@ -442,7 +441,7 @@ impl DecoderSpec {
 
         let custom_video =
             if let Some(custom_luma_filters) = &decoder_params.video_custom_luma_filters {
-                gen_custom_video_filters(custom_luma_filters, freq_hz, blocklen)?
+                gen_custom_video_filters(custom_luma_filters, freq_hz, blocklen)
             } else {
                 vec![Complex64::new(1.0, 0.0); blocklen / 2 + 1]
             };
@@ -542,8 +541,7 @@ impl DecoderSpec {
             Some(biquad_sos_vec(peaking(
                 sys_params.fsc_mhz / chroma_afc_out_frequency_half,
                 3.4,
-                None,
-                Some(0.5 / chroma_afc_out_frequency_half),
+                0.5 / chroma_afc_out_frequency_half,
             )?))
         } else {
             None
@@ -1063,21 +1061,10 @@ fn biquad_transform(b: &[f64], a: &[f64], wn: f64) -> Result<(Vec<f64>, Vec<f64>
     Ok((b, a))
 }
 
-/// Design a digital biquad peaking filter with variable Q (BA output).
-fn peaking(wn: f64, db_gain: f64, q: Option<f64>, bw: Option<f64>) -> Result<(Vec<f64>, Vec<f64>)> {
-    let bw = if q.is_none() && bw.is_none() {
-        Some(1.0) // octave
-    } else {
-        bw
-    };
-
-    let q = match q {
-        Some(q) => q,
-        None => {
-            // analog filter prototype
-            1.0 / (2.0 * (2.0_f64.ln() / 2.0 * bw.unwrap()).sinh())
-        }
-    };
+/// Digital biquad peaking filter of `db_gain` at `wn` over the bandwidth
+/// `bw`, both in half-cycles per sample (BA output).
+fn peaking(wn: f64, db_gain: f64, bw: f64) -> Result<(Vec<f64>, Vec<f64>)> {
+    let q = 1.0 / (2.0 * (std::f64::consts::LN_2 / 2.0 * bw).sinh());
 
     let (az, ap) = {
         let a = 10.0_f64.powf(db_gain / 20.0);
@@ -1095,34 +1082,17 @@ fn peaking(wn: f64, db_gain: f64, q: Option<f64>, bw: Option<f64>) -> Result<(Ve
     biquad_transform(&b, &a, wn)
 }
 
-fn gen_shelf(
-    f0: f64,
-    dbgain: f64,
-    shelf_type: ShelfKind,
-    fs: f64,
-    qfactor: Option<f64>,
-    bandwidth: Option<f64>,
-    slope: Option<f64>,
-) -> Result<([f64; 3], [f64; 3])> {
+/// Biquad shelving filter of `dbgain` with its midpoint at `f0` Hz and the
+/// quality factor `q`, for a signal sampled at `fs` Hz, as (b, a) taps.
+fn gen_shelf(f0: f64, dbgain: f64, shelf_type: ShelfKind, fs: f64, q: f64) -> ([f64; 3], [f64; 3]) {
     let a = 10.0_f64.powf(dbgain / 40.0);
     let w0 = std::f64::consts::TAU * (f0 / fs);
-    let sinw0 = w0.sin();
-
-    let alpha = if let Some(qfactor) = qfactor {
-        sinw0 / (2.0 * qfactor)
-    } else if let Some(bandwidth) = bandwidth {
-        sinw0 * ((std::f64::consts::LN_2 / 2.0) * bandwidth * (w0 / sinw0)).sinh()
-    } else if let Some(slope) = slope {
-        (w0 / 2.0).sin() * ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).sqrt()
-    } else {
-        bail!("Must specify one value for either qfactor, bandwidth, or slope");
-    };
-
+    let alpha = w0.sin() / (2.0 * q);
     let cosw0 = w0.cos();
     let asquared = a.sqrt();
 
     match shelf_type {
-        ShelfKind::Low => Ok((
+        ShelfKind::Low => (
             [
                 a * ((a + 1.0) - (a - 1.0) * cosw0 + 2.0 * asquared * alpha),
                 2.0 * a * ((a - 1.0) - (a + 1.0) * cosw0),
@@ -1133,8 +1103,8 @@ fn gen_shelf(
                 -2.0 * ((a - 1.0) + (a + 1.0) * cosw0),
                 (a + 1.0) + (a - 1.0) * cosw0 - 2.0 * asquared * alpha,
             ],
-        )),
-        ShelfKind::High => Ok((
+        ),
+        ShelfKind::High => (
             [
                 a * ((a + 1.0) + (a - 1.0) * cosw0 + 2.0 * asquared * alpha),
                 -2.0 * a * ((a - 1.0) + (a + 1.0) * cosw0),
@@ -1145,7 +1115,7 @@ fn gen_shelf(
                 2.0 * ((a - 1.0) - (a + 1.0) * cosw0),
                 (a + 1.0) - (a - 1.0) * cosw0 - 2.0 * asquared * alpha,
             ],
-        )),
+        ),
     }
 }
 
@@ -1451,17 +1421,9 @@ fn gen_video_main_deemp_fft(
     deemph: &DeemphasisParams,
     freq_hz: f64,
     block_len: usize,
-) -> Result<Vec<Complex64>> {
-    let (ataps, btaps) = gen_shelf(
-        deemph.mid,
-        deemph.gain,
-        ShelfKind::High,
-        freq_hz,
-        Some(deemph.q),
-        None,
-        None,
-    )?;
-    Ok(filtfft(&btaps, &ataps, block_len, false))
+) -> Vec<Complex64> {
+    let (ataps, btaps) = gen_shelf(deemph.mid, deemph.gain, ShelfKind::High, freq_hz, deemph.q);
+    filtfft(&btaps, &ataps, block_len, false)
 }
 
 fn gen_video_lpf(
@@ -1545,7 +1507,7 @@ fn gen_custom_video_filters(
     filter_list: &[VideoLumaFilter],
     freq_hz: f64,
     block_len: usize,
-) -> Result<Vec<Complex64>> {
+) -> Vec<Complex64> {
     let mut ret = vec![Complex64::new(1.0, 0.0); block_len / 2 + 1];
     for filter in filter_list {
         match filter {
@@ -1562,21 +1524,13 @@ fn gen_custom_video_filters(
                 midfreq,
                 q,
             } => {
-                let (b, a) = ba_to_vec(gen_shelf(
-                    *midfreq,
-                    *gain,
-                    *shelf_kind,
-                    freq_hz / 2.0,
-                    Some(*q),
-                    None,
-                    None,
-                )?);
+                let (b, a) = ba_to_vec(gen_shelf(*midfreq, *gain, *shelf_kind, freq_hz / 2.0, *q));
                 let fft = filtfft(&b, &a, block_len, false);
                 ret = multiply(&ret, &fft);
             }
         }
     }
-    Ok(ret)
+    ret
 }
 
 fn firwin_lowpass(numtaps: usize, cutoff_norm_to_nyquist: f64) -> Vec<f64> {

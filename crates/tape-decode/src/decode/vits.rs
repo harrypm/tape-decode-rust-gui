@@ -1,14 +1,10 @@
 use super::*;
 
-fn lineslice_tbc_bounds(spec: &DecoderSpec, loc: &[usize; 3], keepphase: bool) -> (usize, usize) {
-    // return a slice corresponding with pre-TBC line
+/// Output sample range of the slice `loc`, a field line, its start in
+/// microseconds into the line and its length in microseconds.
+fn lineslice_tbc_bounds(spec: &DecoderSpec, loc: &[usize; 3]) -> (usize, usize) {
     let outlinelen = spec.sys_outlinelen as f64;
-    let mut begin_px = outlinelen * (loc[0] as f64 - 1.0);
-    let mut begin_offset = usectooutpx(spec, loc[1] as f64);
-    if keepphase {
-        begin_offset = (begin_offset / 4.0).floor() * 4.0;
-    }
-    begin_px += begin_offset;
+    let begin_px = outlinelen * (loc[0] as f64 - 1.0) + usectooutpx(spec, loc[1] as f64);
     let length_px = usectooutpx(spec, loc[2] as f64);
     (
         begin_px.round_ties_even().max(0.0) as usize,
@@ -99,14 +95,14 @@ pub(crate) fn compute_vits_metrics(
 ) -> Result<VitsMetrics> {
     let mut wsnr_raw: Option<f64> = None;
     for wl in &spec.sys_ld_vits_whitelocs {
-        let (start, end) = lineslice_tbc_bounds(spec, wl, false);
+        let (start, end) = lineslice_tbc_bounds(spec, wl);
         let ire_values = luma_slice_to_ire(metrics_field, spec, metrics_luma, start, end);
         if inrange(mean(&ire_values), 90.0, 110.0) {
             wsnr_raw = Some(snr_at(metrics_field, spec, metrics_luma, start, end));
             break;
         }
     }
-    let (black_start, black_end) = lineslice_tbc_bounds(spec, &spec.sys_blacksnr_slice, false);
+    let (black_start, black_end) = lineslice_tbc_bounds(spec, &spec.sys_blacksnr_slice);
     let bpsnr_raw = snr_at(metrics_field, spec, metrics_luma, black_start, black_end);
     let round_finite = |value: f64| {
         let rounded = roundfloat(value, 1);
