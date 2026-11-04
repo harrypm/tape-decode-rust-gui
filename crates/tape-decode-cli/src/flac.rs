@@ -34,6 +34,8 @@ struct FlacSource {
     /// Whether the source supports real seeking (a regular file); pipes can only
     /// skip forward by decoding.
     seekable: bool,
+    /// Samples in the stream, when its header states them.
+    num_frames: Option<u64>,
     /// Decoded samples of the current packet not yet returned.
     pending: Vec<f32>,
     pending_pos: usize,
@@ -49,7 +51,7 @@ impl FlacSource {
         let reader =
             FlacReader::try_new(mss, FormatOptions::default()).context("failed to read FLAC")?;
 
-        let (track_id, params) = {
+        let (track_id, num_frames, params) = {
             let track = reader.tracks().first().context("FLAC has no tracks")?;
             let params = track
                 .codec_params
@@ -57,7 +59,7 @@ impl FlacSource {
                 .and_then(CodecParameters::audio)
                 .context("FLAC track is not audio")?
                 .clone();
-            (track.id, params)
+            (track.id, track.num_frames, params)
         };
 
         let bits = params
@@ -83,6 +85,7 @@ impl FlacSource {
             shift: 32 - bits,
             scale,
             seekable,
+            num_frames,
             pending: Vec::new(),
             pending_pos: 0,
             position: 0,
@@ -168,6 +171,14 @@ impl SampleSource for FlacSource {
 
     fn seek_samples(&mut self, sample: u64) -> Result<()> {
         if self.seekable {
+            self.decoder.reset();
+            self.pending.clear();
+            self.pending_pos = 0;
+            // A stream of stated length ends at or before a sample past it.
+            if self.num_frames.is_some_and(|num_frames| sample >= num_frames) {
+                self.eof = true;
+                return Ok(());
+            }
             // Jump to the packet containing `sample` via symphonia's binary
             // search, then drop the handful of samples up to it.
             let ts = Timestamp::try_from(sample).context("seek offset too large")?;
@@ -175,16 +186,26 @@ impl SampleSource for FlacSource {
                 ts,
                 track_id: self.track_id,
             };
-            self.decoder.reset();
-            self.pending.clear();
-            self.pending_pos = 0;
             match self.reader.seek(SeekMode::Coarse, seek) {
+                // The search lands past the sample only where the stream is
+                // damaged, with no way back to it.
+                Ok(seeked) if seeked.actual_ts > ts => bail!(
+                    "FLAC seek to sample {sample} landed on sample {}: the stream is damaged before it",
+                    seeked.actual_ts.get()
+                ),
                 Ok(seeked) => {
                     self.eof = false;
                     self.position = seeked.actual_ts.get() as u64;
                 }
-                // The stream ends before the sample: the input is at its end.
+                // The stream ends before the sample, whether its header
+                // states a length past it or none: the input is at its end.
                 Err(Error::SeekError(SeekErrorKind::OutOfRange)) => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(Error::IoError(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     self.eof = true;
                     return Ok(());
                 }
