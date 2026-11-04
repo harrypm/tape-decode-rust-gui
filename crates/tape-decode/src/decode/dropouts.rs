@@ -137,10 +137,6 @@ pub(crate) fn detect_dropouts_rf(
         .linelocs
         .as_ref()
         .expect("a valid field has line locations");
-    let threshold = spec
-        .dod_threshold_a
-        .unwrap_or_else(|| mean_slice(env) as f32 * spec.dod_threshold_p);
-
     // The written rows, reported as fieldLine 1 ..= outlinecount.
     let std::ops::Range {
         start: start_line,
@@ -149,6 +145,13 @@ pub(crate) fn detect_dropouts_rf(
 
     let start_rf = linelocs[start_line].floor() as usize;
     let end_rf = env.len().min(linelocs[end_line].ceil() as usize);
+
+    // The fractional threshold is set against the field's own rows: the
+    // buffer runs on into the next field, read by the other head at its own
+    // level.
+    let threshold = spec
+        .dod_threshold_a
+        .unwrap_or_else(|| mean_slice(&env[start_rf..end_rf]) as f32 * spec.dod_threshold_p);
 
     let mut dropouts_rf = find_dropouts_rf(
         env,
