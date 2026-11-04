@@ -18,7 +18,7 @@ pub enum FieldOrderAction {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DecodeOptions {
     /// Refine hsync from the color burst phase.
     pub burst_hsync: bool,
@@ -73,6 +73,7 @@ pub struct Ire0Adjust {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecodeProfile {
     pub sys_params: SysParams,
     pub decoder_params: DecoderParams,
@@ -126,6 +127,7 @@ pub enum ColorSystem {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SysParams {
     pub color_system: ColorSystem,
     pub fsc_mhz: f64,
@@ -153,6 +155,7 @@ pub struct SysParams {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecoderParams {
     pub video_bpf: Option<VideoBpf>,
     pub video_lpf_freq: f64,
@@ -200,21 +203,25 @@ pub struct DecoderParams {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VideoEqBand {
     pub corner: f64,
     pub transition: f64,
     pub order_limit: usize,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VideoEqParams {
     pub loband: VideoEqBand,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FmAudioChannels {
     pub channel_0_freq: f64,
     pub channel_1_freq: f64,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RfPeaking {
     pub freq: f64,
     pub gain: f64,
@@ -226,35 +233,41 @@ pub struct NotchFilter {
     pub q: f64,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoostRampFilter {
     pub rf_linear_0: f64,
     pub rf_linear_20: f64,
     pub start_freq: f64,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VideoBpf {
     pub low: f64,
     pub high: f64,
     pub order: usize,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoostBpf {
     pub low: f64,
     pub high: f64,
     pub mult: f64,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeemphasisParams {
     pub mid: f64,
     pub gain: f64,
     pub q: f64,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogisticParams {
     pub mid: f32,
     pub rate: f32,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NonlinearParams {
     pub highpass_freq: f64,
     pub highpass_limit_h: f32,
@@ -271,7 +284,7 @@ pub struct NonlinearParams {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", deny_unknown_fields)]
 pub enum VideoLumaFilter {
     /// Analog transfer function of first-order real zeros and poles given as
     /// time constants in seconds: H(s) = prod(1 + s tz) / prod(1 + s tp).
