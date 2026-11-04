@@ -769,11 +769,6 @@ pub(crate) fn predecode_field_from_rawdecode(
         inlinelen: spec.linelen() as f64,
         outlinelen: spec.sys_outlinelen,
         outlinecount: (spec.sys_frame_lines.line_count() / 2) + 1,
-        ire0_backporch: if spec.sys_frame_lines != LineSystem::Line525 {
-            (96, 160)
-        } else {
-            (74, 124)
-        },
         wow_level_adjust_smoothing: spec.wow_level_adjust_smoothing,
         wow_interpolation_method: spec.wow_interpolation_method,
         validpulses: Vec::new(),

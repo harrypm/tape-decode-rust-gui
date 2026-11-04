@@ -3,6 +3,7 @@ use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::{Complex32, Complex64};
 use rustfft::{Fft, FftPlanner};
 use sci_rs::signal::filter::design::{FilterBandType, Sos};
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::decode::{
@@ -24,6 +25,38 @@ const CHROMA_AUDIO_NOTCH_Q: f64 = 10.0;
 /// high end, which keeps a rate given in hertz without its suffix from
 /// sizing the buffers by it.
 const INPUT_RATE_MHZ: std::ops::RangeInclusive<f64> = 2.0..=1000.0;
+
+/// How far the `--ire0-adjust` level windows keep from the sync edges and
+/// the active video, in microseconds: past the edges' transitions and the
+/// deemphasis ringing that follows them.
+const IRE0_ADJUST_MARGIN_US: f64 = 0.5;
+
+/// Output sample windows the `--ire0-adjust` modes measure each line's
+/// levels in: the sync tip, and the back porch from the sync pulse to the
+/// active video, each [`IRE0_ADJUST_MARGIN_US`] clear of its edges.
+pub(crate) struct Ire0AdjustWindows {
+    pub(crate) sync_tip: Range<usize>,
+    pub(crate) back_porch: Range<usize>,
+}
+
+fn ire0_adjust_windows(sys_params: &SysParams, tbc_sample_rate: f64) -> Result<Ire0AdjustWindows> {
+    let margin = IRE0_ADJUST_MARGIN_US;
+    let sync_end = sys_params.hsync_pulse_us;
+    let active_start = sys_params.active_video_us[0];
+    let window = |start_us: f64, end_us: f64| -> Result<Range<usize>> {
+        if start_us >= end_us {
+            bail!(
+                "hsync_pulse_us of {sync_end} us and active_video_us from {active_start} us leave no sync tip or back porch to measure {margin} us clear of its edges"
+            );
+        }
+        let to_outpx = |us: f64| (us * tbc_sample_rate / 1e6).round_ties_even() as usize;
+        Ok(to_outpx(start_us)..to_outpx(end_us))
+    };
+    Ok(Ire0AdjustWindows {
+        sync_tip: window(margin, sync_end - margin)?,
+        back_porch: window(sync_end + margin, active_start - margin)?,
+    })
+}
 
 fn store_real_filter(values: Vec<f64>) -> Vec<f32> {
     values.into_iter().map(|value| value as f32).collect()
@@ -119,6 +152,7 @@ pub struct DecoderSpec {
     pub(crate) rf_skip_hsync_refine: bool,
     pub(crate) rf_export_raw_tbc: bool,
     pub(crate) rf_ire0_adjust: Ire0Adjust,
+    pub(crate) ire0_adjust_windows: Ire0AdjustWindows,
     pub(crate) rf_relaxed_line0: bool,
     pub(crate) rf_detect_chroma_track_phase: bool,
     pub(crate) rf_enable_color_killer: bool,
@@ -838,6 +872,7 @@ impl DecoderSpec {
             rf_skip_hsync_refine: request.rf_skip_hsync_refine,
             rf_export_raw_tbc: request.rf_export_raw_tbc,
             rf_ire0_adjust: request.rf_ire0_adjust,
+            ire0_adjust_windows: ire0_adjust_windows(sys_params, tbc_sample_rate)?,
             rf_relaxed_line0: request.rf_relaxed_line0,
             rf_detect_chroma_track_phase: request.rf_detect_chroma_track_phase,
             rf_enable_color_killer: request.rf_enable_color_killer,
@@ -1032,6 +1067,9 @@ fn check_profile(
     }
     if sys_params.outlinelen == 0 {
         bail!("outlinelen must be at least one sample");
+    }
+    if sys_params.hsync_pulse_us.is_nan() || sys_params.hsync_pulse_us <= 0.0 {
+        bail!("hsync_pulse_us must be positive");
     }
     let frame_lines = sys_params.frame_lines.line_count() as i64;
     let mut field_lines = sys_params.field_lines;

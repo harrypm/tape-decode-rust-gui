@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::optimized::{
@@ -485,13 +486,13 @@ fn sync_confidence_from_linelocs(field: &DecodedField) -> i64 {
     }
 }
 
-// Level of samples `[start, end)` of each line of a picture of `outlinelen`
+// Level of the `window` samples of each line of a picture of `outlinelen`
 // samples per line: the mean of the middle third of the sorted per-line
 // medians, which rejects lines hit by dropouts.
-fn picture_line_level(picture_luma: &[f32], outlinelen: usize, start: usize, end: usize) -> f32 {
+fn picture_line_level(picture_luma: &[f32], outlinelen: usize, window: &Range<usize>) -> f32 {
     let mut levels: Vec<f32> = picture_luma
         .chunks_exact(outlinelen)
-        .map(|line| median_from_values(&mut line[start..end].to_vec()))
+        .map(|line| median_from_values(&mut line[window.clone()].to_vec()))
         .collect();
     levels.sort_by(f32::total_cmp);
     mean_slice(&levels[levels.len() / 3..(levels.len() * 2) / 3]) as f32
@@ -778,7 +779,6 @@ struct DecodedField {
     inlinelen: f64,
     outlinelen: usize,
     outlinecount: usize,
-    ire0_backporch: (usize, usize),
     wow_level_adjust_smoothing: f32,
     wow_interpolation_method: WowInterpolation,
     validpulses: Vec<i64>,
@@ -1395,16 +1395,12 @@ impl Decoder {
                             let mut hz_ire = self.spec.sys_hz_ire;
                             let adjust = self.spec.rf_ire0_adjust;
                             if luma.len() == field_obj.outlinecount * field_obj.outlinelen {
-                                // Keep clear of the sync edges, whose ringing
-                                // would skew the medians.
-                                const PADDING: usize = 4;
-                                let (backporch_start, backporch_end) = field_obj.ire0_backporch;
+                                let windows = &self.spec.ire0_adjust_windows;
                                 if adjust.backporch {
                                     ire0 = picture_line_level(
                                         &luma,
                                         field_obj.outlinelen,
-                                        backporch_start + PADDING,
-                                        backporch_end - PADDING,
+                                        &windows.back_porch,
                                     );
                                     tracing::debug!(ire0, "calculated ire0");
                                 }
@@ -1414,8 +1410,7 @@ impl Decoder {
                                     let hsync_level = picture_line_level(
                                         &luma,
                                         field_obj.outlinelen,
-                                        PADDING,
-                                        backporch_start - PADDING,
+                                        &windows.sync_tip,
                                     );
                                     hz_ire = (ire0 - hsync_level) / -self.spec.sys_vsync_ire;
                                     tracing::debug!(hz_ire, "calculated hz_ire");
