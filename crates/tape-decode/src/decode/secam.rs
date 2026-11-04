@@ -399,7 +399,22 @@ fn regenerate_blanking(
     let fade = raised_cosine(FADE_LEN);
     let ramp = raised_cosine(RAMP_LEN);
     let step = raised_cosine(layout.step.len());
+    // The bump's shape over its span; its sum is the area a unit amplitude
+    // sweeps.
     let taper = raised_cosine(BUMP_TAPER);
+    let bump_len = layout.bump.len();
+    let bump: Vec<f64> = (0..bump_len)
+        .map(|k| {
+            if k < BUMP_TAPER {
+                taper[k]
+            } else if k >= bump_len - BUMP_TAPER {
+                taper[bump_len - 1 - k]
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let bump_area: f64 = bump.iter().sum();
     let q = FADE_LEN;
     let mut cleaned = chroma.to_vec();
 
@@ -452,22 +467,13 @@ fn regenerate_blanking(
         let phase0 = outgoing.phase_at((start - q) as f64);
         let (_, phase_end) = integrate_phase(&profile, phase0, samp_rate);
         let err = wrap_phase(incoming.phase_at(end as f64) - phase_end);
-        let bump_len = layout.bump.len();
-        let bump_area = (bump_len - BUMP_TAPER) as f64;
         let bump_capacity = TAU * BUMP_MAX_HZ * bump_area / samp_rate;
         let err_bump = err.clamp(-bump_capacity, bump_capacity);
         let bump_amp = err_bump * samp_rate / (TAU * bump_area);
-        for (k, freq) in profile[q + layout.bump.start..q + layout.bump.end]
+        for (freq, &shape) in profile[q + layout.bump.start..q + layout.bump.end]
             .iter_mut()
-            .enumerate()
+            .zip(&bump)
         {
-            let shape = if k < BUMP_TAPER {
-                taper[k]
-            } else if k >= bump_len - BUMP_TAPER {
-                taper[bump_len - 1 - k]
-            } else {
-                1.0
-            };
             *freq += bump_amp * shape;
         }
         let spill = (err - err_bump) * samp_rate / (TAU * layout.hold.len() as f64);
