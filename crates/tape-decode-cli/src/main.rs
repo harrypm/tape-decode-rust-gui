@@ -9,6 +9,7 @@ mod reader;
 mod writer;
 
 fn main() {
+    os::default_sigpipe();
     if let Err(error) = cli::run_cli() {
         eprintln!("error: {error:#}");
         std::process::exit(1);

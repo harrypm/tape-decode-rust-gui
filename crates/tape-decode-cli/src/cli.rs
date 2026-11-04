@@ -2,7 +2,7 @@
 //! parsed options into a `DecoderSpec` before running the decode.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -603,8 +603,9 @@ fn run_write_profile(args: WriteProfileArgs) -> Result<()> {
 }
 
 fn run_list_profiles(_args: ListProfilesArgs) -> Result<()> {
+    let mut stdout = io::stdout().lock();
     for name in profile_names()? {
-        println!("{name}");
+        writeln!(stdout, "{name}")?;
     }
     Ok(())
 }

@@ -21,6 +21,11 @@ mod unix {
 
         Ok(unsafe { File::from_raw_fd(new_fd) })
     }
+
+    pub(super) fn default_sigpipe() {
+        // SAFETY: a signal disposition set before any other thread exists.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
 }
 
 #[cfg(unix)]
@@ -70,6 +75,8 @@ mod windows {
 
         Ok(unsafe { File::from_raw_handle(duplicated as RawHandle) })
     }
+
+    pub(super) fn default_sigpipe() {}
 }
 
 #[cfg(windows)]
@@ -81,4 +88,11 @@ pub fn stdin_file() -> io::Result<File> {
 
 pub fn stdout_file() -> io::Result<File> {
     imp::dup_as_file(stdout())
+}
+
+/// Lets a write to a closed pipe end the process quietly, as it does other
+/// command-line tools, instead of failing the write: the Rust runtime starts
+/// with SIGPIPE ignored.
+pub fn default_sigpipe() {
+    imp::default_sigpipe()
 }
