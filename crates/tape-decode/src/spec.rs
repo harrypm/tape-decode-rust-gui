@@ -331,7 +331,7 @@ impl DecoderSpec {
         let fm_audio_notch = request.fm_audio_notch;
         // Chroma processing, which also locks hsync to the burst, runs for every
         // color-under format; only producing the chroma output is optional.
-        let rf_write_chroma = is_color_under && !request.rf_export_raw_tbc;
+        let rf_write_chroma = is_color_under;
         let chroma_output = rf_write_chroma && !request.skip_chroma;
         if chroma_output && sys_params.burst_abs_ref.is_none() {
             bail!("chroma output requires the format's burst_abs_ref");
@@ -972,8 +972,7 @@ impl DecoderSpec {
         self.bytes_per_field().max(1)
     }
 
-    /// Whether the decode has chroma to write: a colour-under format, not
-    /// exported raw.
+    /// Whether the decode has chroma to write: a colour-under format.
     #[inline]
     pub fn decodes_chroma(&self) -> bool {
         self.rf_write_chroma
