@@ -677,7 +677,7 @@ struct MtOrchestrator<'a> {
     /// Shared single-pass view of the input, streamed once to all workers.
     tape: Arc<Tape>,
     mt: MtParams,
-    /// Absolute sample offset where decoding begins (honors `--start-fileloc`).
+    /// Absolute sample offset where decoding begins (`--offset`).
     global_base: u64,
     /// Samples per field, for translating field distances into seek offsets.
     spf: u64,
@@ -975,7 +975,7 @@ impl<'a> MtOrchestrator<'a> {
 
 /// Multithreaded counterpart to [`decode_all`]. Requires `mt.threads >= 1`;
 /// `mt.threads == 0` is handled by the serial path. `start_offset` is the
-/// absolute sample where decoding begins (`--start-fileloc`, 0 by default).
+/// absolute sample where decoding begins (`--offset`, 0 by default).
 ///
 /// The input is streamed once, forward, by the [`Tape`]'s forerunner thread;
 /// the workers never read, reopen, seek, or stat it, so this runs on

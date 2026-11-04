@@ -5,9 +5,9 @@ use std::marker::PhantomData;
 use anyhow::{bail, Context as _, Result};
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
 
-/// Input encoding. The raw formats widen straight to `f32` with no rescaling
-/// (so `S16LE` is little-endian `i16`, `F32LE` is passed through verbatim);
-/// `Flac` is decoded by [`crate::flac`].
+/// Input encoding. The integer formats are centered and normalized to about
+/// [-1, 1] (`U8` by 127.5, `S16LE` by 32768), `F32LE` is passed through
+/// verbatim; `Flac` is decoded by [`crate::flac`].
 #[derive(Clone, Copy, Debug)]
 pub enum SampleFormat {
     U8,
