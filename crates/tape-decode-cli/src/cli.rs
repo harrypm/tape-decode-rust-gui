@@ -268,7 +268,7 @@ struct DecodeArgs {
     /// RF dropout threshold as a fraction of the field average envelope.
     #[arg(long, default_value_t = DEFAULT_THRESHOLD_P_DDD)]
     dod_threshold_p: f32,
-    /// Absolute RF dropout threshold, overriding the percentage threshold.
+    /// Absolute RF dropout threshold on the envelope's 0 to 1 scale, overriding the fractional threshold.
     #[arg(long)]
     dod_threshold_a: Option<f32>,
     /// Hysteresis ratio used by RF dropout detection.
