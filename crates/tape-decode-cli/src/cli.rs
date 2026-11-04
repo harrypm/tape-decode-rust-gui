@@ -187,8 +187,14 @@ struct DecodeArgs {
     /// Fraction by which the metadata's black level is lowered and its white level raised: black16bIRE * (1 - x), white16bIRE * (1 + x).
     #[arg(long, default_value_t = 0.1)]
     level_adjust: f32,
-    /// Adjust the video levels from each field's sync and blanking; a bare flag selects backporch.
-    #[arg(long, value_enum, ignore_case = true, value_delimiter = ',', num_args = 0..=1, default_missing_value = "backporch")]
+    /// Adjust the video levels from each field's sync and blanking: backporch, hsync, or both separated by a comma.
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        value_delimiter = ',',
+        value_name = "MODE"
+    )]
     ire0_adjust: Option<Vec<CliIre0AdjustMode>>,
     /// Override the profile's RF high-boost multiplier.
     #[arg(long)]
@@ -196,8 +202,8 @@ struct DecodeArgs {
     /// Disable differential video demodulation.
     #[arg(long)]
     disable_diff_demod: bool,
-    /// Enable FM audio notch filters; omitting the value uses Q=10.0.
-    #[arg(long, num_args = 0..=1, default_missing_value = "10.0")]
+    /// Notch the FM audio carriers out of the RF with this Q factor; by default the profile's setting, 0 for no notch.
+    #[arg(long, value_name = "Q")]
     fm_audio_notch: Option<f64>,
     /// Enable nonlinear deemphasis.
     #[arg(long)]
@@ -205,8 +211,8 @@ struct DecodeArgs {
     /// Enable sub-deemphasis.
     #[arg(long)]
     subdeemp: bool,
-    /// Enable luma Y comb filtering with the given IRE clamp; omitting the value uses 1.5.
-    #[arg(long, num_args = 0..=1, default_missing_value = "1.5", default_value = "0.0")]
+    /// Luma Y comb filter clamp in IRE; 0 leaves the comb off.
+    #[arg(long, value_name = "IRE", default_value_t = 0.0)]
     y_comb: f32,
     /// Override chroma automatic frequency control; omitting the value enables it.
     #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
