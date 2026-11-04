@@ -92,7 +92,7 @@ pub(crate) fn compute_vits_metrics(
     spec: &DecoderSpec,
     metrics_field: &DecodedField,
     metrics_luma: &LumaOutput,
-) -> Result<VitsMetrics> {
+) -> VitsMetrics {
     let mut wsnr_raw: Option<f64> = None;
     for wl in &spec.sys_ld_vits_whitelocs {
         let (start, end) = lineslice_tbc_bounds(spec, wl);
@@ -108,8 +108,8 @@ pub(crate) fn compute_vits_metrics(
         let rounded = roundfloat(value, 1);
         rounded.is_finite().then_some(rounded)
     };
-    Ok(VitsMetrics {
+    VitsMetrics {
         w_snr: wsnr_raw.and_then(round_finite),
         b_psnr: round_finite(bpsnr_raw),
-    })
+    }
 }

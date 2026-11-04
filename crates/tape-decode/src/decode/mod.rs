@@ -7,7 +7,7 @@ use crate::optimized::{
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
-use anyhow::{bail, Context as _, Result};
+use anyhow::{bail, Result};
 use num_traits::Float;
 use realfft::{ComplexToReal, RealToComplex};
 use rustfft::num_complex::Complex32;
@@ -1138,7 +1138,7 @@ fn downscale_raw_vec(
     use_burst_channel: bool,
     shift: f64,
     line_window: Option<usize>,
-) -> Result<Vec<f32>> {
+) -> Vec<f32> {
     let actual_linelocs = field
         .linelocs
         .as_deref()
@@ -1177,10 +1177,10 @@ fn downscale_raw_vec(
                 shift,
                 line_window: line_window.unwrap_or(outwidth),
             },
-        )?
+        )
     };
     field.wow_analysis = Some((median, mad));
-    Ok(dsout)
+    dsout
 }
 
 // Color burst window in output samples from the line start, padded a little
@@ -1280,7 +1280,7 @@ impl Decoder {
         data: &[f32],
         data_start: u64,
         final_chunk: bool,
-    ) -> Result<(u64, Vec<WriteableField>)> {
+    ) -> (u64, Vec<WriteableField>) {
         let data_start = data_start as usize;
         let readlen = self.spec.readlen();
         let blocksize = BLOCKSIZE;
@@ -1337,7 +1337,7 @@ impl Decoder {
                             offset: decoded_offset.unwrap_or(0.0),
                         });
                     }
-                    return Ok(((requested_begin * usable_blocksize) as u64, output));
+                    return ((requested_begin * usable_blocksize) as u64, output);
                 }
 
                 // Every block contributes exactly `usable_blocksize` samples per
@@ -1373,7 +1373,7 @@ impl Decoder {
                         scheduled_prevfield,
                         &mut self.inter_field_state,
                         scheduled_readloc_value,
-                    )?)
+                    ))
                 } else {
                     None
                 };
@@ -1403,7 +1403,7 @@ impl Decoder {
                             false,
                             0.0,
                             None,
-                        )?;
+                        );
                         if self.spec.rf_y_comb != 0.0 {
                             luma = y_comb(&luma, field_obj.outlinelen, self.spec.rf_y_comb);
                         }
@@ -1468,7 +1468,7 @@ impl Decoder {
                         });
 
                         picture_chroma =
-                            decode_chroma(&mut field_obj, &self.spec, self.conversion_lo.as_mut())?;
+                            decode_chroma(&mut field_obj, &self.spec, self.conversion_lo.as_mut());
 
                         field_done = true;
                     }
@@ -1523,12 +1523,11 @@ impl Decoder {
 
                 // Decode-fault bitmap.
                 let mut decode_faults = 0i64;
-                let vits_metrics = {
-                    let metrics_luma = picture_luma
-                        .as_ref()
-                        .context("valid field missing luma picture")?;
-                    compute_vits_metrics(&self.spec, &field_obj, metrics_luma)?
-                };
+                let vits_metrics = compute_vits_metrics(
+                    &self.spec,
+                    &field_obj,
+                    picture_luma.as_ref().expect("a valid field has its luma"),
+                );
 
                 // Interlaced video requires alternating fields. Handle cases where
                 // fields repeat (recording breaks, progressive content, etc.).
@@ -1606,9 +1605,7 @@ impl Decoder {
                 if write_field {
                     let dataset = WriteableField::new(
                         info,
-                        picture_luma
-                            .take()
-                            .context("valid field missing luma picture")?,
+                        picture_luma.take().expect("a valid field has its luma"),
                         picture_chroma.take(),
                         &field_obj,
                         color_framed,
@@ -1629,7 +1626,7 @@ impl Decoder {
             });
         }
 
-        Ok((self.fdoffset, output))
+        (self.fdoffset, output)
     }
 
     /// Place `field` at the next position of the output sequence.

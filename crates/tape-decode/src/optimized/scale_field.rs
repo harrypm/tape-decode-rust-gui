@@ -1,5 +1,4 @@
 use super::select_ranks_by_key;
-use anyhow::{bail, Result};
 use lanes::{fold, Lanes};
 
 // Full-field wow factors are large; fixed-point keeps the buffer at 4 bytes per
@@ -44,15 +43,15 @@ pub(crate) fn scale_field(
     actual_linelocs: &[f64],
     k: usize,
     params: ScaleFieldParams,
-) -> Result<(Vec<f32>, f64, f64)> {
-    let (interp_t, interp_c) = make_interp_spline_scaled(expected_linelocs, actual_linelocs, k)?;
+) -> (Vec<f32>, f64, f64) {
+    let (interp_t, interp_c) = make_interp_spline_scaled(expected_linelocs, actual_linelocs, k);
     let spline = (interp_t.as_slice(), interp_c.as_slice());
-    Ok(match k {
+    match k {
         1 => scale_field_linear(buf, lut, out_len, spline, &params),
         2 => scale_field_k::<2>(buf, lut, out_len, spline, &params),
         3 => scale_field_k::<3>(buf, lut, out_len, spline, &params),
-        _ => unreachable!("unsupported spline degree"),
-    })
+        _ => unreachable!("the wow interpolation degrees are 1 to 3"),
+    }
 }
 
 fn level_adjust_threshold_value(level_adjust_threshold: f64, mad: f64) -> f64 {
@@ -887,7 +886,7 @@ fn eval_spline_value_deriv_1(
 
 /// Build an interpolating spline of degree `k` over (x, y) for the wow
 /// interpolation modes (k=1 linear, k=2 quadratic, k=3 natural cubic).
-fn make_interp_spline_scaled(x: &[f64], y: &[f64], k: usize) -> Result<(Vec<f64>, Vec<f64>)> {
+fn make_interp_spline_scaled(x: &[f64], y: &[f64], k: usize) -> (Vec<f64>, Vec<f64>) {
     // Dispatch once on the runtime degree so the per-point inner loops are
     // monomorphized over a compile-time `K` (collapses the general NURBS recurrence,
     // especially for the common linear k=1 case).
@@ -895,25 +894,18 @@ fn make_interp_spline_scaled(x: &[f64], y: &[f64], k: usize) -> Result<(Vec<f64>
         1 => make_interp_spline::<1>(x, y, false),
         2 => make_interp_spline::<2>(x, y, false),
         3 => make_interp_spline::<3>(x, y, true),
-        _ => bail!("unsupported spline degree"),
+        _ => unreachable!("the wow interpolation degrees are 1 to 3"),
     }
 }
 
-/// Construct an interpolating B-spline (knots + coefficients) for degree `k`.
+/// Construct an interpolating B-spline (knots + coefficients) for degree `k`
+/// over the strictly increasing `x`, one knot per line location, and `y`.
 /// `natural` selects the zero-second-derivative boundary condition at both
 /// ends, used for the cubic case; otherwise not-a-knot knots are used.
-fn make_interp_spline<const K: usize>(
-    x: &[f64],
-    y: &[f64],
-    natural: bool,
-) -> Result<(Vec<f64>, Vec<f64>)> {
+fn make_interp_spline<const K: usize>(x: &[f64], y: &[f64], natural: bool) -> (Vec<f64>, Vec<f64>) {
     let n = x.len();
-    if n != y.len() {
-        bail!("make_interp_spline: x and y length mismatch");
-    }
-    if n < 2 {
-        bail!("make_interp_spline: need at least two points");
-    }
+    assert_eq!(n, y.len(), "a line location per expected one");
+    assert!(n >= 2, "a field spans more than one line");
 
     // special-case k=1: t = [x0, x, x_{-1}], c = y (Lyche and Morken, Eq.(2.16)).
     if K == 1 {
@@ -921,7 +913,7 @@ fn make_interp_spline<const K: usize>(
         t.push(x[0]);
         t.extend_from_slice(x);
         t.push(x[n - 1]);
-        return Ok((t, y.to_vec()));
+        return (t, y.to_vec());
     }
 
     // Construct the knot vector.
@@ -963,9 +955,11 @@ fn make_interp_spline<const K: usize>(
     } else {
         (0usize, 0usize)
     };
-    if nt != n + nleft + nright {
-        bail!("make_interp_spline: knot/condition count mismatch");
-    }
+    assert_eq!(
+        nt,
+        n + nleft + nright,
+        "the knot vector gives one basis function per collocation condition"
+    );
 
     // Build the collocation matrix with boundary derivative rows.
     let mut a = vec![vec![0.0; nt]; nt];
@@ -1003,8 +997,8 @@ fn make_interp_spline<const K: usize>(
         rhs[row] = 0.0;
     }
 
-    let c = solve_dense(a, rhs)?;
-    Ok((t, c))
+    let c = solve_dense(a, rhs);
+    (t, c)
 }
 
 /// Evaluate the k+1 nonzero B-spline basis functions and their derivatives up to
@@ -1105,9 +1099,10 @@ fn bspline_find_span(t: &[f64], k: usize, nt: usize, x: f64) -> usize {
     mid
 }
 
-/// Solve a dense linear system A x = b in place using Gaussian elimination with
-/// partial pivoting. `a` is row-major n x n; returns the solution vector.
-fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Result<Vec<f64>> {
+/// Solve the dense linear system A x = b in place using Gaussian elimination
+/// with partial pivoting. `a` is row-major n x n and nonsingular: the
+/// collocation matrix of a spline on distinct, increasing points.
+fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
     let n = b.len();
     for col in 0..n {
         // Partial pivot.
@@ -1120,9 +1115,10 @@ fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Result<Vec<f64>> {
                 pivot = row;
             }
         }
-        if best == 0.0 {
-            bail!("Collocation matrix is singular.");
-        }
+        assert!(
+            best != 0.0,
+            "the collocation matrix of distinct, increasing points is nonsingular"
+        );
         if pivot != col {
             a.swap(pivot, col);
             b.swap(pivot, col);
@@ -1147,5 +1143,5 @@ fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Result<Vec<f64>> {
         }
         x[i] = sum / a[i][i];
     }
-    Ok(x)
+    x
 }

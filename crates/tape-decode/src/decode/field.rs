@@ -33,26 +33,26 @@ fn demod_burst(burst: &[f32], burst_start: usize, burst_wave: &[(f32, f32)]) -> 
     }
 }
 
-fn calczc_do(
-    data: &[f32],
-    start_offset: isize,
-    target: f32,
-    count: isize,
-    mut edge: i64,
-) -> Result<f64> {
+/// The sub-sample position of the first crossing of `target` within `count`
+/// samples from `start_offset` of the field buffer, rising for `edge` 1,
+/// falling for -1, whichever the first sample is on the far side of for 0;
+/// NaN when the first sample is already past the level or no crossing
+/// follows.
+fn calczc_do(data: &[f32], start_offset: isize, target: f32, count: isize, mut edge: i64) -> f64 {
     // The crossing is interpolated from the sample before it, so the search
     // starts at index 1 at the earliest.
     let start = start_offset.max(1) as usize;
-    if start >= data.len() {
-        bail!("start_offset out of range");
-    }
+    assert!(
+        start < data.len(),
+        "the search starts inside the field buffer, which holds every processed line"
+    );
 
     if edge == 0 {
         edge = if data[start] < target { 1 } else { -1 };
     }
 
     if (edge == 1 && data[start] > target) || (edge == -1 && data[start] < target) {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
 
     let search_len = count + 1;
@@ -65,7 +65,7 @@ fn calczc_do(
         .iter()
         .position(|&sample| (edge == 1 && sample >= target) || (edge != 1 && sample <= target))
     else {
-        return Ok(f64::NAN);
+        return f64::NAN;
     };
 
     let x = start + loc;
@@ -73,7 +73,7 @@ fn calczc_do(
     let b = data[x] - target;
     let y = if b - a != 0.0 { -a / (-a + b) } else { 0.0 };
 
-    Ok(x as f64 - 1.0 + f64::from(y))
+    x as f64 - 1.0 + f64::from(y)
 }
 
 fn signed_bounds_slice<T>(data: &[T], start: isize, end: isize) -> &[T] {
@@ -101,7 +101,7 @@ fn refine_linelocs_hsync(
     linebad: &mut [u8],
     normal_hsync_length: usize,
     levels: VideoLevels,
-) -> Result<Vec<f64>> {
+) -> Vec<f64> {
     let one_usec = spec.freq as usize;
     let is_pal = spec.sys_frame_lines != LineSystem::Line525;
     let zc_threshold = levels.iretohz(spec.sys_vsync_ire / 2.0);
@@ -121,7 +121,7 @@ fn refine_linelocs_hsync(
         }
 
         let ll1 = round_ties_even_to_isize(initial_linelocs[i]) - one_usec as isize;
-        let zc = calczc_do(demod_05, ll1, zc_threshold, (one_usec * 2) as isize, 0)?;
+        let zc = calczc_do(demod_05, ll1, zc_threshold, (one_usec * 2) as isize, 0);
 
         let right_cross = if spec.rf_disable_right_hsync {
             f64::NAN
@@ -132,7 +132,7 @@ fn refine_linelocs_hsync(
                 zc_threshold,
                 (normal_hsync_length * 2) as isize,
                 1,
-            )?
+            )
         };
         // The line start a sync pulse length before the rising edge's
         // refined crossing.
@@ -165,7 +165,7 @@ fn refine_linelocs_hsync(
                     round_ties_even_to_isize(zc + (one_usec_samples * 2.5)),
                 )) as f32;
 
-                let zc2 = calczc_do(demod_05, ll1, (porch_level + sync_level) / 2.0, 400, 0)?;
+                let zc2 = calczc_do(demod_05, ll1, (porch_level + sync_level) / 2.0, 400, 0);
                 if !zc2.is_nan() && (zc2 - zc).abs() < (one_usec_samples / 2.0) {
                     linelocs_refined[i] = zc2;
                     prev_porch_level = porch_level;
@@ -206,7 +206,7 @@ fn refine_linelocs_hsync(
                     (porch_level + sync_level) / 2.0,
                     400,
                     0,
-                )?;
+                );
 
                 if !zc2.is_nan() && (zc2 - right_cross).abs() < (one_usec_samples / 2.0) {
                     let from_right = zc2 - normal_hsync_samples + (2.25 * (spec.freq / 40.0));
@@ -228,7 +228,7 @@ fn refine_linelocs_hsync(
         }
     }
 
-    Ok(linelocs_refined)
+    linelocs_refined
 }
 
 fn valid_pulses_to_linelocs(
@@ -703,7 +703,7 @@ fn apply_burst_lock(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     inter_field_state: &mut InterFieldState,
-) -> Result<()> {
+) {
     let prev_burst_start_line = field
         .prevfield
         .as_ref()
@@ -713,7 +713,7 @@ fn apply_burst_lock(
     let chroma = if spec.chroma_afc_enabled() {
         // The carrier is measured over the whole field's chroma and the
         // field's heterodyne generated at it.
-        let chroma = downscale_raw_vec(field, &spec.sinc_lut, true, 0.0, None)?;
+        let chroma = downscale_raw_vec(field, &spec.sinc_lut, true, 0.0, None);
         let carrier = chroma_afc_carrier(spec, &chroma);
         field.chroma_carrier = carrier;
         field.chroma_heterodyne = Some(color_under_heterodyne(spec, carrier));
@@ -727,7 +727,7 @@ fn apply_burst_lock(
             true,
             0.0,
             Some(burst_start + burst_end),
-        )?
+        )
     };
     let (track_phase, next_track_phase, burst_lock) = get_phase_rotation_sequence(
         spec,
@@ -741,7 +741,6 @@ fn apply_burst_lock(
     inter_field_state.track_phase = next_track_phase;
     field.track_phase = Some(track_phase);
     field.burst_lock = Some(burst_lock);
-    Ok(())
 }
 
 /// Where the next field is read from.
@@ -758,7 +757,7 @@ pub(crate) fn predecode_field_from_rawdecode(
     scheduled_prevfield: Option<PrevFieldState>,
     inter_field_state: &mut InterFieldState,
     scheduled_readloc: u64,
-) -> Result<DecodeFieldResult> {
+) -> DecodeFieldResult {
     // Build and classify the next DecodedField from coalesced block data. This is
     // the sync/line-location half of the speculative predecode step; output/TBC
     // conversion and metadata writing remain in the executable orchestrator.
@@ -878,7 +877,7 @@ pub(crate) fn predecode_field_from_rawdecode(
                         &mut linebad_vec,
                         normal_hsync_length,
                         levels,
-                    )?
+                    )
                 } else {
                     linelocs_vec
                 };
@@ -903,7 +902,7 @@ pub(crate) fn predecode_field_from_rawdecode(
 
                 pending_field.linelocs = Some(linelocs2_vec);
                 if spec.rf_write_chroma {
-                    apply_burst_lock(&mut pending_field, spec, inter_field_state)?;
+                    apply_burst_lock(&mut pending_field, spec, inter_field_state);
                     if let Some(refined) = burst_refined_linelocs(&pending_field, spec) {
                         pending_field.linelocs = Some(refined);
                     }
@@ -936,8 +935,8 @@ pub(crate) fn predecode_field_from_rawdecode(
         }
         NextField::Skip(skip) => skip,
     };
-    Ok(DecodeFieldResult {
+    DecodeFieldResult {
         field: pending_field,
         offset,
-    })
+    }
 }

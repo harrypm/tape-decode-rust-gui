@@ -384,10 +384,10 @@ fn process_chroma_internal(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     mut conversion_lo: Option<&mut ConversionLoState>,
-) -> Result<Vec<u16>> {
+) -> Vec<u16> {
     let burst_start_line = field.burst_start_line();
     if burst_start_line == -1 {
-        return Ok(vec![ZERO_LEVEL; field.outlinecount * field.outlinelen]);
+        return vec![ZERO_LEVEL; field.outlinecount * field.outlinelen];
     }
 
     // Color-framed chroma is resampled fsc / (2 pi color_under) * 4 samples
@@ -397,7 +397,7 @@ fn process_chroma_internal(
     } else {
         0.0
     };
-    let mut chroma = downscale_raw_vec(field, &spec.sinc_lut, true, shift, None)?;
+    let mut chroma = downscale_raw_vec(field, &spec.sinc_lut, true, shift, None);
     if let Some(lo) = conversion_lo
         .as_deref_mut()
         .filter(|_| spec.rf_secam_carrier_servo)
@@ -415,7 +415,7 @@ fn process_chroma_internal(
     }
     if let Some(mult) = spec.decoder_chroma_carrier_mult {
         let restored = secam::process_chroma(field, spec, &chroma, mult);
-        return Ok(encode_chroma(&restored));
+        return encode_chroma(&restored);
     }
     let is_ntsc = spec.color_system == ColorSystem::Ntsc;
     if is_ntsc {
@@ -489,19 +489,18 @@ fn process_chroma_internal(
         );
     }
 
-    Ok(encode_chroma(&uphet))
+    encode_chroma(&uphet)
 }
 
 pub(crate) fn decode_chroma(
     field: &mut DecodedField,
     spec: &DecoderSpec,
     conversion_lo: Option<&mut ConversionLoState>,
-) -> Result<Option<Vec<u16>>> {
+) -> Option<Vec<u16>> {
     if spec.color_system == ColorSystem::Monochrome || !spec.chroma_output {
-        return Ok(None);
+        return None;
     }
-    let upconverted = process_chroma_internal(field, spec, conversion_lo)?;
-    Ok(Some(upconverted))
+    Some(process_chroma_internal(field, spec, conversion_lo))
 }
 
 /// Analytic signal of `data` (its Hilbert transform as the imaginary part)

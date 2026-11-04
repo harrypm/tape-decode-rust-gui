@@ -37,7 +37,7 @@ fn decode_serial(
         let final_chunk = read < chunk;
         read_pos += read as u64;
 
-        let (consumed, fields) = decoder.decode(&window, base, final_chunk)?;
+        let (consumed, fields) = decoder.decode(&window, base, final_chunk);
         if !sink(&fields, decoder.metadata().as_ref())? || final_chunk {
             return Ok(());
         }
@@ -422,9 +422,9 @@ impl Tape {
 /// untouched, but reports exactly this offset — the point a serial decode would
 /// skip its input to. Used to start each worker's window without reading or
 /// seeking earlier input, and to tell the tape how much it may drop.
-fn first_needed_offset(spec: &Arc<DecoderSpec>, start_offset: u64) -> Result<u64> {
+fn first_needed_offset(spec: &Arc<DecoderSpec>, start_offset: u64) -> u64 {
     let mut probe = Decoder::new(Arc::clone(spec), start_offset);
-    Ok(probe.decode(&[], 0, false)?.0)
+    probe.decode(&[], 0, false).0
 }
 
 // --- Worker thread ----------------------------------------------------------
@@ -471,7 +471,7 @@ fn decode_segment(
         };
         window.extend_from_slice(&read_buffer[..read]);
 
-        let (consumed, fields) = decoder.decode(&window, base, final_chunk)?;
+        let (consumed, fields) = decoder.decode(&window, base, final_chunk);
         if !meta_sent {
             if let Some(metadata) = decoder.metadata() {
                 if tx.send(WorkerMsg::Meta(metadata)).is_err() {
@@ -746,7 +746,7 @@ impl<'a> MtOrchestrator<'a> {
             self.pool.insert(seg, worker);
             self.next_unassigned += 1;
             self.next_unassigned_needed =
-                first_needed_offset(&self.spec, self.seg_start(self.next_unassigned))?;
+                first_needed_offset(&self.spec, self.seg_start(self.next_unassigned));
         }
         Ok(())
     }
@@ -1005,7 +1005,7 @@ pub fn decode_all_mt(
         .saturating_add(HANDOFF_MARGIN)
         .clamp(4, MAX_BUFFERED_FIELDS);
 
-    let next_unassigned_needed = first_needed_offset(&spec, start_offset)?;
+    let next_unassigned_needed = first_needed_offset(&spec, start_offset);
     let mut orchestrator = MtOrchestrator {
         writer,
         spec,
