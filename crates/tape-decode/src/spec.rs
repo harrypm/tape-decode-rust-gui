@@ -297,6 +297,14 @@ impl DecoderSpec {
         // sub-pixel jitter into both planes.
         let rf_disable_burst_hsync =
             request.rf_disable_burst_hsync || rf_color_system == ColorSystem::Secam;
+        // The chroma transient improvement reads a sample and its predecessor
+        // as a quadrature pair of the subcarrier, which SECAM's FM chroma is
+        // not: pulling its samples about distorts the carrier frequency.
+        let cti_mix = if rf_color_system == ColorSystem::Secam {
+            0.0
+        } else {
+            request.cti_mix
+        };
         let rf_fallback_vsync = request.fallback_vsync;
         if request.y_comb.is_nan() || request.y_comb < 0.0 {
             bail!("--y-comb must be a non-negative IRE clamp");
@@ -734,7 +742,7 @@ impl DecoderSpec {
             rf_disable_phase_correction: request.rf_disable_phase_correction,
             rf_secam_carrier_servo,
             secam_lo_trim: request.secam_lo_trim,
-            cti_mix: request.cti_mix,
+            cti_mix,
             cti_width: request.cti_width,
 
             chroma_burst_block_fft_gain,
