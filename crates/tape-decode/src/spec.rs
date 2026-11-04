@@ -936,8 +936,10 @@ impl DecoderSpec {
         self.bytes_per_field().max(1)
     }
 
+    /// Whether the decode has chroma to write: a colour-under format, not
+    /// exported raw.
     #[inline]
-    pub fn write_chroma(&self) -> bool {
+    pub fn decodes_chroma(&self) -> bool {
         self.rf_write_chroma
     }
 }

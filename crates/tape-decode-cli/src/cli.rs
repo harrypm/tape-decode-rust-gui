@@ -470,6 +470,9 @@ fn run_decode(cli: DecodeArgs) -> Result<()> {
     }
     // Every option is checked before an output file is created.
     let mut spec = Arc::new(DecoderSpec::new(&request)?);
+    if cli.chroma_out.is_some() && !spec.decodes_chroma() {
+        bail!("--chroma-out: the profile is monochrome and decodes no chroma");
+    }
 
     let input_file = if cli.infile.as_os_str() == "-" {
         os::stdin_file()?
