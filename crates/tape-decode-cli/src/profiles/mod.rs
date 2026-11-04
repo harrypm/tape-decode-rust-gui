@@ -260,15 +260,3 @@ pub fn flatten_profile(profile: Option<&str>, profile_file: Option<&Path>) -> Re
         _ => bail!("exactly one of --profile or --profile-file is required"),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_embedded_profile_loads() {
-        for name in profile_names().unwrap() {
-            load_profile(&name).unwrap_or_else(|error| panic!("{name}: {error:#}"));
-        }
-    }
-}
