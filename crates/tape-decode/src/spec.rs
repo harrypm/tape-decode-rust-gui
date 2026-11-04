@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::decode::{
     gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
+    SECAM_LO_TRIM_LIMIT_HZ,
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
@@ -358,6 +359,41 @@ impl DecoderSpec {
         // of the width, so a width of 0 passes every transition.
         if request.cti_width == 0 {
             bail!("--cti-width must be at least 1");
+        }
+        if !(0.0..=1.0).contains(&request.cti_mix) {
+            bail!("--cti-mix must be a mix from 0 to 1");
+        }
+        if request.sharpness > 100 {
+            bail!("--sharpness must be from 0 to 100");
+        }
+        if !request.level_adjust.is_finite() {
+            bail!("--level-adjust must be a finite fraction");
+        }
+        if let Some(trim) = request.secam_lo_trim {
+            if !(-SECAM_LO_TRIM_LIMIT_HZ..=SECAM_LO_TRIM_LIMIT_HZ).contains(&trim) {
+                bail!(
+                    "--secam-lo-trim must be within {SECAM_LO_TRIM_LIMIT_HZ} Hz either way, the servo's range"
+                );
+            }
+        }
+        if fm_audio_notch.is_nan() || fm_audio_notch < 0.0 {
+            bail!("--fm-audio-notch must be 0 (no notch) or a positive Q");
+        }
+        if let Some(high_boost) = request.high_boost {
+            if !high_boost.is_finite() || high_boost < 0.0 {
+                bail!("--high-boost must be a non-negative multiplier");
+            }
+        }
+        if !(request.dod_threshold_p.is_finite() && request.dod_threshold_p > 0.0) {
+            bail!("--dod-threshold-p must be a positive fraction");
+        }
+        if let Some(threshold) = request.dod_threshold_a {
+            if !(threshold.is_finite() && threshold >= 0.0) {
+                bail!("--dod-threshold-a must be a non-negative level");
+            }
+        }
+        if !(request.dod_hysteresis.is_finite() && request.dod_hysteresis >= 1.0) {
+            bail!("--dod-hysteresis must be a ratio of at least 1");
         }
         let rf_y_comb = request.y_comb * sys_params.hz_ire;
 

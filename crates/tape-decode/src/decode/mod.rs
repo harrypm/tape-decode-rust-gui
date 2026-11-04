@@ -653,6 +653,10 @@ impl<T: Float + std::iter::Sum> StackableMa<T> {
     }
 }
 
+/// How far the ME-SECAM carrier servo may trim the conversion LO either
+/// way, in Hz.
+pub(crate) const SECAM_LO_TRIM_LIMIT_HZ: f64 = 10e3;
+
 // Mutable state of the ME-SECAM chroma up-conversion: the carrier servo's
 // smoothed rest carrier pair offset trims the conversion LO, and the
 // heterodyne carries its phase on from field to field.
@@ -692,7 +696,8 @@ impl ConversionLoState {
             .then(|| self.servo_avg.pull())
             .flatten()
             .map_or(0.0, |avg| {
-                ((avg / 10.0).round_ties_even() * 10.0).clamp(-10e3, 10e3)
+                ((avg / 10.0).round_ties_even() * 10.0)
+                    .clamp(-SECAM_LO_TRIM_LIMIT_HZ, SECAM_LO_TRIM_LIMIT_HZ)
             });
         let conversion_lo = spec
             .decoder_chroma_conversion_lo

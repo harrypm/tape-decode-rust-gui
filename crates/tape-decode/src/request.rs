@@ -307,7 +307,8 @@ pub struct DecodeRequest {
     // RF options. Fields that the DecoderSpec constructor copies through
     // unchanged carry the DecoderSpec member name.
     pub chroma_trap: bool,
-    pub sharpness: i64,
+    /// Video EQ sharpening amount from 0 to 100; 0 disables it.
+    pub sharpness: u32,
     pub notch: Option<NotchFilter>,
     pub dod_threshold_p: f32,
     pub dod_threshold_a: Option<f32>,

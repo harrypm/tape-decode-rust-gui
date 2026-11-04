@@ -172,9 +172,9 @@ struct DecodeArgs {
     /// Apply a chroma trap to the luma path.
     #[arg(long)]
     chroma_trap: bool,
-    /// Video EQ sharpening amount; 0 disables sharpening.
-    #[arg(long, default_value_t = 0)]
-    sharpness: i64,
+    /// Video EQ sharpening amount from 0 to 100; 0 disables sharpening.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=100))]
+    sharpness: u32,
     /// Apply an RF notch filter at the given frequency in MHz.
     #[arg(long, value_parser = parse_frequency)]
     notch: Option<f64>,
