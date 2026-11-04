@@ -760,19 +760,11 @@ pub(crate) fn predecode_field_from_rawdecode(
         let is_first_field = pending_field.is_first_field.unwrap_or(false);
         let is_525 = spec.sys_frame_lines == LineSystem::Line525;
         // The output geometry follows the line system and the field order.
+        pending_field.linecount = Some(spec.sys_field_lines[usize::from(!is_first_field)] as usize);
         if is_525 {
-            pending_field.linecount = Some(if is_first_field { 263 } else { 262 });
             pending_field.out_scale =
                 Some(f64::from(0xC800 - 0x0400) / (100.0 - f64::from(spec.sys_vsync_ire)));
         } else {
-            pending_field.linecount = Some(match (spec.sys_frame_lines, is_first_field) {
-                (LineSystem::Line405, true) => 203,
-                (LineSystem::Line405, false) => 202,
-                (LineSystem::Line819, true) => 410,
-                (LineSystem::Line819, false) => 409,
-                (_, true) => 312,
-                (_, false) => 313,
-            });
             pending_field.lineoffset = if is_first_field { 2 } else { 3 };
             pending_field.out_scale =
                 Some(f64::from(0xD300 - 0x0100) / (100.0 - f64::from(spec.sys_vsync_ire)));
