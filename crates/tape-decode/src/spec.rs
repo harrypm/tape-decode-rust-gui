@@ -309,6 +309,11 @@ impl DecoderSpec {
         if request.y_comb.is_nan() || request.y_comb < 0.0 {
             bail!("--y-comb must be a non-negative IRE clamp");
         }
+        // The transient improvement's noise gate scales with the square root
+        // of the width, so a width of 0 passes every transition.
+        if request.cti_width == 0 {
+            bail!("--cti-width must be at least 1");
+        }
         let rf_y_comb = request.y_comb * sys_params.hz_ire;
 
         // Filter for rf before demodulating.
