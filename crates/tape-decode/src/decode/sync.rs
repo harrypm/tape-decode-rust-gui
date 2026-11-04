@@ -1305,40 +1305,53 @@ fn get_line0_fallback(
         });
     }
 
-    // Fifth fallback: find the last hsync in front of a long block.
+    // Fifth fallback: the last hsync in front of the first broad pulse. It
+    // assumes that hsync is intact; a damaged one can still point it at the
+    // wrong pulse.
     let long_pulses = raw_pulses
         .iter()
         .copied()
         .filter(|pulse| inrange(pulse.len as f64, lt_vsync.0, lt_vsync.1 * 10.0))
         .collect::<Vec<_>>();
+    let first_long = *long_pulses.first()?;
+    let last_hsync = valid_pulses
+        .iter()
+        .take_while(|pulse| pulse.start <= first_long.start)
+        .filter(|pulse| pulse.pulse_type == PulseType::Hsync)
+        .last();
+    let Some(last_hsync) = last_hsync else {
+        return Some(Line0FallbackResult {
+            line0: first_long.start as f64 - (3.0 * linelen),
+            first_field: -1,
+            first_field_confidence: -1,
+        });
+    };
 
-    if long_pulses.is_empty() {
-        return None;
-    }
-
-    // Offset from the first vsync to the location expected by line-zero recovery.
-    let first_long_pulse_pos = long_pulses[0].start;
-
-    // This fallback assumes the last hsync before the vsync area is intact;
-    // damaged hsyncs can still point it at the wrong pulse.
-    // Find the last vsync before the vsync area for downstream pulse classification.
-    for pulse in valid_pulses {
-        if pulse.start > first_long_pulse_pos {
-            break;
+    // A vertical interval of one broad pulse shorter than a line amid the
+    // hsyncs, without equalizing pulses (the 819-line system), carries the
+    // field order in the pulse's half-line phase on the hsync grid: a first
+    // field's broad pulse starts half a line after the last hsync, a second
+    // field's a whole line after it.
+    let single_broad_pulse = (first_long.len as f64) < linelen
+        && long_pulses
+            .get(1)
+            .is_none_or(|next| (next.start - first_long.start) as f64 > 2.0 * linelen);
+    let (first_field, first_field_confidence) = if single_broad_pulse {
+        let phase = (first_long.start - last_hsync.start) as f64 / linelen;
+        if distance_matches(phase, 0.5) {
+            (1, 100)
+        } else if distance_matches(phase, 1.0) {
+            (0, 100)
+        } else {
+            (-1, -1)
         }
-        if pulse.pulse_type == PulseType::Hsync {
-            line_0 = Some(pulse.start as f64);
-        }
-    }
-
-    if line_0.is_none() {
-        line_0 = Some(first_long_pulse_pos as f64 - (3.0 * linelen));
-    }
-
+    } else {
+        (-1, -1)
+    };
     Some(Line0FallbackResult {
-        line0: line_0.unwrap(),
-        first_field: -1,
-        first_field_confidence: -1,
+        line0: last_hsync.start as f64,
+        first_field,
+        first_field_confidence,
     })
 }
 
