@@ -484,11 +484,13 @@ fn scale_field_linear(
         (0.0, 0.0)
     };
 
-    // Warmup smoothing over the lead-in samples. This walk is a tiny fraction
-    // of the field, so it keeps the straightforward per-sample evaluation.
+    // The smoothing settles over the better part of a field, so it starts
+    // from the field's typical factor rather than the first span's, which
+    // may be a line placed without a pulse. Warmup over the lead-in samples;
+    // this walk is a tiny fraction of the field, so it keeps the
+    // straightforward per-sample evaluation.
     let mut warmup_span = K;
-    let initial = eval_spline_value_deriv_1(t, c, nt, &mut warmup_span, 0.0).1;
-    let mut smoothed_adjust = level_adjusted(pack_wow_factor(initial), median, threshold);
+    let mut smoothed_adjust = unpack_wow_factor(median);
     if smoothing_enabled && lineoffset_out_samples > 1 {
         for index in 1..lineoffset_out_samples {
             let deriv =
@@ -735,10 +737,9 @@ fn scale_field_k<const K: usize>(
         (0.0, 0.0)
     };
 
-    // Warmup smoothing over the lead-in samples.
-    let mut smoothed_adjust = adjusted(pack_wow_factor(
-        SpanPoly::new::<K>(t, c, K).eval::<K>(0.0).1,
-    ));
+    // Warmup smoothing over the lead-in samples, from the field's typical
+    // factor (see `scale_field_linear`).
+    let mut smoothed_adjust = unpack_wow_factor(median);
     if smoothing_enabled {
         for_each_span_run::<K>(
             t,
