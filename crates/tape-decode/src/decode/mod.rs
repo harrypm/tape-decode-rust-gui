@@ -1194,37 +1194,36 @@ fn burst_area(spec: &DecoderSpec) -> (usize, usize) {
     (start, end - (end - start) % 4)
 }
 
-/// What the field-order check keeps of an output field.
+/// What the field-order check keeps of a decoded field.
 #[derive(Clone, Copy)]
-struct OutputFieldOrder {
-    is_first_field: bool,
+struct DecodedFieldOrder {
     detected_first_field: bool,
     file_loc: u64,
 }
 
-impl OutputFieldOrder {
-    fn of(info: &FieldInfoEntry) -> Self {
-        Self {
-            is_first_field: info.is_first_field,
-            detected_first_field: info.detected_first_field,
-            file_loc: info.file_loc,
-        }
-    }
-}
-
-/// The output so far as the field-order check sees it: the count, which
-/// numbers the sequence, and the last two fields.
+/// The decode so far as the field-order check sees it: the written
+/// sequence, whose count numbers the output and whose last field the next
+/// one must alternate with, and the last two decoded fields, whose detected
+/// orders tell progressive material from a skipped field. A duplicate
+/// written in place of a skipped field is no decoded field and stays out of
+/// the latter.
 #[derive(Default)]
 struct OutputSequence {
     len: usize,
+    /// The order of the last written field.
+    last_written: Option<bool>,
     /// Newest first.
-    last: [Option<OutputFieldOrder>; 2],
+    decoded: [Option<DecodedFieldOrder>; 2],
 }
 
 impl OutputSequence {
-    fn push(&mut self, field: OutputFieldOrder) {
-        self.last = [Some(field), self.last[0]];
+    fn written(&mut self, is_first_field: bool) {
+        self.last_written = Some(is_first_field);
         self.len += 1;
+    }
+
+    fn decoded(&mut self, field: DecodedFieldOrder) {
+        self.decoded = [Some(field), self.decoded[0]];
     }
 }
 
@@ -1492,10 +1491,10 @@ impl Decoder {
                 continue;
             }
 
-            if self.output.len != 0 || field_obj.is_first_field.unwrap_or(false) {
-                let [prevfi_1, prevfi_2] = self.output.last;
-
-                let detected_first_field = field_obj.is_first_field.unwrap_or(false);
+            let detected_first_field = field_obj.is_first_field.unwrap_or(false);
+            let file_loc = field_obj.output_start_sample().round() as u64;
+            // The output starts on a first field.
+            if self.output.len != 0 || detected_first_field {
                 // How many fields an invalid stretch lost is unknown, so the
                 // inversion established before it no longer holds.
                 if field_obj.prevfield.is_none() {
@@ -1505,7 +1504,6 @@ impl Decoder {
                 // A field of the other order written before this one.
                 let mut duplicate: Option<WriteableField> = None;
                 let mut sync_conf = sync_confidence_from_linelocs(&field_obj);
-                let file_loc = field_obj.output_start_sample().round() as u64;
                 let disk_loc = roundfloat(file_loc as f64 / bytes_per_field as f64, 1);
 
                 let color_framed = color_framed(&self.spec, &field_obj);
@@ -1540,24 +1538,24 @@ impl Decoder {
 
                 // Interlaced video requires alternating fields. Handle cases where
                 // fields repeat (recording breaks, progressive content, etc.).
-                if let Some(prevfi) =
-                    prevfi_1.filter(|prevfi| prevfi.is_first_field == is_first_field)
-                {
-                    // The spacing of the two fields' first output lines, in
-                    // fields.
+                if self.output.last_written == Some(is_first_field) {
+                    let [previous, before_previous] = self.output.decoded;
+                    let previous = previous.expect("a written field was decoded");
+                    // The spacing of this and the previous decoded field's
+                    // first output lines, in fields.
                     let distance_from_previous_field =
-                        (file_loc as f64 - prevfi.file_loc as f64) / bytes_per_field as f64;
-                    if prevfi.detected_first_field == detected_first_field
-                        && prevfi_2.is_some_and(|prev| {
-                            prev.detected_first_field == prevfi.detected_first_field
-                        })
+                        (file_loc as f64 - previous.file_loc as f64) / bytes_per_field as f64;
+                    // Three consecutive fields detected with one order are
+                    // progressive material, written alternating.
+                    if previous.detected_first_field == detected_first_field
+                        && before_previous
+                            .is_some_and(|field| field.detected_first_field == detected_first_field)
                         && inrange(distance_from_previous_field, 0.9, 1.1)
                     {
-                        // treat this as progressive, and manually flip the field order.
                         tracing::warn!("Detected progressive video content..., manually flipping the field order to compensate");
                         decode_faults |= 1;
                         sync_conf = 10;
-                        is_first_field = !prevfi.is_first_field;
+                        is_first_field = !is_first_field;
                     } else {
                         match self.spec.field_order_action {
                             FieldOrderAction::Duplicate => self.duplicate_prev_field = true,
@@ -1580,7 +1578,7 @@ impl Decoder {
                         if self.spec.field_order_action == FieldOrderAction::None {
                             tracing::warn!("Possibly skipped field (Two fields with same isFirstField in a row), inverting the detected field order to compensate");
                             self.order_inverted = !self.order_inverted;
-                            is_first_field = !prevfi.is_first_field;
+                            is_first_field = !is_first_field;
                         } else if self.duplicate_prev_field {
                             duplicate = self.lastvalidfield[usize::from(!is_first_field)].clone();
                             if duplicate.is_some() {
@@ -1598,7 +1596,7 @@ impl Decoder {
                 let info = FieldInfoEntry {
                     is_first_field,
                     detected_first_field,
-                    is_duplicate_field: duplicate.is_some(),
+                    is_duplicate_field: false,
                     burst_start_line: field_obj.burst_start_line(),
                     sync_conf,
                     // Numbered when emitted.
@@ -1624,12 +1622,17 @@ impl Decoder {
                     // Kept by written order: the duplicate written before a
                     // repeated field is the latest field of the other order.
                     self.lastvalidfield[usize::from(is_first_field)] = Some(dataset.clone());
-                    if let Some(other) = duplicate {
+                    if let Some(mut other) = duplicate {
+                        other.info.is_duplicate_field = true;
                         self.emit(&mut output, other);
                     }
                     self.emit(&mut output, dataset);
                 }
             }
+            self.output.decoded(DecodedFieldOrder {
+                detected_first_field,
+                file_loc,
+            });
         }
 
         Ok((self.fdoffset, output))
@@ -1638,7 +1641,7 @@ impl Decoder {
     /// Place `field` at the next position of the output sequence.
     fn emit(&mut self, output: &mut Vec<WriteableField>, mut field: WriteableField) {
         field.set_sequence_position(self.output.len + 1);
-        self.output.push(OutputFieldOrder::of(&field.info));
+        self.output.written(field.info.is_first_field);
         output.push(field);
     }
 
