@@ -42,8 +42,10 @@ fn decode_serial(
             return Ok(());
         }
         if consumed > read_pos {
-            // The decoder skipped past everything buffered (e.g. an initial --start
-            // offset); seek the input forward and start a fresh window there.
+            // The decoder skipped past everything buffered (an --offset, a
+            // stretch without sync): move the input forward and start a fresh
+            // window there; an input that ends first reports it on the next
+            // read.
             reader.seek_samples(consumed)?;
             read_pos = consumed;
             window.clear();

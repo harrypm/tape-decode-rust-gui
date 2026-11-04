@@ -142,15 +142,24 @@ impl<F: SampleEncoding> SampleSource for Source<F> {
                 .seek(SeekFrom::Start(target))
                 .context("failed to seek input")?;
         } else {
-            // Forward-only pipes reach a forward target by reading and
-            // discarding; a backward target is an error.
+            // A forward-only pipe reaches a forward target by reading and
+            // discarding; one that ends first is at its end, which the next
+            // read reports. A backward target is an error.
+            const SKIP_CHUNK: usize = 1 << 20;
             let pos = self.stream.pos();
             if target < pos {
                 bail!("cannot seek backward on a non-seekable input (stdin)");
             }
-            self.stream
-                .ignore_bytes(target - pos)
-                .context("unexpected end of input while skipping to sample offset on stdin")?;
+            let mut remaining = target - pos;
+            self.scratch.resize(SKIP_CHUNK, 0);
+            while remaining > 0 {
+                let want = remaining.min(SKIP_CHUNK as u64) as usize;
+                let read = self.stream.read(&mut self.scratch[..want])?;
+                if read == 0 {
+                    break;
+                }
+                remaining -= read as u64;
+            }
         }
         Ok(())
     }
@@ -166,7 +175,8 @@ pub trait SampleSource: Send {
     /// Whether the input can be repositioned backward (a regular file rather
     /// than a pipe).
     fn is_seekable(&self) -> bool;
-    /// Seek to absolute sample `sample`.
+    /// Seek to absolute sample `sample`. An input that ends before it is left
+    /// at its end, which the next `read` reports.
     fn seek_samples(&mut self, sample: u64) -> Result<()>;
 }
 

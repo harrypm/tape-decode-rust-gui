@@ -9,6 +9,7 @@ use symphonia_bundle_flac::{FlacDecoder, FlacReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::errors::{Error, SeekErrorKind};
 use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia_core::io::{MediaSource, MediaSourceStream};
 use symphonia_core::units::Timestamp;
@@ -128,11 +129,12 @@ impl FlacSource {
         self.decode_next()
     }
 
-    /// Drop samples until `position` reaches `target` (forward only).
+    /// Drop samples until `position` reaches `target` (forward only), or the
+    /// input ends first.
     fn skip_to(&mut self, target: u64) -> Result<()> {
         while self.position < target {
             if !self.fill()? {
-                bail!("FLAC input ended before reaching sample offset {target}");
+                break;
             }
             let avail = self.pending.len() - self.pending_pos;
             let n = avail.min((target - self.position) as usize);
@@ -169,21 +171,25 @@ impl SampleSource for FlacSource {
             // Jump to the packet containing `sample` via symphonia's binary
             // search, then drop the handful of samples up to it.
             let ts = Timestamp::try_from(sample).context("seek offset too large")?;
-            let seeked = self
-                .reader
-                .seek(
-                    SeekMode::Coarse,
-                    SeekTo::Timestamp {
-                        ts,
-                        track_id: self.track_id,
-                    },
-                )
-                .context("FLAC seek failed")?;
+            let seek = SeekTo::Timestamp {
+                ts,
+                track_id: self.track_id,
+            };
             self.decoder.reset();
             self.pending.clear();
             self.pending_pos = 0;
-            self.eof = false;
-            self.position = seeked.actual_ts.get() as u64;
+            match self.reader.seek(SeekMode::Coarse, seek) {
+                Ok(seeked) => {
+                    self.eof = false;
+                    self.position = seeked.actual_ts.get() as u64;
+                }
+                // The stream ends before the sample: the input is at its end.
+                Err(Error::SeekError(SeekErrorKind::OutOfRange)) => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(error) => return Err(error).context("FLAC seek failed"),
+            }
         } else if sample < self.position {
             bail!("cannot seek backward on a non-seekable FLAC input (stdin)");
         }
