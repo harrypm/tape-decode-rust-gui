@@ -4,7 +4,6 @@ mod decode;
 mod optimized;
 mod request;
 mod spec;
-mod vec_utils;
 
 pub use decode::{
     Decoder, DecoderMetadata, DropOuts, FieldInfoEntry, LumaOutput, VitsMetrics, WriteableField,

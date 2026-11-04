@@ -14,7 +14,6 @@ use crate::request::{
     FieldOrderAction, Ire0Adjust, LineSystem, NonlinearParams, ShelfKind, SysParams,
     VideoLumaFilter, WowInterpolation,
 };
-use crate::vec_utils::convert_vec_in_place;
 
 const CHROMA_AUDIO_NOTCH_Q: f64 = 10.0;
 
@@ -26,13 +25,14 @@ const CHROMA_AUDIO_NOTCH_Q: f64 = 10.0;
 const INPUT_RATE_MHZ: std::ops::RangeInclusive<f64> = 2.0..=1000.0;
 
 fn store_real_filter(values: Vec<f64>) -> Vec<f32> {
-    convert_vec_in_place(values, |value| value as f32)
+    values.into_iter().map(|value| value as f32).collect()
 }
 
 fn store_complex_filter(values: Vec<Complex64>) -> Vec<Complex32> {
-    convert_vec_in_place(values, |value| {
-        Complex32::new(value.re as f32, value.im as f32)
-    })
+    values
+        .into_iter()
+        .map(|value| Complex32::new(value.re as f32, value.im as f32))
+        .collect()
 }
 
 // Narrow a designed SOS cascade to f32 for the native-f32 filter runtime.
@@ -395,10 +395,10 @@ impl DecoderSpec {
             )?,
             blocklen,
         );
-        let y_fm_lowpass_abs = abs_complex_owned(y_fm_lowpass);
-        let y_fm_highpass_abs = abs_complex_owned(y_fm_highpass);
+        let y_fm_lowpass_abs = abs_complex(y_fm_lowpass);
+        let y_fm_highpass_abs = abs_complex(y_fm_highpass);
         let mut video_rf_filter = if let Some(y_fm) = y_fm {
-            let y_fm_abs = abs_complex_owned(y_fm);
+            let y_fm_abs = abs_complex(y_fm);
             multiply(&multiply(&y_fm_abs, &y_fm_lowpass_abs), &y_fm_highpass_abs)
         } else {
             multiply(&y_fm_lowpass_abs, &y_fm_highpass_abs)
@@ -414,7 +414,7 @@ impl DecoderSpec {
                 freq_hz,
             )?;
             let peaking_fft = filtfft(&peaking_filter.0, &peaking_filter.1, blocklen, true);
-            video_rf_filter = multiply(&video_rf_filter, &abs_complex_owned(peaking_fft));
+            video_rf_filter = multiply(&video_rf_filter, &abs_complex(peaking_fft));
         }
 
         if fm_audio_notch > f64::EPSILON {
@@ -435,7 +435,7 @@ impl DecoderSpec {
                 )?;
                 let audio_fm_notch_filter = multiply(&notch0, &notch1);
                 video_rf_filter =
-                    multiply(&video_rf_filter, &abs_complex_owned(audio_fm_notch_filter));
+                    multiply(&video_rf_filter, &abs_complex(audio_fm_notch_filter));
             } else {
                 bail!("Requested audio notch even though the format does not have audio channels specified!");
             }
@@ -583,7 +583,7 @@ impl DecoderSpec {
             }
             let video_notch_raw = iirnotch("--notch", notch.freq * 1e6, notch.q, freq_hz)?;
             let video_notch_ba = ba_to_vec(video_notch_raw);
-            let video_notch_filter = abs_complex_owned(filtfft(
+            let video_notch_filter = abs_complex(filtfft(
                 &video_notch_ba.0,
                 &video_notch_ba.1,
                 blocklen,
@@ -645,7 +645,7 @@ impl DecoderSpec {
                         *bin *= h.norm_sqr();
                     }
                 }
-                Ok(convert_vec_in_place(gain, |bin| bin as f32))
+                Ok(store_real_filter(gain))
             })
             .transpose()?;
 
@@ -1668,8 +1668,8 @@ fn biquad_sos_vec(ba: (Vec<f64>, Vec<f64>)) -> Vec<Sos<f64>> {
     vec![Sos::new([b[0], b[1], b[2]], [a[0], a[1], a[2]])]
 }
 
-fn abs_complex_owned(values: Vec<Complex64>) -> Vec<f64> {
-    convert_vec_in_place(values, |value| value.norm())
+fn abs_complex(values: Vec<Complex64>) -> Vec<f64> {
+    values.into_iter().map(|value| value.norm()).collect()
 }
 
 fn multiply<A, B, O>(a: &[A], b: &[B]) -> Vec<O>
@@ -1710,7 +1710,7 @@ fn gen_video_lpf(
         sample_rate_hz,
         FilterBandType::Lowpass,
     )?;
-    let mut full = abs_complex_owned(sosfiltfft(&sos, block_len));
+    let mut full = abs_complex(sosfiltfft(&sos, block_len));
     full.truncate(block_len / 2 + 1);
     Ok(full)
 }
