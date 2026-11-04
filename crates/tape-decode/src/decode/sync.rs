@@ -787,6 +787,7 @@ fn get_line0_fallback(
     lt_vsync: (f64, f64),
     linelen: f64,
     frame_lines: i64,
+    is_ntsc: bool,
     relaxed: bool,
     expected_line0: Option<f64>,
     expected_first_field: Option<i64>,
@@ -893,23 +894,23 @@ fn get_line0_fallback(
                     break;
                 }
             }
-            match (half_lines, frame_lines) {
-                (Some(4), 625) => {
+            match (half_lines, is_ntsc) {
+                (Some(4), false) => {
                     first_field = 0;
                     first_field_confidence = 100;
                     line_offset = Some(5.0);
                 }
-                (Some(5), 625) => {
+                (Some(5), false) => {
                     first_field = 1;
                     first_field_confidence = 100;
                     line_offset = Some(4.5);
                 }
-                (Some(5), _) => {
+                (Some(5), true) => {
                     first_field = 0;
                     first_field_confidence = 100;
                     line_offset = Some(5.5);
                 }
-                (Some(6), 525) => {
+                (Some(6), true) => {
                     first_field = 1;
                     first_field_confidence = 100;
                     line_offset = Some(6.0);
@@ -925,23 +926,21 @@ fn get_line0_fallback(
                 // NTSC: for start of first field all values should be 0, for second field all should be 1
                 let phase = argmax3(phase_cnt);
                 if phase == 0 {
-                    // we need to differ between 625 and 525 line
-                    if frame_lines == 625 {
-                        first_field = 0;
-                        line_offset = Some(5.0);
-                    } else {
+                    if is_ntsc {
                         first_field = 1;
                         line_offset = Some(6.0);
+                    } else {
+                        first_field = 0;
+                        line_offset = Some(5.0);
                     }
                     first_field_confidence = phase_confidence(phase_cnt[0], phase_cnt);
                 } else if phase == 1 {
-                    // we need to differ between 625 and 525 line
-                    if frame_lines == 625 {
-                        first_field = 1;
-                        line_offset = Some(4.5);
-                    } else {
+                    if is_ntsc {
                         first_field = 0;
                         line_offset = Some(5.5);
+                    } else {
+                        first_field = 1;
+                        line_offset = Some(4.5);
                     }
                     first_field_confidence = phase_confidence(phase_cnt[1], phase_cnt);
                 }
@@ -1006,8 +1005,7 @@ fn get_line0_fallback(
             let mut candidate_first_field = 0;
             let mut candidate_confidence = 0;
             if phase == 0 {
-                // we need to differ between 625 and 525 line
-                line_offset = Some(if frame_lines == 625 { 2.0 } else { 3.0 });
+                line_offset = Some(if is_ntsc { 3.0 } else { 2.0 });
                 candidate_first_field = 1;
                 candidate_confidence = phase_confidence(phase_cnt[0], phase_cnt);
             } else if phase == 1 {
@@ -1092,7 +1090,7 @@ fn get_line0_fallback(
 
             if hsync_pulse_len / eq_pulse_len > 1.75 {
                 if (filtered_pulses[i].len as f64) < eq_pulse_len * 1.25 {
-                    line_offset = Some(if frame_lines == 625 { 7.0 } else { 8.0 });
+                    line_offset = Some(if is_ntsc { 8.0 } else { 7.0 });
                     candidate_first_field = 0;
                     candidate_confidence = if (filtered_pulses[i].len as f64) < eq_pulse_len * 1.1 {
                         80
@@ -1100,7 +1098,7 @@ fn get_line0_fallback(
                         60
                     };
                 } else if (filtered_pulses[i].len as f64) > hsync_pulse_len * 0.75 {
-                    line_offset = Some(if frame_lines == 625 { 7.0 } else { 9.0 });
+                    line_offset = Some(if is_ntsc { 9.0 } else { 7.0 });
                     candidate_first_field = 1;
                     candidate_confidence =
                         if (filtered_pulses[i].len as f64) > hsync_pulse_len * 0.9 {
@@ -1191,11 +1189,7 @@ fn get_line0_fallback(
                         || candidate_confidence > first_field_confidence
                     {
                         first_field_confidence = candidate_confidence;
-                        if frame_lines == 625 {
-                            first_field = 0;
-                        } else {
-                            first_field = 1;
-                        }
+                        first_field = i64::from(is_ntsc);
                     }
                     line_0 = Some(filtered_pulses[i - 1].start as f64);
                 } else if (filtered_pulses[i].len as f64) > hsync_pulse_len * 0.75 {
@@ -1209,11 +1203,7 @@ fn get_line0_fallback(
                         || candidate_confidence > first_field_confidence
                     {
                         first_field_confidence = candidate_confidence;
-                        if frame_lines == 625 {
-                            first_field = 1;
-                        } else {
-                            first_field = 0;
-                        }
+                        first_field = i64::from(!is_ntsc);
                     }
                     line_0 = Some(filtered_pulses[i].start as f64);
                 }
@@ -1233,10 +1223,9 @@ fn get_line0_fallback(
                     if line_0 != Some(filtered_pulses[i - 1].start as f64)
                         || 20 > first_field_confidence
                     {
-                        if frame_lines == 625 {
+                        if !is_ntsc {
                             first_field = 0;
                         }
-                        // NTSC set only a local candidate here in the source, so nothing to apply.
                         first_field_confidence = 20;
                     }
                     line_0 = Some(filtered_pulses[i - 1].start as f64);
@@ -1247,11 +1236,7 @@ fn get_line0_fallback(
                     if line_0 != Some(filtered_pulses[i].start as f64)
                         || 20 > first_field_confidence
                     {
-                        if frame_lines == 625 {
-                            first_field = 0;
-                        } else {
-                            first_field = 1;
-                        }
+                        first_field = i64::from(is_ntsc);
                         first_field_confidence = 20;
                     }
                     line_0 = Some(filtered_pulses[i].start as f64);
@@ -1565,6 +1550,7 @@ fn try_get_pulses_core(
             vsync,
             field.inlinelen,
             frame_lines,
+            is_ntsc,
             spec.rf_relaxed_line0,
             expected_line0,
             expected_first_field,
@@ -2056,6 +2042,7 @@ mod tests {
             (900.0, 1200.0),
             LINE_LEN,
             625,
+            false,
             false,
             None,
             None,
