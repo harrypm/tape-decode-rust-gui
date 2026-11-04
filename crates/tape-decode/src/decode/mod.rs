@@ -7,12 +7,11 @@ use crate::optimized::{
 };
 use crate::request::{ColorSystem, FieldOrderAction, LineSystem, WowInterpolation};
 use crate::spec::DecoderSpec;
-use anyhow::{bail, Result};
 use num_traits::Float;
 use realfft::{ComplexToReal, RealToComplex};
 use rustfft::num_complex::Complex32;
 use rustfft::Fft;
-use sci_rs::signal::filter::design::{FilterBandType, Sos};
+use sci_rs::signal::filter::design::Sos;
 use serde::{Deserialize, Serialize};
 
 mod chroma;
@@ -402,28 +401,6 @@ pub(crate) fn gen_chroma_heterodyne(
         }
     }
     phases.into()
-}
-
-pub(crate) fn butter_sos(
-    order: usize,
-    wn: &[f64],
-    band_type: FilterBandType,
-) -> Result<Vec<Sos<f64>>> {
-    use sci_rs::signal::filter::design::{butter_dyn, DigitalFilter, FilterOutputType};
-
-    let filter = butter_dyn::<f64>(
-        order,
-        wn.to_vec(),
-        Some(band_type),
-        Some(false),
-        Some(FilterOutputType::Sos),
-        None,
-    );
-
-    match filter {
-        DigitalFilter::Sos(sos) => Ok(sos.sos),
-        _ => bail!("sci-rs returned an unexpected Butterworth SOS representation"),
-    }
 }
 
 fn rms<T>(samples: &[T]) -> f64

@@ -6,8 +6,7 @@ use sci_rs::signal::filter::design::{FilterBandType, Sos};
 use std::sync::Arc;
 
 use crate::decode::{
-    butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, BLOCKCUT, BLOCKCUT_END,
-    BLOCKSIZE,
+    gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
 };
 use crate::optimized::{narrow_sos, SincLut};
 use crate::request::{
@@ -17,6 +16,13 @@ use crate::request::{
 use crate::vec_utils::convert_vec_in_place;
 
 const CHROMA_AUDIO_NOTCH_Q: f64 = 10.0;
+
+/// Input sample rates the decoder accepts, in MHz. Below the low end the
+/// fixed 0.5 MHz sync low-pass and 700 kHz envelope smoother have no room
+/// under the Nyquist frequency; no capture device samples anywhere near the
+/// high end, which keeps a rate given in hertz without its suffix from
+/// sizing the buffers by it.
+const INPUT_RATE_MHZ: std::ops::RangeInclusive<f64> = 2.0..=1000.0;
 
 fn store_real_filter(values: Vec<f64>) -> Vec<f32> {
     convert_vec_in_place(values, |value| value as f32)
@@ -168,6 +174,13 @@ impl DecoderSpec {
         let decoder_params = &request.decode_profile.decoder_params;
         let decode_options = &request.decode_profile.decode_options;
         let rf_freq = request.inputfreq;
+        if !INPUT_RATE_MHZ.contains(&rf_freq) {
+            bail!(
+                "--frequency must be an input sample rate from {} to {} MHz, not {rf_freq} (a rate in hertz or kilohertz needs its hz or khz suffix)",
+                INPUT_RATE_MHZ.start(),
+                INPUT_RATE_MHZ.end()
+            );
+        }
         let freq_half = rf_freq / 2.0;
         let freq_hz = rf_freq * 1_000_000.0;
         let freq_hz_half = freq_hz / 2.0;
@@ -202,6 +215,7 @@ impl DecoderSpec {
                 .context("sharpness requires video_eq params")?
                 .loband;
             let sos = iir_highpass_sos(
+                "video_eq.loband",
                 freq_hz,
                 loband.corner,
                 loband.transition,
@@ -234,6 +248,8 @@ impl DecoderSpec {
             (None, None) => None,
         };
         let out_sample_rate_mhz = sys_params.fsc_mhz * 4.0;
+        let out_sample_rate_hz = out_sample_rate_mhz * 1e6;
+        let fsc_hz = sys_params.fsc_mhz * 1e6;
         // The rate the TBC output is actually clocked at (outlinelen samples
         // per line period), which 4 * fsc only approximates after outlinelen
         // is rounded to whole samples.
@@ -244,17 +260,28 @@ impl DecoderSpec {
         // Standard frequency color carrier wave.
         let fsc_wave = gen_wave_at_frequency(sys_params.fsc_mhz, out_sample_rate_mhz, fieldlen);
 
-        let chroma_afc_out_frequency_half = out_sample_rate_mhz / 2.0;
         let chroma_afc_narrowband = if do_cafc {
             const TRANSITION_EXPAND: f64 = 12.0;
             // Carrier-frequency tolerance (percent), expanded into a transition
             // width. The high and low transitions are symmetric, so one value.
             let percent = 200.0 * fh / color_under;
             let trans = color_under * TRANSITION_EXPAND * percent / 100.0;
-            let samp_rate = out_sample_rate_mhz * 1e6;
+            let what = "color_under_carrier";
             vec![
-                store_sos_filter(iir_highpass_sos(samp_rate, color_under, trans, 200)?),
-                store_sos_filter(iir_lowpass_sos(samp_rate, color_under, trans, 200)?),
+                store_sos_filter(iir_highpass_sos(
+                    what,
+                    out_sample_rate_hz,
+                    color_under,
+                    trans,
+                    200,
+                )?),
+                store_sos_filter(iir_lowpass_sos(
+                    what,
+                    out_sample_rate_hz,
+                    color_under,
+                    trans,
+                    200,
+                )?),
             ]
         } else {
             Vec::new()
@@ -320,13 +347,11 @@ impl DecoderSpec {
         // Only use bpf if video_bpf is defined - otherwise skip.
         let y_fm = if let Some(dp_video_bpf) = &decoder_params.video_bpf {
             let (b, a) = butter_ba(
+                "video_bpf",
                 dp_video_bpf.order,
-                &[
-                    dp_video_bpf.low / freq_hz_half,
-                    dp_video_bpf.high / freq_hz_half,
-                ],
+                &[dp_video_bpf.low, dp_video_bpf.high],
+                freq_hz,
                 FilterBandType::Bandpass,
-                None,
             )?;
             Some(filtfft(&b, &a, blocklen, true))
         } else {
@@ -334,16 +359,20 @@ impl DecoderSpec {
         };
         let y_fm_lowpass = sosfiltfft(
             &butter_sos(
+                "video_lpf_extra",
                 decoder_params.video_lpf_extra_order,
-                &[decoder_params.video_lpf_extra / freq_hz_half],
+                &[decoder_params.video_lpf_extra],
+                freq_hz,
                 FilterBandType::Lowpass,
             )?,
             blocklen,
         );
         let y_fm_highpass = sosfiltfft(
             &butter_sos(
+                "video_hpf_extra",
                 decoder_params.video_hpf_extra_order,
-                &[decoder_params.video_hpf_extra / freq_hz_half],
+                &[decoder_params.video_hpf_extra],
+                freq_hz,
                 FilterBandType::Highpass,
             )?,
             blocklen,
@@ -360,9 +389,11 @@ impl DecoderSpec {
         // Add optional rf peaking filter.
         if let Some(dp_video_rf_peak) = &decoder_params.video_rf_peak {
             let peaking_filter = peaking(
-                dp_video_rf_peak.freq / freq_hz_half,
+                "video_rf_peak",
+                dp_video_rf_peak.freq,
+                dp_video_rf_peak.bandwidth,
                 dp_video_rf_peak.gain,
-                dp_video_rf_peak.bandwidth / freq_hz_half,
+                freq_hz,
             )?;
             let peaking_fft = filtfft(&peaking_filter.0, &peaking_filter.1, blocklen, true);
             video_rf_filter = multiply(&video_rf_filter, &abs_complex_owned(peaking_fft));
@@ -371,15 +402,17 @@ impl DecoderSpec {
         if fm_audio_notch > f64::EPSILON {
             if let Some(fm_audio_channels) = &decoder_params.fm_audio_channels {
                 let notch0 = gen_fft_notch(
+                    "fm_audio_channels.channel_0_freq",
                     fm_audio_channels.channel_0_freq,
                     fm_audio_notch,
-                    freq_hz_half,
+                    freq_hz,
                     blocklen,
                 )?;
                 let notch1 = gen_fft_notch(
+                    "fm_audio_channels.channel_1_freq",
                     fm_audio_channels.channel_1_freq,
                     fm_audio_notch,
-                    freq_hz_half,
+                    freq_hz,
                     blocklen,
                 )?;
                 let audio_fm_notch_filter = multiply(&notch0, &notch1);
@@ -401,8 +434,10 @@ impl DecoderSpec {
         // through a time-domain forward/backward cascade.
         let video_rf_top_fft_gain = if let Some(boost_bpf) = &decoder_params.boost_bpf {
             let sos = butter_sos(
+                "boost_bpf",
                 1,
-                &[boost_bpf.low / freq_hz_half, boost_bpf.high / freq_hz_half],
+                &[boost_bpf.low, boost_bpf.high],
+                freq_hz,
                 FilterBandType::Bandpass,
             )?;
             let response = sosfiltfft(&sos, BLOCKSIZE);
@@ -417,7 +452,7 @@ impl DecoderSpec {
         };
 
         let filter_deemp = if let Some(deemph) = &decoder_params.deemph {
-            gen_video_main_deemp_fft(deemph, freq_hz, blocklen)
+            gen_video_main_deemp_fft(deemph, freq_hz, blocklen)?
         } else {
             vec![Complex64::new(1.0, 0.0); blocklen / 2 + 1]
         };
@@ -433,14 +468,14 @@ impl DecoderSpec {
             gen_video_lpf(
                 decoder_params.video_lpf_freq,
                 decoder_params.video_lpf_order,
-                freq_hz_half,
+                freq_hz,
                 blocklen,
             )?
         };
 
         let custom_video =
             if let Some(custom_luma_filters) = &decoder_params.video_custom_luma_filters {
-                gen_custom_video_filters(custom_luma_filters, freq_hz, blocklen)
+                gen_custom_video_filters(custom_luma_filters, freq_hz, blocklen)?
             } else {
                 vec![Complex64::new(1.0, 0.0); blocklen / 2 + 1]
             };
@@ -456,23 +491,30 @@ impl DecoderSpec {
 
         // The post-envelope smoother is intentionally first-order; higher
         // orders alter the detector response too much.
-        let video_env_post_filter =
-            butter_sos(1, &[700000.0 / freq_hz_half], FilterBandType::Lowpass)?;
+        let video_env_post_filter = butter_sos(
+            "the envelope smoother",
+            1,
+            &[700e3],
+            freq_hz,
+            FilterBandType::Lowpass,
+        )?;
 
         let video_nl_amplitude_lpf = butter_sos(
+            "nonlinear.amp_lpf_freq",
             1,
-            &[decoder_params.nonlinear.amp_lpf_freq / freq_hz_half],
+            &[decoder_params.nonlinear.amp_lpf_freq],
+            freq_hz,
             FilterBandType::Lowpass,
         )?;
         let video_fsc_notch = if decode_options.use_fsc_notch_filter {
-            Some(biquad_sos(iirnotch(sys_params.fsc_mhz / freq_half, 2.0)?))
+            Some(biquad_sos(iirnotch("the fsc notch", fsc_hz, 2.0, freq_hz)?))
         } else {
             None
         };
         let video_nl_high_pass_f = if request.video_nldeemp_enabled || video_subdeemp_enabled {
             Some(gen_nonlinear_bandpass(
                 &decoder_params.nonlinear,
-                freq_hz_half,
+                freq_hz,
                 blocklen,
             )?)
         } else {
@@ -503,26 +545,20 @@ impl DecoderSpec {
                 _ => (sys_params.fsc_mhz - 0.1, sys_params.fsc_mhz + 0.1),
             };
             butter_sos(
+                "the chroma band-pass",
                 4,
-                &[
-                    band_low / chroma_afc_out_frequency_half,
-                    band_high / chroma_afc_out_frequency_half,
-                ],
+                &[band_low * 1e6, band_high * 1e6],
+                out_sample_rate_hz,
                 FilterBandType::Bandpass,
             )
         };
 
         // --- Build luma notch filter for the RF/video path ---
         let (video_notch_filter, chroma_filter_video_notch) = if let Some(notch) = &request.notch {
-            if !(0.0 < notch.freq && notch.freq < freq_half) {
-                bail!(
-                    "--notch must be above 0 and below the input's Nyquist frequency, {freq_half} MHz"
-                );
-            }
             if notch.q.is_nan() || notch.q <= 0.0 {
                 bail!("--notch-q must be positive");
             }
-            let video_notch_raw = iirnotch(notch.freq / freq_half, notch.q)?;
+            let video_notch_raw = iirnotch("--notch", notch.freq * 1e6, notch.q, freq_hz)?;
             let video_notch_ba = ba_to_vec(video_notch_raw);
             let video_notch_filter = abs_complex_owned(filtfft(
                 &video_notch_ba.0,
@@ -538,9 +574,11 @@ impl DecoderSpec {
         // --- Build chroma filters ---
         let chroma_filter_deemphasis = if chroma_deemphasis_enabled {
             Some(biquad_sos_vec(peaking(
-                sys_params.fsc_mhz / chroma_afc_out_frequency_half,
+                "the chroma deemphasis",
+                fsc_hz,
+                0.5e6,
                 3.4,
-                0.5 / chroma_afc_out_frequency_half,
+                out_sample_rate_hz,
             )?))
         } else {
             None
@@ -548,8 +586,10 @@ impl DecoderSpec {
 
         let chroma_filter_audio_notch = if decoder_params.chroma_audio_notch_freq > f64::EPSILON {
             Some(biquad_sos(iirnotch(
-                decoder_params.chroma_audio_notch_freq / freq_hz_half,
+                "chroma_audio_notch_freq",
+                decoder_params.chroma_audio_notch_freq,
                 CHROMA_AUDIO_NOTCH_Q,
+                freq_hz,
             )?))
         } else {
             None
@@ -561,11 +601,13 @@ impl DecoderSpec {
         let chroma_burst_block_fft_gain = rf_write_chroma
             .then(|| -> Result<Vec<f32>> {
                 let burst_bandpass = butter_sos(
+                    "chroma_bpf",
                     decoder_params.chroma_bpf_order,
                     &[
-                        decoder_params.chroma_bpf_lower / freq_hz_half,
-                        decoder_params.chroma_bpf_upper / freq_hz_half,
+                        decoder_params.chroma_bpf_lower,
+                        decoder_params.chroma_bpf_upper,
                     ],
+                    freq_hz,
                     FilterBandType::Bandpass,
                 )?;
                 let mut gain: Vec<f64> = sosfiltfft(&burst_bandpass, blocklen)[..blocklen / 2 + 1]
@@ -625,10 +667,11 @@ impl DecoderSpec {
         // phase noise, which the multiplication amplifies.
         let secam_under_filter = carrier_mult
             .map(|_| {
-                let nyquist = tbc_sample_rate / 2.0;
                 butter_sos(
+                    "the SECAM under carrier band-pass",
                     3,
-                    &[550e3 / nyquist, 1300e3 / nyquist],
+                    &[550e3, 1300e3],
+                    tbc_sample_rate,
                     FilterBandType::Bandpass,
                 )
             })
@@ -906,12 +949,126 @@ fn gen_wave_at_frequency(
         .collect()
 }
 
-fn iirnotch(w0: f64, q: f64) -> Result<([f64; 3], [f64; 3])> {
-    if !(0.0 < w0 && w0 < 1.0) {
-        bail!("notch frequency must be greater than 0 and less than Nyquist");
+/// A frequency in hertz as megahertz with hertz resolution, for messages.
+fn mhz(hz: f64) -> f64 {
+    hz.round() / 1e6
+}
+
+/// Critical frequencies of a digital filter in half-cycles per sample, from
+/// the `cutoffs_hz` of `what` (one, or a band's low and high edge) on a
+/// signal sampled at `sample_rate_hz`. Each must lie above zero and below
+/// the Nyquist frequency, and a band's low edge below its high edge, for
+/// the filter to exist.
+fn digital_cutoffs(what: &str, cutoffs_hz: &[f64], sample_rate_hz: f64) -> Result<Vec<f64>> {
+    let nyquist_hz = sample_rate_hz / 2.0;
+    for &cutoff in cutoffs_hz {
+        if cutoff.is_nan() || cutoff <= 0.0 {
+            bail!("{what}: a cutoff of {} MHz is not above 0", mhz(cutoff));
+        }
+        if cutoff >= nyquist_hz {
+            bail!(
+                "{what}: a cutoff of {} MHz is not below the Nyquist frequency of {} MHz at the {} MHz sample rate",
+                mhz(cutoff),
+                mhz(nyquist_hz),
+                mhz(sample_rate_hz)
+            );
+        }
     }
-    if q <= 0.0 {
-        bail!("notch Q must be positive");
+    if let [low, high] = cutoffs_hz {
+        if low >= high {
+            bail!(
+                "{what}: the band's low edge of {} MHz is not below its high edge of {} MHz",
+                mhz(*low),
+                mhz(*high)
+            );
+        }
+    }
+    Ok(cutoffs_hz
+        .iter()
+        .map(|cutoff| cutoff / nyquist_hz)
+        .collect())
+}
+
+/// Butterworth filter of `order` with the `cutoffs_hz` of `what` (one for a
+/// low- or high-pass, the band edges for a band-pass) on a signal sampled at
+/// `sample_rate_hz`, as second-order sections.
+fn butter_sos(
+    what: &str,
+    order: usize,
+    cutoffs_hz: &[f64],
+    sample_rate_hz: f64,
+    band_type: FilterBandType,
+) -> Result<Vec<Sos<f64>>> {
+    use sci_rs::signal::filter::design::{butter_dyn, DigitalFilter, FilterOutputType};
+
+    let wn = butter_cutoffs(what, order, cutoffs_hz, sample_rate_hz)?;
+    match butter_dyn::<f64>(
+        order,
+        wn,
+        Some(band_type),
+        Some(false),
+        Some(FilterOutputType::Sos),
+        None,
+    ) {
+        DigitalFilter::Sos(sos) => Ok(sos.sos),
+        _ => unreachable!("the Butterworth design returns the representation asked for"),
+    }
+}
+
+/// [`butter_sos`] as (b, a) taps.
+fn butter_ba(
+    what: &str,
+    order: usize,
+    cutoffs_hz: &[f64],
+    sample_rate_hz: f64,
+    band_type: FilterBandType,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    use sci_rs::signal::filter::design::{butter_dyn, DigitalFilter, FilterOutputType};
+
+    let wn = butter_cutoffs(what, order, cutoffs_hz, sample_rate_hz)?;
+    match butter_dyn::<f64>(
+        order,
+        wn,
+        Some(band_type),
+        Some(false),
+        Some(FilterOutputType::Ba),
+        None,
+    ) {
+        DigitalFilter::Ba(mut ba) => {
+            while ba.b.len() > 1
+                && ba.a.len() > 1
+                && ba.b.last().is_some_and(|value| value.abs() <= f64::EPSILON)
+                && ba.a.last().is_some_and(|value| value.abs() <= f64::EPSILON)
+            {
+                ba.b.pop();
+                ba.a.pop();
+            }
+            Ok((ba.b, ba.a))
+        }
+        _ => unreachable!("the Butterworth design returns the representation asked for"),
+    }
+}
+
+/// The Butterworth designs' checked inputs: an order of at least one and the
+/// digital cutoffs.
+fn butter_cutoffs(
+    what: &str,
+    order: usize,
+    cutoffs_hz: &[f64],
+    sample_rate_hz: f64,
+) -> Result<Vec<f64>> {
+    if order == 0 {
+        bail!("{what}: a filter order of 0 designs no filter");
+    }
+    digital_cutoffs(what, cutoffs_hz, sample_rate_hz)
+}
+
+/// Notch of quality factor `q` at the `freq_hz` of `what` on a signal
+/// sampled at `sample_rate_hz`, as (b, a) taps.
+fn iirnotch(what: &str, freq_hz: f64, q: f64, sample_rate_hz: f64) -> Result<([f64; 3], [f64; 3])> {
+    let w0 = digital_cutoffs(what, &[freq_hz], sample_rate_hz)?[0];
+    if q.is_nan() || q <= 0.0 {
+        bail!("{what}: a notch Q of {q} is not positive");
     }
 
     let w0_radians = std::f64::consts::PI * w0;
@@ -1040,24 +1197,39 @@ fn bilinear(b: &[f64], a: &[f64], fs: f64) -> (Vec<f64>, Vec<f64>) {
     normalize(&numerator, &denominator)
 }
 
-/// Convert an analog prototype filter to a digital BA transfer function.
-fn biquad_transform(b: &[f64], a: &[f64], wn: f64) -> Result<(Vec<f64>, Vec<f64>)> {
-    if !(0.0..=1.0).contains(&wn) {
-        bail!("Digital filter critical frequencies must be 0 <= Wn <= 1");
-    }
+/// Convert an analog prototype filter to a digital BA transfer function at
+/// the critical frequency `wn`, in half-cycles per sample within (0, 1).
+fn biquad_transform(b: &[f64], a: &[f64], wn: f64) -> (Vec<f64>, Vec<f64>) {
+    assert!(
+        0.0 < wn && wn < 1.0,
+        "the critical frequency was checked against the signal"
+    );
     let fs = 2.0;
     let warped = 2.0 * fs * (std::f64::consts::PI * wn / fs).tan();
 
     // Shift frequency
     let (b, a) = lp2lp(b, a, warped);
     // Find discrete equivalent
-    let (b, a) = bilinear(&b, &a, fs);
-    Ok((b, a))
+    bilinear(&b, &a, fs)
 }
 
-/// Digital biquad peaking filter of `db_gain` at `wn` over the bandwidth
-/// `bw`, both in half-cycles per sample (BA output).
-fn peaking(wn: f64, db_gain: f64, bw: f64) -> Result<(Vec<f64>, Vec<f64>)> {
+/// Digital biquad peaking filter of `db_gain` at the `freq_hz` of `what`
+/// over `bandwidth_hz`, on a signal sampled at `sample_rate_hz` (BA output).
+fn peaking(
+    what: &str,
+    freq_hz: f64,
+    bandwidth_hz: f64,
+    db_gain: f64,
+    sample_rate_hz: f64,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let wn = digital_cutoffs(what, &[freq_hz], sample_rate_hz)?[0];
+    if bandwidth_hz.is_nan() || bandwidth_hz <= 0.0 {
+        bail!(
+            "{what}: a bandwidth of {} MHz is not above 0",
+            mhz(bandwidth_hz)
+        );
+    }
+    let bw = bandwidth_hz / (sample_rate_hz / 2.0);
     let q = 1.0 / (2.0 * (std::f64::consts::LN_2 / 2.0 * bw).sinh());
 
     let (az, ap) = {
@@ -1073,19 +1245,31 @@ fn peaking(wn: f64, db_gain: f64, bw: f64) -> Result<(Vec<f64>, Vec<f64>)> {
     let b = [1.0, az / q, 1.0];
     let a = [1.0, 1.0 / (ap * q), 1.0];
 
-    biquad_transform(&b, &a, wn)
+    Ok(biquad_transform(&b, &a, wn))
 }
 
-/// Biquad shelving filter of `dbgain` with its midpoint at `f0` Hz and the
-/// quality factor `q`, for a signal sampled at `fs` Hz, as (b, a) taps.
-fn gen_shelf(f0: f64, dbgain: f64, shelf_type: ShelfKind, fs: f64, q: f64) -> ([f64; 3], [f64; 3]) {
+/// Biquad shelving filter of `dbgain` with its midpoint at the `f0` Hz of
+/// `what` and the quality factor `q`, for a signal sampled at `fs` Hz, as
+/// (b, a) taps.
+fn gen_shelf(
+    what: &str,
+    f0: f64,
+    dbgain: f64,
+    shelf_type: ShelfKind,
+    fs: f64,
+    q: f64,
+) -> Result<([f64; 3], [f64; 3])> {
+    digital_cutoffs(what, &[f0], fs)?;
+    if q.is_nan() || q <= 0.0 {
+        bail!("{what}: a Q of {q} is not positive");
+    }
     let a = 10.0_f64.powf(dbgain / 40.0);
     let w0 = std::f64::consts::TAU * (f0 / fs);
     let alpha = w0.sin() / (2.0 * q);
     let cosw0 = w0.cos();
     let asquared = a.sqrt();
 
-    match shelf_type {
+    Ok(match shelf_type {
         ShelfKind::Low => (
             [
                 a * ((a + 1.0) - (a - 1.0) * cosw0 + 2.0 * asquared * alpha),
@@ -1110,54 +1294,17 @@ fn gen_shelf(f0: f64, dbgain: f64, shelf_type: ShelfKind, fs: f64, q: f64) -> ([
                 (a + 1.0) - (a - 1.0) * cosw0 - 2.0 * asquared * alpha,
             ],
         ),
-    }
+    })
 }
 
-fn butter_ba(
-    order: usize,
-    wn: &[f64],
-    band_type: FilterBandType,
-    fs: Option<f64>,
-) -> Result<(Vec<f64>, Vec<f64>)> {
-    use sci_rs::signal::filter::design::{butter_dyn, DigitalFilter, FilterOutputType};
-
-    let filter = butter_dyn::<f64>(
-        order,
-        wn.to_vec(),
-        Some(band_type),
-        Some(false),
-        Some(FilterOutputType::Ba),
-        fs,
+/// Butterworth order and natural frequency in Hz for a digital low-pass of at
+/// most `gpass` dB loss at the passband edge `wp` and at least `gstop` dB at
+/// the stopband edge `ws`, both in Hz below the Nyquist frequency of `fs`.
+fn buttord(wp: f64, ws: f64, gpass: f64, gstop: f64, fs: f64) -> (usize, f64) {
+    assert!(
+        0.0 < gpass && gpass < gstop,
+        "the passband loss is positive and below the stopband loss"
     );
-
-    match filter {
-        DigitalFilter::Ba(mut ba) => {
-            while ba.b.len() > 1
-                && ba.a.len() > 1
-                && ba.b.last().is_some_and(|value| value.abs() <= f64::EPSILON)
-                && ba.a.last().is_some_and(|value| value.abs() <= f64::EPSILON)
-            {
-                ba.b.pop();
-                ba.a.pop();
-            }
-            Ok((ba.b, ba.a))
-        }
-        _ => bail!("sci-rs returned an unexpected Butterworth BA representation"),
-    }
-}
-
-/// Butterworth order selection for digital low-pass filters where the scalar
-/// passband is below the stopband.
-fn buttord(wp: f64, ws: f64, gpass: f64, gstop: f64, fs: f64) -> Result<(usize, f64)> {
-    if gpass <= 0.0 {
-        bail!("gpass should be larger than 0.0");
-    }
-    if gstop <= 0.0 {
-        bail!("gstop should be larger than 0.0");
-    }
-    if gpass > gstop {
-        bail!("gpass should be smaller than gstop");
-    }
 
     // fs given: normalize edges to half-cycles/sample.
     let wp = 2.0 * wp / fs;
@@ -1191,24 +1338,30 @@ fn buttord(wp: f64, ws: f64, gpass: f64, gstop: f64, fs: f64) -> Result<(usize, 
     let wn = wn.atan() * 2.0 / std::f64::consts::PI;
     let wn = wn * fs / 2.0;
 
-    Ok((ord, wn))
+    (ord, wn)
 }
 
+/// Butterworth order, capped at `order_limit`, and natural frequency in Hz
+/// of the low-pass of 3 dB loss at `passband` and 30 dB at `stopband`, both
+/// in Hz, on a signal sampled at `samp_rate` Hz. The edges are the `what`
+/// the caller designs for, checked against the signal here.
 fn design_filter(
+    what: &str,
     samp_rate: f64,
     passband: f64,
     stopband: f64,
     order_limit: usize,
 ) -> Result<(usize, f64)> {
-    let max_loss_passband = 3.0; // The maximum loss allowed in the passband
-    let min_loss_stopband = 30.0; // The minimum loss allowed in the stopband
+    digital_cutoffs(what, &[passband, stopband], samp_rate)?;
+    let max_loss_passband = 3.0;
+    let min_loss_stopband = 30.0;
     let (mut order, normal_cutoff) = buttord(
         passband,
         stopband,
         max_loss_passband,
         min_loss_stopband,
         samp_rate,
-    )?;
+    );
     if order > order_limit {
         tracing::warn!(
             "Limiting order of the filter from {} to {}",
@@ -1220,38 +1373,42 @@ fn design_filter(
     Ok((order, normal_cutoff))
 }
 
-/// Butterworth lowpass designed directly as second-order sections. `butter_sos`
-/// takes no `fs`, and `butter_dyn` rescales `wn` by `2/fs` when one is supplied
-/// (see sci-rs `iirfilter`), so pre-normalizing the cutoff to half-cycles/sample
-/// and passing no `fs` yields the identical filter.
+/// Butterworth low-pass of 3 dB loss at the `cutoff` Hz of `what` and 30 dB
+/// `transition_width` Hz above it, of at most `order_limit`, as second-order
+/// sections.
 fn iir_lowpass_sos(
+    what: &str,
     samp_rate: f64,
     cutoff: f64,
     transition_width: f64,
     order_limit: usize,
 ) -> Result<Vec<Sos<f64>>> {
     let stopband = cutoff + transition_width;
-    let (order, normal_cutoff) = design_filter(samp_rate, cutoff, stopband, order_limit)?;
+    let (order, normal_cutoff) = design_filter(what, samp_rate, cutoff, stopband, order_limit)?;
     butter_sos(
+        what,
         order,
-        &[2.0 * normal_cutoff / samp_rate],
+        &[normal_cutoff],
+        samp_rate,
         FilterBandType::Lowpass,
     )
 }
 
-/// Butterworth highpass designed directly as second-order sections; see
-/// [`iir_lowpass_sos`].
+/// Butterworth high-pass designed like [`iir_lowpass_sos`].
 fn iir_highpass_sos(
+    what: &str,
     samp_rate: f64,
     cutoff: f64,
     transition_width: f64,
     order_limit: usize,
 ) -> Result<Vec<Sos<f64>>> {
     let stopband = cutoff + transition_width;
-    let (order, normal_cutoff) = design_filter(samp_rate, cutoff, stopband, order_limit)?;
+    let (order, normal_cutoff) = design_filter(what, samp_rate, cutoff, stopband, order_limit)?;
     butter_sos(
+        what,
         order,
-        &[2.0 * normal_cutoff / samp_rate],
+        &[normal_cutoff],
+        samp_rate,
         FilterBandType::Highpass,
     )
 }
@@ -1415,18 +1572,31 @@ fn gen_video_main_deemp_fft(
     deemph: &DeemphasisParams,
     freq_hz: f64,
     block_len: usize,
-) -> Vec<Complex64> {
-    let (ataps, btaps) = gen_shelf(deemph.mid, deemph.gain, ShelfKind::High, freq_hz, deemph.q);
-    filtfft(&btaps, &ataps, block_len, false)
+) -> Result<Vec<Complex64>> {
+    let (ataps, btaps) = gen_shelf(
+        "deemph.mid",
+        deemph.mid,
+        deemph.gain,
+        ShelfKind::High,
+        freq_hz,
+        deemph.q,
+    )?;
+    Ok(filtfft(&btaps, &ataps, block_len, false))
 }
 
 fn gen_video_lpf(
     corner_freq: f64,
     order: usize,
-    nyquist_hz: f64,
+    sample_rate_hz: f64,
     block_len: usize,
 ) -> Result<Vec<f64>> {
-    let sos = butter_sos(order, &[corner_freq / nyquist_hz], FilterBandType::Lowpass)?;
+    let sos = butter_sos(
+        "video_lpf_freq",
+        order,
+        &[corner_freq],
+        sample_rate_hz,
+        FilterBandType::Lowpass,
+    )?;
     let mut full = abs_complex_owned(sosfiltfft(&sos, block_len));
     full.truncate(block_len / 2 + 1);
     Ok(full)
@@ -1434,37 +1604,37 @@ fn gen_video_lpf(
 
 fn gen_nonlinear_bandpass(
     nonlinear: &NonlinearParams,
-    nyquist_hz: f64,
+    sample_rate_hz: f64,
     block_len: usize,
 ) -> Result<Vec<Complex64>> {
     let (b, a) = if let Some(upper_freq) = nonlinear.bandpass_upper {
         butter_ba(
+            "nonlinear.highpass_freq and bandpass_upper",
             nonlinear.bandpass_order,
-            &[
-                nonlinear.highpass_freq / nyquist_hz,
-                upper_freq / nyquist_hz,
-            ],
+            &[nonlinear.highpass_freq, upper_freq],
+            sample_rate_hz,
             FilterBandType::Bandpass,
-            None,
         )?
     } else {
         butter_ba(
+            "nonlinear.highpass_freq",
             nonlinear.bandpass_order,
-            &[nonlinear.highpass_freq / nyquist_hz],
+            &[nonlinear.highpass_freq],
+            sample_rate_hz,
             FilterBandType::Highpass,
-            None,
         )?
     };
     Ok(filtfft(&b, &a, block_len, false))
 }
 
 fn gen_fft_notch(
+    what: &str,
     notch_freq: f64,
     notch_q: f64,
-    nyquist_hz: f64,
+    sample_rate_hz: f64,
     block_len: usize,
 ) -> Result<Vec<Complex64>> {
-    let (b, a) = ba_to_vec(iirnotch(notch_freq / nyquist_hz, notch_q)?);
+    let (b, a) = ba_to_vec(iirnotch(what, notch_freq, notch_q, sample_rate_hz)?);
     Ok(filtfft(&b, &a, block_len, true))
 }
 
@@ -1501,7 +1671,7 @@ fn gen_custom_video_filters(
     filter_list: &[VideoLumaFilter],
     freq_hz: f64,
     block_len: usize,
-) -> Vec<Complex64> {
+) -> Result<Vec<Complex64>> {
     let mut ret = vec![Complex64::new(1.0, 0.0); block_len / 2 + 1];
     for filter in filter_list {
         match filter {
@@ -1518,13 +1688,20 @@ fn gen_custom_video_filters(
                 midfreq,
                 q,
             } => {
-                let (b, a) = ba_to_vec(gen_shelf(*midfreq, *gain, *shelf_kind, freq_hz / 2.0, *q));
+                let (b, a) = ba_to_vec(gen_shelf(
+                    "video_custom_luma_filters",
+                    *midfreq,
+                    *gain,
+                    *shelf_kind,
+                    freq_hz / 2.0,
+                    *q,
+                )?);
                 let fft = filtfft(&b, &a, block_len, false);
                 ret = multiply(&ret, &fft);
             }
         }
     }
-    ret
+    Ok(ret)
 }
 
 fn firwin_lowpass(numtaps: usize, cutoff_norm_to_nyquist: f64) -> Vec<f64> {
