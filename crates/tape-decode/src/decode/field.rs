@@ -587,8 +587,13 @@ fn burst_phase_trend(reliable: &[(usize, f32)], stride: usize, at: usize) -> f64
 
 /// Line locations refined from the burst phase, or `None` when burst hsync
 /// refinement is disabled, the color killer blanks the field or the field's
-/// bursts carry no timing. The lines with a reliable burst are refined by
-/// its departure from the trend; the others keep their hsync locations.
+/// bursts carry no timing. A reliable burst's departure from the trend is
+/// the line's hsync timing error together with the burst's own phase
+/// noise, which the field tells apart: the true line spacing varies slowly,
+/// so the second differences of the line grid are noise, and the lines are
+/// moved by the share of their departures that minimizes them, the
+/// least-squares estimate of the hsync's part. The other lines keep their
+/// hsync locations.
 fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Vec<f64>> {
     // A burst this far below the field's median is blanked or in a dropout.
     const RELIABLE_MAGNITUDE_RATIO: f32 = 0.5;
@@ -596,6 +601,10 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     // timing rather than noise: random phases give about zero, a jitter of
     // 30 degrees rms 0.87.
     const MIN_COHERENCE: f64 = 0.5;
+    // A correction this many MADs beyond the field's median is a burst the
+    // trend does not describe (the other head's across the head switch, a
+    // phase step), not the line's timing.
+    const OUTLIER_MADS: f64 = 5.0;
 
     if spec.rf_disable_burst_hsync {
         return None;
@@ -649,10 +658,43 @@ fn burst_refined_linelocs(field: &DecodedField, spec: &DecoderSpec) -> Option<Ve
     if cos.hypot(sin) < MIN_COHERENCE * departures.len() as f64 {
         return None;
     }
-    for (line, departure) in departures {
-        let line_adjust = departure / 360.0 * carrier_ratio;
+    // Each reliable line's correction, in input samples.
+    let mut corrections = vec![0.0f64; linelocs.len()];
+    for &(line, departure) in &departures {
         let scale = (linelocs[line + 1] - linelocs[line]) / field.outlinelen as f64;
-        linelocs[line] += line_adjust * scale;
+        corrections[line] = departure / 360.0 * carrier_ratio * scale;
+    }
+    let mut magnitudes: Vec<f64> = departures
+        .iter()
+        .map(|&(line, _)| corrections[line].abs())
+        .collect();
+    let median = median_from_values(&mut magnitudes);
+    let mut deviations: Vec<f64> = magnitudes
+        .iter()
+        .map(|magnitude| (magnitude - median).abs())
+        .collect();
+    let limit = median + OUTLIER_MADS * median_from_values(&mut deviations);
+    for &(line, _) in &departures {
+        if corrections[line].abs() > limit {
+            corrections[line] = 0.0;
+        }
+    }
+    // The gain that minimizes the second differences of the corrected grid
+    // over the refined lines.
+    let (first, last) = (departures.first()?.0, departures.last()?.0);
+    let (mut cross, mut energy) = (0.0f64, 0.0f64);
+    for line in first..last.saturating_sub(1) {
+        let grid = linelocs[line + 2] - 2.0 * linelocs[line + 1] + linelocs[line];
+        let correction = corrections[line + 2] - 2.0 * corrections[line + 1] + corrections[line];
+        cross += grid * correction;
+        energy += correction * correction;
+    }
+    if energy == 0.0 {
+        return None;
+    }
+    let gain = (-cross / energy).clamp(0.0, 1.0);
+    for (location, correction) in linelocs.iter_mut().zip(&corrections) {
+        *location += gain * correction;
     }
     Some(linelocs)
 }
