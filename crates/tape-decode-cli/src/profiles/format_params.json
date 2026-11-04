@@ -298,7 +298,7 @@
         {
           "gain": 4.0,
           "kind": "Shelf",
-          "midfreq": 2000000.0,
+          "midfreq": 4000000.0,
           "q": 0.4967045,
           "shelf_kind": "High"
         }

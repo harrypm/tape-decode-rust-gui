@@ -1842,7 +1842,7 @@ fn gen_custom_video_filters(
                     *midfreq,
                     *gain,
                     *shelf_kind,
-                    freq_hz / 2.0,
+                    freq_hz,
                     *q,
                 )?);
                 let fft = filtfft(&b, &a, block_len, false);
