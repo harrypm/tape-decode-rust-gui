@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::decode::{
-    butter_sos, gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, SECAM_BLOCK_BAND,
+    gen_chroma_heterodyne, ChromaFftFilter, ChromaSepClass, SECAM_BLOCK_BAND,
     SECAM_BLOCK_CENTRE, SECAM_LO_TRIM_LIMIT_HZ, BLOCKCUT, BLOCKCUT_END, BLOCKSIZE,
 };
 use crate::optimized::{narrow_sos, SincLut};
