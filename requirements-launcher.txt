@@ -1,1 +1,9 @@
-PyQt6>=6.6,<7
+# PyQt6-Qt6 6.12.0 wheels break PyInstaller's macOS onefile extraction:
+# the new Qt framework layout ships QtQuickControls2Macos.framework with a
+# file/symlink duplicate that fails self-test extraction ("File already exists
+# but should not" / "Failed to create symbolic link", exit 255) on both x86_64
+# and arm64. 6.11.x is the last combination verified green on all six CI jobs
+# (v4.1.0, run 37978873053: PyQt6 6.11.0 + PyQt6-Qt6 6.11.2 + PyInstaller 6.22.3).
+# Revisit when PyInstaller gains a fix for the 6.12 wheel layout.
+PyQt6>=6.6,<6.12
+PyQt6-Qt6>=6.6,<6.12
