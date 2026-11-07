@@ -35,16 +35,3 @@
   remarks about what some other implementation does. That story belongs in
   the commit body.
 - One commit per logical change.
-
-## Porting from vhs-decode
-
-- Port the algorithmic intent, never the Python shape; where upstream is
-  clumsy or handles scenarios that never happen, do it the clean way under
-  the general practices above.
-- Keep upstream bugs unless a fix would stay within the compare tolerance of
-  upstream's own output. A deliberate deviation is documented in the commit
-  body, naming the upstream commit, and nowhere in the code.
-- No upstream CLI compatibility; each ported upstream option gets its clap
-  shape, and options upstream has made dead are removed rather than kept.
-- Name the covered upstream commits (hash and subject) in every porting
-  commit, and keep the README's upstream commit link current.
