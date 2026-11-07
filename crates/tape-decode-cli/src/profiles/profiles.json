@@ -61,35 +61,11 @@
   },
   "MESECAM_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732446.875,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 732446.875
       }
     },
     "sys_params": {
@@ -98,35 +74,11 @@
   },
   "MESECAM_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_conversion_lo": 5060571.875,
         "chroma_rotation": null,
-        "color_under_carrier": 732446.875,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 732446.875
       }
     },
     "sys_params": {
@@ -135,41 +87,13 @@
   },
   "MPAL_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 631337.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 6000000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 631337.0
       }
     },
     "decode_options": {
@@ -181,41 +105,13 @@
   },
   "MPAL_VHS_EP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_EP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 631337.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6400000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5800000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 631337.0
       }
     },
     "decode_options": {
@@ -227,41 +123,13 @@
   },
   "MPAL_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 631337.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5900000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 631337.0
       }
     },
     "decode_options": {
@@ -273,41 +141,13 @@
   },
   "NLINHA_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 6000000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -316,41 +156,13 @@
   },
   "NLINHA_VHS_EP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_EP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6400000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5800000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -359,41 +171,13 @@
   },
   "NLINHA_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5900000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -547,21 +331,13 @@
   },
   "NTSC_SVHS": {
     "format": {
-      "base": "SVHS",
+      "base": "SVHS_525",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -572,21 +348,13 @@
   },
   "NTSC_SVHS_ET": {
     "format": {
-      "base": "SVHS_ET",
+      "base": "SVHS_ET_525",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -685,41 +453,13 @@
   },
   "NTSC_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 6000000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -728,41 +468,13 @@
   },
   "NTSC_VHS_EP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_EP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6400000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5800000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -771,41 +483,13 @@
   },
   "NTSC_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_525_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 629370.6293706294
-        },
-        "chroma_bpf_upper": 1200000.0,
         "chroma_rotation": [
           -1,
           1
         ],
-        "color_under_carrier": 629370.6293706294,
-        "fm_audio_channels": {
-          "channel_0_freq": 1300000.0,
-          "channel_1_freq": 1700000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": {
-          "high": 6500000.0,
-          "low": 500000.0,
-          "order": 8
-        },
-        "video_hpf_extra": 1200000.0,
-        "video_hpf_extra_order": 20,
-        "video_lpf_extra": 5900000.0,
-        "video_lpf_extra_order": 25,
-        "video_lpf_freq": 6600000.0,
-        "video_lpf_order": 9,
-        "video_lpf_supergauss": true,
-        "video_rf_peak": {
-          "freq": 3900000.0
-        }
+        "color_under_carrier": 629370.6293706294
       }
     },
     "sys_params": {
@@ -990,24 +674,13 @@
   },
   "PAL_SVHS": {
     "format": {
-      "base": "SVHS",
+      "base": "SVHS_625",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 626953.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "highpass_limit_l": -250000.0
-        }
+        "color_under_carrier": 626953.0
       }
     },
     "sys_params": {
@@ -1018,24 +691,13 @@
   },
   "PAL_SVHS_ET": {
     "format": {
-      "base": "SVHS_ET",
+      "base": "SVHS_ET_625",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 626953.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "highpass_limit_l": -250000.0
-        }
+        "color_under_carrier": 626953.0
       }
     },
     "sys_params": {
@@ -1174,37 +836,13 @@
   },
   "PAL_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 626953.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 626953.0
       }
     },
     "sys_params": {
@@ -1213,37 +851,13 @@
   },
   "PAL_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
-        "chroma_bpf_upper": 1300000.0,
         "chroma_rotation": [
           0,
           -1
         ],
-        "color_under_carrier": 626953.0,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 626953.0
       }
     },
     "sys_params": {
@@ -1334,36 +948,12 @@
   },
   "SECAM_VHS": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
         "chroma_bpf_lower": 350000.0,
-        "chroma_bpf_upper": 1300000.0,
         "chroma_carrier_mult": 4,
         "chroma_rotation": null,
-        "color_under_carrier": 1082031.25,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.06,
-          "scaling_1": 0.5,
-          "use_sub_deemphasis": false
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 1082031.25
       }
     },
     "sys_params": {
@@ -1372,36 +962,12 @@
   },
   "SECAM_VHS_LP": {
     "format": {
-      "base": "VHS",
+      "base": "VHS_625_LP",
       "decoder_params": {
-        "boost_ramp": {
-          "start_freq": 626953.0
-        },
         "chroma_bpf_lower": 350000.0,
-        "chroma_bpf_upper": 1300000.0,
         "chroma_carrier_mult": 4,
         "chroma_rotation": null,
-        "color_under_carrier": 1082031.25,
-        "fm_audio_channels": {
-          "channel_0_freq": 1400000.0,
-          "channel_1_freq": 1800000.0
-        },
-        "nonlinear": {
-          "exp_scaling": 0.12,
-          "scaling_1": 0.1,
-          "use_sub_deemphasis": true
-        },
-        "video_bpf": null,
-        "video_hpf_extra": 1320000.0,
-        "video_hpf_extra_order": 12,
-        "video_lpf_extra": 5910000.0,
-        "video_lpf_extra_order": 20,
-        "video_lpf_freq": 3400000.0,
-        "video_lpf_order": 6,
-        "video_lpf_supergauss": false,
-        "video_rf_peak": {
-          "freq": 4300000.0
-        }
+        "color_under_carrier": 1082031.25
       }
     },
     "sys_params": {
