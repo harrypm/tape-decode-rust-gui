@@ -110,6 +110,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -uo pipefail
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           _st=$?

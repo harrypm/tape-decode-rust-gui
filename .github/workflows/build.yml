@@ -166,9 +166,22 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           $ErrorActionPreference = 'Stop'
-          $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+          # A host Qt installation must not leak into the bundle: neither
+          # through the environment nor through Qt DLLs next to the executable.
+          $hostPlugins = Join-Path $env:RUNNER_TEMP 'host-qt\plugins'
+          New-Item -ItemType Directory -Force -Path (Join-Path $hostPlugins 'platforms') | Out-Null
+          $env:QT_PLUGIN_PATH = $hostPlugins
+          $env:QT_QPA_PLATFORM_PLUGIN_PATH = Join-Path $hostPlugins 'platforms'
+          $foreignDlls = 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll' | ForEach-Object { Join-Path 'dist' $_ }
+          $foreignDlls | ForEach-Object { Set-Content -Path $_ -Value 'not the bundled Qt' }
+          try {
+            $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+            $selftestExit = $LASTEXITCODE
+          } finally {
+            $foreignDlls | Remove-Item -Force
+          }
           $out | Write-Output
-          if ($LASTEXITCODE -ne 0) { throw "selftest exited $LASTEXITCODE" }
+          if ($selftestExit -ne 0) { throw "selftest exited $selftestExit" }
           if (-not ($out -match 'SELFTEST OK')) { throw "SELFTEST OK missing from output" }
 
       - name: Verify bundled Windows icon payload + embedded EXE icon
@@ -412,6 +425,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -uo pipefail
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           ./dist/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           _st=$?
@@ -464,6 +481,10 @@ jobs:
           # Self-test the final AppImage: proves PyQt6 + Qt platform plugin +
           # the bundled tape-decode binary all work inside the shipped artifact.
           # Strict (no || true) so a broken bundle fails CI.
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
             TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
@@ -615,6 +636,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -uo pipefail
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           dist/decode-rust-gui.app/Contents/MacOS/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           _st=$?

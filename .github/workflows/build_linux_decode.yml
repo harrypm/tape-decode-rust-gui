@@ -123,6 +123,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -uo pipefail
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           ./dist/decode-rust-gui --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1
           _st=$?
@@ -175,6 +179,10 @@ jobs:
           # Self-test the final AppImage: proves PyQt6 + Qt platform plugin +
           # the bundled tape-decode binary all work inside the shipped artifact.
           # Strict (no || true) so a broken bundle fails CI.
+          # A host Qt installation must not leak into the bundle.
+          mkdir -p "$RUNNER_TEMP/host-qt/plugins/platforms"
+          export QT_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$RUNNER_TEMP/host-qt/plugins/platforms"
           set +e
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
             TAPE_DECODE_MICROARCH=x86-64-v1 QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "./${APPIMAGE_NAME}" --selftest > /tmp/decode-rust-gui_selftest.txt 2>&1

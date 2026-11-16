@@ -9,9 +9,13 @@ passthrough). Proves the PyInstaller onefile bundle is self-contained:
    libqcocoa.dylib) from the bundle -- the exact failure mode that surfaces
    to users as "PyQt6 missing / Python required" when the plugin or the Qt6
    runtime DLLs are not bundled.
-2. The bundled Rust `tape-decode` binary resolves and runs `list-profiles`,
+2. The bundled Qt is isolated from the host: it searches for plugins only in
+   the bundle (whatever QT_PLUGIN_PATH / QT_QPA_PLATFORM_PLUGIN_PATH the host
+   sets), and programs the launcher starts get an environment with no trace
+   of the bundle.
+3. The bundled Rust `tape-decode` binary resolves and runs `list-profiles`,
    proving the decoder binary is packaged and executable.
-3. CVBS single-output profile detection works through the bundled binary
+4. CVBS single-output profile detection works through the bundled binary
    (`write-profile --out -`): CVBS format profiles (SMPTE Type C,
    Quadruplex, and the direct-composite SECAM variants -- single combined
    .tbc output) read back as composite, and a colour-under profile (VHS)
@@ -24,53 +28,56 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+from decode_runtime import bundle_dir, child_environment, isolate_qt_environment
 
 
-def _ensure_qt_plugin_path() -> None:
-    """Point Qt at the bundled platform plugins before any PyQt6 import.
+def _isolation_failures(library_paths: list[str]) -> list[str]:
+    """Check a frozen bundle against the host in both directions."""
+    bundle = bundle_dir()
+    if bundle is None:
+        return []
+    failures: list[str] = []
 
-    Mirrors the frozen-bundle block in decode_launcher.py so the selftest
-    (which does not import decode_launcher) exercises the same plugin
-    discovery the real GUI relies on -- critical on Linux, where the
-    offscreen/xcb plugins are only found via QT_QPA_PLATFORM_PLUGIN_PATH.
-    """
-    if not getattr(sys, "frozen", False):
-        return
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
-    if not base:
-        return
-    for _rel in (
-        os.path.join("PyQt6", "Qt6", "plugins"),
-        os.path.join("PyQt6", "Qt", "plugins"),
-        "plugins",
-    ):
-        _plug = os.path.join(base, _rel)
-        if os.path.isdir(os.path.join(_plug, "platforms")):
-            os.environ.setdefault(
-                "QT_QPA_PLATFORM_PLUGIN_PATH", os.path.join(_plug, "platforms")
-            )
-            os.environ.setdefault("QT_PLUGIN_PATH", _plug)
-            break
+    # Qt adds the executable's own directory itself; everything else it
+    # searches must be inside the bundle.
+    allowed = (bundle.resolve(), Path(sys.executable).resolve().parent)
+    for entry in library_paths:
+        path = Path(entry).resolve()
+        if not any(path == root or root in path.parents for root in allowed):
+            failures.append(f"Qt searches for plugins outside the bundle: {entry}")
+
+    roots = {str(bundle), str(bundle.resolve())}
+    for name, value in child_environment().items():
+        if name.startswith("_PYI_") or any(root in value for root in roots):
+            failures.append(f"child process environment exposes the bundle: {name}={value}")
+    return failures
 
 
 def run_selftest() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    _ensure_qt_plugin_path()
+    isolate_qt_environment()
     failures: list[str] = []
 
     # 1) PyQt6 bindings + Qt platform plugin load.
+    library_paths: list[str] = []
     try:
-        from PyQt6.QtCore import QCoreApplication  # noqa: F401
+        from PyQt6.QtCore import QCoreApplication
         from PyQt6.QtGui import QGuiApplication  # noqa: F401
         from PyQt6.QtWidgets import QApplication
 
         app = QApplication.instance() or QApplication(sys.argv)
         app.processEvents()
+        library_paths = list(QCoreApplication.libraryPaths())
         app.quit()
     except Exception as exc:  # noqa: BLE001
         failures.append(f"PyQt6/Qt platform plugin: {exc}")
 
-    # 2) Bundled Rust tape-decode binary resolves and runs.
+    # 2) Isolation of the bundled Qt from the host, and of the host from it.
+    failures.extend(_isolation_failures(library_paths))
+
+    # 3) Bundled Rust tape-decode binary resolves and runs.
     try:
         from decode_runtime import list_profiles
 
@@ -80,7 +87,7 @@ def run_selftest() -> int:
     except Exception as exc:  # noqa: BLE001
         failures.append(f"tape-decode binary: {exc}")
 
-    # 3) CVBS single-output profile detection via the bundled binary.
+    # 4) CVBS single-output profile detection via the bundled binary.
     try:
         from decode_runtime import profile_is_composite
 
