@@ -18,28 +18,6 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # X11 WM_CLASS instance name (the class comes from decode_launcher.py).
 export RESOURCE_NAME="decode-rust-gui"
 
-# Help PyQt6 locate its platform plugins inside the AppImage / onefile extraction.
-# PyInstaller collects them under PyQt6/Qt6/plugins when using --collect-all.
-for candidate in \
-  "${HERE}/PyQt6/Qt6/plugins" \
-  "${HERE}/usr/bin/PyQt6/Qt6/plugins" \
-  "${HERE}/usr/lib/PyQt6/Qt6/plugins" \
-  "${HERE}/plugins" ;
-do
-  if [ -d "$candidate/platforms" ]; then
-    export QT_QPA_PLATFORM_PLUGIN_PATH="$candidate/platforms:${QT_QPA_PLATFORM_PLUGIN_PATH:-}"
-    export QT_PLUGIN_PATH="$candidate:${QT_PLUGIN_PATH:-}"
-    break
-  fi
-done
-
-# Prefer xcb on X11 systems; fall back to auto (wayland/xcb) if needed.
-if [ -z "${QT_QPA_PLATFORM:-}" ]; then
-  if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    : # let Qt auto-detect, but ensure xcb is available via plugin path above
-  fi
-fi
-
 decode_rust_gui_integrate() {
   # Only when running from a real AppImage file (APPIMAGE is the file path;
   # HERE is a temporary mount that must never end up in a .desktop file).
