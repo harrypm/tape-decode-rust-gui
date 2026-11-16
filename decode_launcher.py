@@ -181,8 +181,18 @@ def _shell_join(parts: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in parts)
 
 
+def _quote_windows(part: str) -> str:
+    quoted = subprocess.list2cmdline([part])
+    if quoted == part and any(ch in part for ch in "&|<>^()%!"):
+        # cmd.exe operators are literal only inside quotes; a trailing
+        # backslash run is doubled so it does not escape the closing quote.
+        trailing_backslashes = part[len(part.rstrip("\\")) :]
+        return f'"{part}{trailing_backslashes}"'
+    return quoted
+
+
 def _shell_join_windows(parts: list[str]) -> str:
-    return subprocess.list2cmdline(parts)
+    return " ".join(_quote_windows(part) for part in parts)
 
 
 def _shell_join_platform(parts: list[str]) -> str:
@@ -342,9 +352,14 @@ def _open_terminal(
     env_exports: Optional[dict[str, str]] = None,
 ) -> None:
     if os.name == "nt":
+        # cmd /k keeps the console open after the tool exits, so its output
+        # and errors stay readable. With /s the outer quotes are stripped and
+        # the rest runs exactly as typed at a prompt.
+        comspec = os.environ.get("ComSpec", "cmd.exe")
+        command_line = f'"{comspec}" /d /s /k "{_shell_join_windows(command_parts)}"'
         with host_dll_search_path():
             subprocess.Popen(
-                command_parts,
+                command_line,
                 cwd=str(working_directory),
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
                 env=child_environment(env_exports),
