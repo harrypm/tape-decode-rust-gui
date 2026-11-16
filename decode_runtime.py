@@ -145,7 +145,12 @@ def host_dll_search_path() -> Iterator[None]:
         kernel32.SetDllDirectoryW(str(bundle))
 
 
-def _binary_seems_runnable(p: Path, timeout_seconds: float = 4.0) -> bool:
+# Completed probe results by (binary path, mtime); a probe that timed out is
+# retried on the next resolution.
+_probe_results: dict[tuple[str, int], bool] = {}
+
+
+def _binary_seems_runnable(p: Path) -> bool:
     """Probe whether a candidate tape-decode binary can actually execute
     'list-profiles' on the current host without an illegal-instruction crash.
 
@@ -153,23 +158,29 @@ def _binary_seems_runnable(p: Path, timeout_seconds: float = 4.0) -> bool:
     required CPU features are not available locally.
     """
     try:
+        key = (str(p), p.stat().st_mtime_ns)
+    except OSError:
+        return False
+    cached = _probe_results.get(key)
+    if cached is not None:
+        return cached
+    try:
         completed = subprocess.run(
             [str(p), "list-profiles"],
             capture_output=True,
             text=True,
-            timeout=timeout_seconds,
+            timeout=4.0,
             check=False,
             env=child_environment(),
         )
-        if completed.returncode not in (0, 1, 2):
-            return False
-        combined = (completed.stdout or "") + (completed.stderr or "")
-        low = combined.lower()
-        if any(x in low for x in ("illegal instruction", "sigill", "trace/breakpoint")):
-            return False
-        return True
     except Exception:
         return False
+    combined = ((completed.stdout or "") + (completed.stderr or "")).lower()
+    runnable = completed.returncode in (0, 1, 2) and not any(
+        x in combined for x in ("illegal instruction", "sigill", "trace/breakpoint")
+    )
+    _probe_results[key] = runnable
+    return runnable
 
 
 def _binary_name() -> str:
