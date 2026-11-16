@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import json
 import os
 import platform
@@ -8,9 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
-
-# Note: sys is already imported above; used for _MEIPASS and executable path discovery.
+from typing import Iterable, Iterator, Mapping, Optional, Sequence
 
 
 # x86-64 microarchitecture levels, ordered lowest to highest. These map directly
@@ -40,6 +40,111 @@ def _env_forced_level() -> str:
     return MICROARCH_AUTO
 
 
+def bundle_dir() -> Optional[Path]:
+    """Directory holding the frozen bundle's private files, or None when
+    running from source."""
+    meipass = getattr(sys, "_MEIPASS", "")
+    return Path(meipass) if meipass else None
+
+
+def _inside_bundle(entry: str, bundle: Path) -> bool:
+    if not entry:
+        return False
+    root = os.path.normcase(os.path.normpath(str(bundle)))
+    path = os.path.normcase(os.path.normpath(entry))
+    return path == root or path.startswith(root + os.sep)
+
+
+# What the host had in the variables the bundle replaces for its own Qt.
+_host_qt_environment: dict[str, Optional[str]] = {}
+
+
+def isolate_qt_environment() -> None:
+    """Make the frozen bundle's Qt load only its own libraries and plugins.
+
+    Must run before PyQt6 is imported. Does nothing when running from source.
+    """
+    bundle = bundle_dir()
+    if bundle is None or _host_qt_environment:
+        return
+    qt_root = bundle / "PyQt6" / "Qt6"
+    plugins = qt_root / "plugins"
+    replacements: dict[str, Optional[str]] = {
+        "QT_PLUGIN_PATH": str(plugins),
+        "QT_QPA_PLATFORM_PLUGIN_PATH": str(plugins / "platforms"),
+        # A host style plugin cannot load into the bundled Qt.
+        "QT_STYLE_OVERRIDE": None,
+    }
+    for name, value in replacements.items():
+        _host_qt_environment[name] = os.environ.get(name)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    if os.name == "nt":
+        # PyQt6 and the Windows loader both take a Qt6Core.dll lying next to
+        # the executable ahead of the bundled one. Once the bundled libraries
+        # are loaded by full path, every later lookup by name resolves to them.
+        qt_bin = qt_root / "bin"
+        os.environ["PATH"] = f"{qt_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+        for module in ("Qt6Core", "Qt6Gui", "Qt6Widgets"):
+            ctypes.WinDLL(str(qt_bin / f"{module}.dll"))
+
+
+def child_environment(extra: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """Environment for programs started from the launcher: the host's own,
+    without anything the frozen bundle set up for itself."""
+    env = dict(os.environ)
+    for name, value in _host_qt_environment.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    # The launcher's own X11 window identity.
+    env.pop("RESOURCE_NAME", None)
+
+    bundle = bundle_dir()
+    if bundle is not None:
+        for name in list(env):
+            # Bootloader state: a frozen program started with it would take
+            # itself for a worker of this launcher.
+            if name.startswith("_PYI_"):
+                del env[name]
+                continue
+            entries = env[name].split(os.pathsep)
+            kept = [entry for entry in entries if not _inside_bundle(entry, bundle)]
+            if len(kept) == len(entries):
+                continue
+            if kept:
+                env[name] = os.pathsep.join(kept)
+            else:
+                del env[name]
+
+    if extra:
+        env.update(extra)
+    return env
+
+
+@contextlib.contextmanager
+def host_dll_search_path() -> Iterator[None]:
+    """Create child processes with the host's DLL search path.
+
+    On Windows the frozen bootloader adds the bundle directory to the process
+    DLL search path, and child processes inherit that setting.
+    """
+    bundle = bundle_dir()
+    if os.name != "nt" or bundle is None:
+        yield
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetDllDirectoryW(None)
+    try:
+        yield
+    finally:
+        kernel32.SetDllDirectoryW(str(bundle))
+
+
 def _binary_seems_runnable(p: Path, timeout_seconds: float = 4.0) -> bool:
     """Probe whether a candidate tape-decode binary can actually execute
     'list-profiles' on the current host without an illegal-instruction crash.
@@ -54,6 +159,7 @@ def _binary_seems_runnable(p: Path, timeout_seconds: float = 4.0) -> bool:
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=child_environment(),
         )
         if completed.returncode not in (0, 1, 2):
             return False
@@ -291,7 +397,7 @@ def run_tape_decode(
     level: str = MICROARCH_AUTO,
 ) -> int:
     command = build_tape_decode_command(args, level=level)
-    return subprocess.call(command, cwd=cwd)
+    return subprocess.call(command, cwd=cwd, env=child_environment())
 
 
 def list_profiles(timeout_seconds: int = 20) -> list[str]:
@@ -302,6 +408,7 @@ def list_profiles(timeout_seconds: int = 20) -> list[str]:
         text=True,
         timeout=timeout_seconds,
         check=False,
+        env=child_environment(),
     )
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
@@ -342,6 +449,7 @@ def profile_is_composite(
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=child_environment(),
         )
     except Exception:
         return None

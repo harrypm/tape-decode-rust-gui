@@ -113,9 +113,22 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           $ErrorActionPreference = 'Stop'
-          $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+          # A host Qt installation must not leak into the bundle: neither
+          # through the environment nor through Qt DLLs next to the executable.
+          $hostPlugins = Join-Path $env:RUNNER_TEMP 'host-qt\plugins'
+          New-Item -ItemType Directory -Force -Path (Join-Path $hostPlugins 'platforms') | Out-Null
+          $env:QT_PLUGIN_PATH = $hostPlugins
+          $env:QT_QPA_PLATFORM_PLUGIN_PATH = Join-Path $hostPlugins 'platforms'
+          $foreignDlls = 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll' | ForEach-Object { Join-Path 'dist' $_ }
+          $foreignDlls | ForEach-Object { Set-Content -Path $_ -Value 'not the bundled Qt' }
+          try {
+            $out = & .\dist\decode-rust-gui.exe --selftest 2>&1
+            $selftestExit = $LASTEXITCODE
+          } finally {
+            $foreignDlls | Remove-Item -Force
+          }
           $out | Write-Output
-          if ($LASTEXITCODE -ne 0) { throw "selftest exited $LASTEXITCODE" }
+          if ($selftestExit -ne 0) { throw "selftest exited $selftestExit" }
           if (-not ($out -match 'SELFTEST OK')) { throw "SELFTEST OK missing from output" }
 
       - name: Verify bundled Windows icon payload + embedded EXE icon

@@ -12,30 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Ensure Qt platform plugins (xcb/cocoa/...) are discoverable inside
-# PyInstaller onefile bundles (critical for Linux AppImage GUI launch).
-# This must run BEFORE any PyQt6 import.
-if getattr(sys, "frozen", False):
-    _base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
-    if _base:
-        for _rel in (
-            os.path.join("PyQt6", "Qt6", "plugins"),
-            os.path.join("PyQt6", "Qt", "plugins"),
-            "plugins",
-        ):
-            _plug = os.path.join(_base, _rel)
-            if os.path.isdir(os.path.join(_plug, "platforms")):
-                os.environ.setdefault(
-                    "QT_QPA_PLATFORM_PLUGIN_PATH", os.path.join(_plug, "platforms")
-                )
-                os.environ.setdefault("QT_PLUGIN_PATH", _plug)
-                break
-
-
 from decode_runtime import (
     MICROARCH_AUTO,
     MICROARCH_LEVELS,
     build_tape_decode_command,
+    child_environment,
+    host_dll_search_path,
+    isolate_qt_environment,
     load_profiles,
     microarch_target_cpu,
     microarch_target_dir,
@@ -44,6 +27,9 @@ from decode_runtime import (
     profile_is_composite,
     resolve_tape_decode_prefix,
 )
+
+# Before any PyQt6 import: Qt reads its search paths when it is loaded.
+isolate_qt_environment()
 
 try:
     from PyQt6.QtCore import QFileInfo, Qt, QTimer, QUrl, pyqtSignal
@@ -341,7 +327,7 @@ def _open_linux_terminal(shell_command: str) -> None:
 
     for binary, command in terminal_candidates:
         if shutil.which(binary):
-            subprocess.Popen(command)
+            subprocess.Popen(command, env=child_environment())
             return
 
     raise RuntimeError(
@@ -356,27 +342,13 @@ def _open_terminal(
     env_exports: Optional[dict[str, str]] = None,
 ) -> None:
     if os.name == "nt":
-        # On Windows, a fresh console doesn't inherit any env we set here
-        # unless we mutate os.environ before Popen.
-        prior: dict[str, Optional[str]] = {}
-        if env_exports:
-            for key, value in env_exports.items():
-                prior[key] = os.environ.get(key)
-                os.environ[key] = value
-        try:
-            creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        with host_dll_search_path():
             subprocess.Popen(
                 command_parts,
                 cwd=str(working_directory),
-                creationflags=creation_flags,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                env=child_environment(env_exports),
             )
-        finally:
-            if env_exports:
-                for key, original in prior.items():
-                    if original is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = original
         return
 
     env_prefix = ""
@@ -406,7 +378,8 @@ def _open_terminal(
                 'tell application "Terminal" to activate',
                 "-e",
                 f'tell application "Terminal" to do script "{escaped}"',
-            ]
+            ],
+            env=child_environment(),
         )
         return
 
@@ -1172,7 +1145,12 @@ class DecodeLauncherWindow(QWidget):
                 command.append(str(tbc_candidate))
 
         try:
-            subprocess.Popen(command, cwd=str(self._effective_working_directory()))
+            with host_dll_search_path():
+                subprocess.Popen(
+                    command,
+                    cwd=str(self._effective_working_directory()),
+                    env=child_environment(),
+                )
         except Exception as exc:
             QMessageBox.critical(self, "Launch failed", str(exc))
 
